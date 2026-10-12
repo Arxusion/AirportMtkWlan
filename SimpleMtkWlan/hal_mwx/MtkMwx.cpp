@@ -57,6 +57,26 @@ OSDefineMetaClassAndStructors(MtkMwx, MtkHalService)
 #define PCI_PRODUCT_MEDIATEK_MT7921K   0x0608
 #define PCI_PRODUCT_MEDIATEK_MT7922    0x7922
 
+/* RX drop reason counters, reported by MtkMwx::debugPoll(). */
+#define MWX_RX_DROP_REASONS	12
+static const char *mwx_rx_drop_name[MWX_RX_DROP_REASONS];
+static uint32_t mwx_rx_drop_cnt[MWX_RX_DROP_REASONS];
+
+static void
+mwx_rx_drop_count(const char *reason)
+{
+	int i;
+
+	for (i = 0; i < MWX_RX_DROP_REASONS; i++) {
+		if (mwx_rx_drop_name[i] == NULL)
+			mwx_rx_drop_name[i] = reason;
+		if (mwx_rx_drop_name[i] == reason) {
+			mwx_rx_drop_cnt[i]++;
+			return;
+		}
+	}
+}
+
 /* Route every HAL printf through the persistent debug log. */
 #undef printf
 #define printf(x...) mtk_dbg_log(x)
@@ -415,6 +435,7 @@ struct mwx_softc {
 #define MWX_FLAG_BGSCAN			0x02
 	int			sc_coredump_cnt;
 	int8_t			sc_resetting;
+	int8_t			sc_hard_reset;	/* reload firmware on reset */
 	bool sc_detaching, sc_net_attached;
 	int8_t			sc_fw_loaded;
 
@@ -536,6 +557,7 @@ const struct mwx_rate {
 #define	DEVDEBUG(x)	((x)->sc_ic.ic_if.if_flags & IFF_DEBUG)
 
 #define MWX_RX_DROP_LOG(sc, reason, rv, rxd0, rxd1, rxd2, rxd3, rxd4) do { \
+	mwx_rx_drop_count(reason); \
 	if ((sc)->sc_rx_fill_fail < 64) { \
 		MWX_DEV_LOG((sc), \
 		    "rx drop reason=%s rv=%d rxd=%08x/%08x/%08x/%08x/%08x len=%zu\n", \
@@ -2119,8 +2141,18 @@ mwx_reset_task(void *arg)
 	if (ifp->if_flags & IFF_RUNNING)
 		mwx_stop(ifp);
 
-	if (!fatal && (ifp->if_flags & (IFF_UP | IFF_RUNNING)) == IFF_UP)
-		mwx_init(ifp);
+	if (sc->sc_hard_reset) {
+		/* mwx_init() -> mwx_preinit() does WFSYS reset + firmware load. */
+		MWX_DEV_LOG(sc, "hard reset: reloading firmware\n");
+		sc->sc_hard_reset = 0;
+		sc->sc_fw_loaded = 0;
+	}
+
+	if (!fatal && (ifp->if_flags & (IFF_UP | IFF_RUNNING)) == IFF_UP) {
+		int rv = mwx_init(ifp);
+		MWX_DEV_LOG(sc, "reset done init=%d fw_loaded=%d\n", rv,
+		    sc->sc_fw_loaded);
+	}
 	sc->sc_resetting = 0;
 	sc->sc_coredump_cnt = 0;
 }
@@ -2506,6 +2538,11 @@ mwx_queue_reset(struct mwx_softc *sc, struct mwx_queue *q)
 			bus_dmamap_unload(sc->sc_dmat, md->md_map);
 			m_freem(md->md_mbuf);
 			md->md_mbuf = NULL;
+		}
+		if (md->md_txwi != NULL) {
+			/* return TXWI (and its frame) owned by this slot */
+			mwx_txwi_put(sc, md->md_txwi);
+			md->md_txwi = NULL;
 		}
 	}
 }
@@ -2950,8 +2987,7 @@ mwx_dma_rx_process(struct mwx_softc *sc, struct mbuf_list *ml)
 		sc->sc_rx_pkt_normal_mcu += normal_mcu_count;
 		sc->sc_rx_pkt_normal += normal_count;
 		sc->sc_rx_pkt_unknown += unknown_count;
-		if (sc->sc_rx_process_events < 64 ||
-		    normal_count != 0 || unknown_count != 0) {
+		if (sc->sc_rx_process_events < 64 || unknown_count != 0) {
 			MWX_DEV_LOG(sc,
 			    "rx process event=%u notify=%u normal_mcu=%u normal=%u unknown=%u totals e=%u n=%u nmcu=%u norm=%u unk=%u\n",
 			    event_count, notify_count, normal_mcu_count,
@@ -6939,76 +6975,123 @@ void
 MtkMwx::debugPoll()
 {
 	struct mwx_softc *sc = com;
+	struct ieee80211com *ic;
 	static uint32_t polls, last_intr_calls;
+	static uint32_t last_txq_dma = 0xffffffff, last_mcu_dma = 0xffffffff;
+	static uint32_t txq_stuck, mcu_stuck, last_reset_poll;
+	static int stall_dumped;
 	uint32_t sta, ena, lp, mcu;
+	uint32_t tq_cpu, tq_dma, mq_cpu, mq_dma;
+	int verbose;
 
-	if (sc == NULL || !sc->sc_fw_loaded)
+	if (sc == NULL || !sc->sc_fw_loaded || sc->sc_resetting)
 		return;
+	ic = &sc->sc_ic;
 	polls++;
 	sta = mwx_read(sc, MT_WFDMA0_HOST_INT_STA);
 	ena = mwx_read(sc, MT_WFDMA0_HOST_INT_ENA);
 	lp = mwx_read(sc, MT_CONN_ON_LPCTL);
 	mcu = mwx_read(sc, MT_MCU_CMD);
+	tq_cpu = mwx_read(sc, sc->sc_txq.mq_regbase + MT_DMA_CPU_IDX);
+	tq_dma = mwx_read(sc, sc->sc_txq.mq_regbase + MT_DMA_DMA_IDX);
+	mq_cpu = mwx_read(sc, sc->sc_txmcuq.mq_regbase + MT_DMA_CPU_IDX);
+	mq_dma = mwx_read(sc, sc->sc_txmcuq.mq_regbase + MT_DMA_DMA_IDX);
 
-	if ((sta & sc->sc_intr_mask) != 0 || polls % 5 == 0 ||
-	    mwx_intr_calls == last_intr_calls) {
+	txq_stuck = (tq_cpu != tq_dma && tq_dma == last_txq_dma) ?
+	    txq_stuck + 1 : 0;
+	mcu_stuck = (mq_cpu != mq_dma && mq_dma == last_mcu_dma) ?
+	    mcu_stuck + 1 : 0;
+	last_txq_dma = tq_dma;
+	last_mcu_dma = mq_dma;
+
+	verbose = (sta & sc->sc_intr_mask) != 0 || polls % 30 == 0 ||
+	    txq_stuck == 2 || mcu_stuck == 2;
+	if (verbose) {
+		struct ifnet *ifp = &ic->ic_if;
+		char drops[160];
+		size_t off = 0;
+		int i;
+
 		MWX_DEV_LOG(sc,
-		    "poll state=%d intr_calls=%u sta=0x%08x ena=0x%08x mask=0x%08x lpctl=0x%08x mcu_cmd=0x%08x\n",
-		    sc->sc_ic.ic_state, mwx_intr_calls, sta, ena,
-		    sc->sc_intr_mask, lp, mcu);
+		    "poll state=%d chan=%u intr_calls=%u sta=0x%08x ena=0x%08x lpctl=0x%08x mcu_cmd=0x%08x\n",
+		    ic->ic_state,
+		    ic->ic_bss ? ieee80211_chan2ieee(ic, ic->ic_bss->ni_chan) : 0,
+		    mwx_intr_calls, sta, ena, lp, mcu);
 		MWX_DEV_LOG(sc,
-		    "poll txq cpu=%u dma=%u prod=%u cons=%u | txmcu cpu=%u dma=%u | rxq cpu=%u dma=%u cons=%u | rxmcu cpu=%u dma=%u cons=%u | rxfwdl cpu=%u dma=%u cons=%u\n",
-		    mwx_read(sc, sc->sc_txq.mq_regbase + MT_DMA_CPU_IDX),
-		    mwx_read(sc, sc->sc_txq.mq_regbase + MT_DMA_DMA_IDX),
-		    sc->sc_txq.mq_prod, sc->sc_txq.mq_cons,
-		    mwx_read(sc, sc->sc_txmcuq.mq_regbase + MT_DMA_CPU_IDX),
-		    mwx_read(sc, sc->sc_txmcuq.mq_regbase + MT_DMA_DMA_IDX),
+		    "poll txq cpu=%u dma=%u | txmcu cpu=%u dma=%u | rxq cpu=%u dma=%u cons=%u | rxmcu cpu=%u dma=%u cons=%u\n",
+		    tq_cpu, tq_dma, mq_cpu, mq_dma,
 		    mwx_read(sc, sc->sc_rxq.mq_regbase + MT_DMA_CPU_IDX),
 		    mwx_read(sc, sc->sc_rxq.mq_regbase + MT_DMA_DMA_IDX),
 		    sc->sc_rxq.mq_cons,
 		    mwx_read(sc, sc->sc_rxmcuq.mq_regbase + MT_DMA_CPU_IDX),
 		    mwx_read(sc, sc->sc_rxmcuq.mq_regbase + MT_DMA_DMA_IDX),
-		    sc->sc_rxmcuq.mq_cons,
-		    mwx_read(sc, sc->sc_rxfwdlq.mq_regbase + MT_DMA_CPU_IDX),
-		    mwx_read(sc, sc->sc_rxfwdlq.mq_regbase + MT_DMA_DMA_IDX),
-		    sc->sc_rxfwdlq.mq_cons);
+		    sc->sc_rxmcuq.mq_cons);
+		drops[0] = 0;
+		for (i = 0; i < MWX_RX_DROP_REASONS &&
+		    mwx_rx_drop_name[i] != NULL && off < sizeof(drops) - 24; i++)
+			off += snprintf(drops + off, sizeof(drops) - off,
+			    "%s=%u ", mwx_rx_drop_name[i], mwx_rx_drop_cnt[i]);
+		MWX_DEV_LOG(sc,
+		    "stats ipkts=%llu ierr=%llu opkts=%llu oerr=%llu hwdrop[%s] dup=%u wrongbss=%u wrongdir=%u notassoc=%u unenc=%u wepfail=%u decap=%u decryptcrc=%u ccmp_replay=%u ccmp_dec=%u tooshort=%u nombuf=%u ba_below=%u ba_above=%u\n",
+		    (unsigned long long)(ifp->netStat ? ifp->netStat->inputPackets : 0),
+		    (unsigned long long)(ifp->netStat ? ifp->netStat->inputErrors : 0),
+		    (unsigned long long)(ifp->netStat ? ifp->netStat->outputPackets : 0),
+		    (unsigned long long)(ifp->netStat ? ifp->netStat->outputErrors : 0), drops,
+		    ic->ic_stats.is_rx_dup, ic->ic_stats.is_rx_wrongbss,
+		    ic->ic_stats.is_rx_wrongdir, ic->ic_stats.is_rx_notassoc,
+		    ic->ic_stats.is_rx_unencrypted, ic->ic_stats.is_rx_wepfail,
+		    ic->ic_stats.is_rx_decap, ic->ic_stats.is_rx_decryptcrc,
+		    ic->ic_stats.is_ccmp_replays, ic->ic_stats.is_ccmp_dec_errs,
+		    ic->ic_stats.is_rx_tooshort, ic->ic_stats.is_rx_nombuf,
+		    ic->ic_stats.is_ht_rx_frame_below_ba_winstart,
+		    ic->ic_stats.is_ht_rx_frame_above_ba_winend);
 	}
 	last_intr_calls = mwx_intr_calls;
 
-	{
-		static uint32_t last_dma = 0xffffffff, stuck_polls;
-		static int dumped;
-		uint32_t cpu = mwx_read(sc, sc->sc_txq.mq_regbase + MT_DMA_CPU_IDX);
-		uint32_t dma = mwx_read(sc, sc->sc_txq.mq_regbase + MT_DMA_DMA_IDX);
+	if (txq_stuck == 2 && !stall_dumped && tq_dma < sc->sc_txq.mq_count) {
+		struct mwx_desc *d = &sc->sc_txq.mq_desc[tq_dma];
+		struct mwx_txwi *mt = sc->sc_txq.mq_data[tq_dma].md_txwi;
 
-		if (cpu != dma && dma == last_dma)
-			stuck_polls++;
-		else
-			stuck_polls = 0;
-		last_dma = dma;
-		if (stuck_polls >= 2 && !dumped && dma < sc->sc_txq.mq_count) {
-			struct mwx_desc *d = &sc->sc_txq.mq_desc[dma];
-			struct mwx_txwi *mt = sc->sc_txq.mq_data[dma].md_txwi;
-
-			dumped = 1;
+		stall_dumped = 1;
+		MWX_DEV_LOG(sc,
+		    "TX STALL ring idx=%u desc buf0=0x%08x ctrl=0x%08x buf1=0x%08x info=0x%08x\n",
+		    tq_dma, le32toh(d->buf0), le32toh(d->ctrl),
+		    le32toh(d->buf1), le32toh(d->info));
+		if (mt != NULL && mt->mt_desc != NULL) {
+			struct mt76_txwi *t = mt->mt_desc;
 			MWX_DEV_LOG(sc,
-			    "TX STALL ring idx=%u desc buf0=0x%08x ctrl=0x%08x buf1=0x%08x info=0x%08x txwi=%p\n",
-			    dma, le32toh(d->buf0), le32toh(d->ctrl),
-			    le32toh(d->buf1), le32toh(d->info), (void *)mt);
-			if (mt != NULL && mt->mt_desc != NULL) {
-				struct mt76_txwi *t = mt->mt_desc;
-				MWX_DEV_LOG(sc,
-				    "TX STALL txwi idx=%u addr=0x%08x w=%08x %08x %08x %08x %08x %08x %08x %08x msdu=%04x ptr0=0x%08x/%04x/%04x/0x%08x ptr1=0x%08x/%04x/%04x/0x%08x\n",
-				    mt->mt_idx, mt->mt_addr,
-				    t->txwi[0], t->txwi[1], t->txwi[2], t->txwi[3],
-				    t->txwi[4], t->txwi[5], t->txwi[6], t->txwi[7],
-				    t->msdu_id[0],
-				    t->ptr[0].buf0, t->ptr[0].len0, t->ptr[0].len1,
-				    t->ptr[0].buf1,
-				    t->ptr[1].buf0, t->ptr[1].len0, t->ptr[1].len1,
-				    t->ptr[1].buf1);
-			}
+			    "TX STALL txwi idx=%u addr=0x%08x w=%08x %08x %08x %08x %08x %08x %08x %08x msdu=%04x ptr0=0x%08x/%04x/%04x/0x%08x ptr1=0x%08x/%04x/%04x/0x%08x\n",
+			    mt->mt_idx, mt->mt_addr,
+			    t->txwi[0], t->txwi[1], t->txwi[2], t->txwi[3],
+			    t->txwi[4], t->txwi[5], t->txwi[6], t->txwi[7],
+			    t->msdu_id[0],
+			    t->ptr[0].buf0, t->ptr[0].len0, t->ptr[0].len1,
+			    t->ptr[0].buf1,
+			    t->ptr[1].buf0, t->ptr[1].len0, t->ptr[1].len1,
+			    t->ptr[1].buf1);
 		}
+	}
+
+	/*
+	 * Auto recovery: if the TX data or MCU ring has not moved for 4
+	 * seconds while work is pending, the WFDMA/firmware is wedged and
+	 * only a WFSYS reset with firmware reload brings it back.
+	 * Rate limited to once per 30 seconds.
+	 */
+	uint32_t stuck_limit = (sc->sc_flags &
+	    (MWX_FLAG_SCANNING | MWX_FLAG_BGSCAN)) ? 10 : 4;
+	if ((txq_stuck >= stuck_limit || mcu_stuck >= stuck_limit) &&
+	    polls - last_reset_poll >= 30) {
+		MWX_DEV_LOG(sc,
+		    "DMA stall detected (txq_stuck=%u mcu_stuck=%u), hard reset\n",
+		    txq_stuck, mcu_stuck);
+		last_reset_poll = polls;
+		txq_stuck = mcu_stuck = 0;
+		last_txq_dma = last_mcu_dma = 0xffffffff;
+		stall_dumped = 0;
+		sc->sc_hard_reset = 1;
+		mwx_reset(sc);
+		return;
 	}
 
 	/* Recover from a lost MSI: process anything left pending. */

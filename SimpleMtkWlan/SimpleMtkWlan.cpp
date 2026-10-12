@@ -72,7 +72,6 @@ extern "C" void mtk_dbg_log(const char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(line + prefix, sizeof(line) - prefix, fmt, ap);
     va_end(ap);
-    IOLog("%s", line);
 
     len = strnlen(line, sizeof(line));
     mtkDbgLock();
