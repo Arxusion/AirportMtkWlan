@@ -672,6 +672,7 @@ int	mwx_mcu_wait_resp_msg(struct mwx_softc *, uint32_t, int,
 
 int		mwx_dma_disable(struct mwx_softc *sc, int force);
 void		mwx_dma_enable(struct mwx_softc *sc);
+int		mwx_pci_flr(struct mwx_softc *, IOPCIDevice *);
 int		mwx_mcu_fw_pmctrl(struct mwx_softc *);
 int		mwx_mcu_drv_pmctrl(struct mwx_softc *);
 int		mwx_wfsys_reset(struct mwx_softc *sc);
@@ -1957,8 +1958,28 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 
 	if (mwx_mcu_fw_pmctrl(sc) != 0 ||
 	    mwx_mcu_drv_pmctrl(sc) != 0) {
-		MWX_DEV_LOG(sc, "attach MCU power control failed\n");
-		goto fail;
+		/*
+		 * A warm reboot does not power-cycle the M.2 card, so the chip
+		 * can be left wedged by the previous OS session. Try to recover
+		 * instead of failing: WFSYS reset first, then a PCIe FLR.
+		 */
+		MWX_DEV_LOG(sc, "attach MCU power control failed lpctl=0x%08x, "
+		    "trying WFSYS reset\n", mwx_read(sc, MT_CONN_ON_LPCTL));
+		mwx_wfsys_reset(sc);
+		if (mwx_mcu_fw_pmctrl(sc) != 0 ||
+		    mwx_mcu_drv_pmctrl(sc) != 0) {
+			MWX_DEV_LOG(sc, "still failing lpctl=0x%08x, trying PCIe FLR\n",
+			    mwx_read(sc, MT_CONN_ON_LPCTL));
+			if (mwx_pci_flr(sc, pa->pa_tag) != 0 ||
+			    mwx_mcu_fw_pmctrl(sc) != 0 ||
+			    mwx_mcu_drv_pmctrl(sc) != 0) {
+				MWX_DEV_LOG(sc, "attach MCU power control failed after "
+				    "recovery lpctl=0x%08x\n",
+				    mwx_read(sc, MT_CONN_ON_LPCTL));
+				goto fail;
+			}
+		}
+		MWX_DEV_LOG(sc, "attach MCU power control recovered\n");
 	}
 	MWX_DEV_LOG(sc, "attach MCU power control ok\n");
 
@@ -3561,6 +3582,39 @@ mwx_dma_enable(struct mwx_softc *sc)
 	mwx_write(sc, MT_WFDMA0_HOST_INT_ENA, sc->sc_intr_mask);
 	mwx_set(sc, MT_MCU2HOST_SW_INT_ENA, MT_MCU_CMD_WAKE_RX_PCIE);
 	mwx_write(sc, MT_PCIE_MAC_INT_ENABLE, 0xff);
+}
+
+/*
+ * PCIe Function Level Reset: resets the whole function like a power cycle.
+ * Config space (BARs, command, MSI) is saved and restored around it.
+ */
+int
+mwx_pci_flr(struct mwx_softc *sc, IOPCIDevice *dev)
+{
+	UInt8 cap = 0;
+	UInt32 devcap;
+	UInt16 devctl;
+
+	if (dev == NULL ||
+	    !dev->findPCICapability(kIOPCICapabilityIDPCIExpress, &cap) ||
+	    cap == 0) {
+		MWX_DEV_LOG(sc, "FLR: no PCIe capability\n");
+		return ENODEV;
+	}
+	devcap = dev->configRead32(cap + 0x04);
+	if (!(devcap & (1U << 28))) {
+		MWX_DEV_LOG(sc, "FLR: not supported devcap=0x%08x\n", devcap);
+		return ENODEV;
+	}
+	dev->saveDeviceState();
+	devctl = dev->configRead16(cap + 0x08);
+	dev->configWrite16(cap + 0x08, devctl | (1U << 15));
+	IOSleep(150);
+	dev->restoreDeviceState();
+	dev->setMemoryEnable(true);
+	dev->setBusMasterEnable(true);
+	MWX_DEV_LOG(sc, "FLR done vendor=0x%04x\n", dev->configRead16(0));
+	return 0;
 }
 
 int
