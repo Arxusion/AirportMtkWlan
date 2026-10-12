@@ -5517,6 +5517,21 @@ mt7921_mac_fill_rx(struct mwx_softc *sc, struct mbuf *m,
 	if ((rxd1 & MT_RXD1_NORMAL_SEC_MODE_MASK) != 0 &&
 	    !(rxd1 & (MT_RXD1_NORMAL_CLM | MT_RXD1_NORMAL_CM))) {
 		rxi->rxi_flags |= IEEE80211_RXI_HWDEC;
+	} else if (ic->ic_state == IEEE80211_S_RUN) {
+		/* Diagnose why the chip did not decrypt this frame. */
+		static uint32_t nodec_log_count;
+		if (nodec_log_count < 24) {
+			MWX_DEV_LOG(sc,
+			    "rx no-hwdec wlan_idx=%u sec_mode=%u cm=%d clm=%d sec_done=%d unicast=%d rxd=%08x/%08x/%08x/%08x\n",
+			    rxd1 & MT_RXD1_NORMAL_WLAN_IDX_MASK,
+			    (rxd1 & MT_RXD1_NORMAL_SEC_MODE_MASK) >> 16,
+			    !!(rxd1 & MT_RXD1_NORMAL_CM),
+			    !!(rxd1 & MT_RXD1_NORMAL_CLM),
+			    !!(rxd1 & MT_RXD1_NORMAL_SEC_DONE),
+			    (rxd3 & MT_RXD3_NORMAL_ADDR_TYPE_MASK) ==
+			    MT_RXD3_NORMAL_U2M, rxd0, rxd1, rxd2, rxd3);
+			nodec_log_count++;
+		}
 	}
 
 	remove_pad = (rxd2 & MT_RXD2_NORMAL_HDR_OFFSET_MASK) >>
@@ -6521,7 +6536,13 @@ mt7921_mac_sta_update(struct mwx_softc *sc, struct ieee80211_node *ni,
 	if (m == NULL)
 		return ENOBUFS;
 
-	return mwx_mcu_send_mbuf_wait(sc, MCU_UNI_CMD_STA_REC_UPDATE, m);
+	{
+		int rv = mwx_mcu_send_mbuf_wait(sc, MCU_UNI_CMD_STA_REC_UPDATE, m);
+		MWX_DEV_LOG(sc, "sta_update add=%d new=%d wcid=%u peer=%s rv=%d\n",
+		    add, isnew, mw ? mw->wcid : 0,
+		    ni ? ether_sprintf(ni->ni_macaddr) : "-", rv);
+		return rv;
+	}
 }
 
 static int
