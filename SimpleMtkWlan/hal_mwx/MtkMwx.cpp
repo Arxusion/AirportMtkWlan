@@ -1467,10 +1467,15 @@ mwx_set_key(struct ieee80211com *ic, struct ieee80211_node *ni,
 	 * Also set up the software crypto context for group keys so net80211
 	 * can decrypt them itself. Group keys are RX-only for a station.
 	 */
-	if ((k->k_flags & IEEE80211_KEY_GROUP) &&
-	    !(k->k_flags & IEEE80211_KEY_SWCRYPTO)) {
+	/*
+	 * Same fallback for the pairwise key: after a reassociation the chip
+	 * sometimes stops decrypting unicast frames too. net80211 never
+	 * encrypts TX in software, so this only affects RX.
+	 */
+	if (!(k->k_flags & IEEE80211_KEY_SWCRYPTO)) {
 		int err = ieee80211_set_key(ic, ni, k);
-		MWX_DEV_LOG(sc, "group key id=%d cipher=%d sw crypto setup=%d\n",
+		MWX_DEV_LOG(sc, "%s key id=%d cipher=%d sw crypto setup=%d\n",
+		    (k->k_flags & IEEE80211_KEY_GROUP) ? "group" : "pairwise",
 		    k->k_id, k->k_cipher, err);
 	}
 

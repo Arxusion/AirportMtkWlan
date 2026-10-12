@@ -166,9 +166,14 @@ ieee80211_begin_cache_bgscan(struct _ifnet *ifp)
 void
 ieee80211_bgscan_timeout(void *arg)
 {
-    struct _ifnet *ifp = (struct _ifnet *)arg;
-    
-    ieee80211_begin_bgscan(ifp);
+    /*
+     * RSSI-triggered background scan + roaming is disabled: it made the
+     * station hop between the 2.4 and 5 GHz networks of the same router
+     * every few seconds, and MT7921 lost its hardware crypto state on each
+     * BSS switch. Cache scans requested by the client still run (they do
+     * not roam).
+     */
+    (void)arg;
 }
 
 void
