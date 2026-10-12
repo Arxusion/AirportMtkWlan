@@ -118,10 +118,18 @@
 
 #define BUILD_BUG_ON(condition) ((void)sizeof(char[1 - 2*!!(condition)]))
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+void mtk_dbg_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+#ifdef __cplusplus
+}
+#endif
+
 #define XYLog(fmt, x...)\
 do\
 {\
-kprintf("%s: " fmt, "SimpleMtkWlan", ##x);\
+mtk_dbg_log("%s: " fmt, "SimpleMtkWlan", ##x);\
 }while(0)
 
 typedef UInt8  u8;

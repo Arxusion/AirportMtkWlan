@@ -47,6 +47,7 @@ public:
     uint32_t getTxQueueSize() override;
 
     void clearScanningFlags() override;
+    void debugPoll() override;
     IOReturn setMulticastList(IOEthernetAddress *addr, int count) override;
 
     static bool mwx_match(IOPCIDevice *device);

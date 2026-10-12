@@ -57,6 +57,17 @@ OSDefineMetaClassAndStructors(MtkMwx, MtkHalService)
 #define PCI_PRODUCT_MEDIATEK_MT7921K   0x0608
 #define PCI_PRODUCT_MEDIATEK_MT7922    0x7922
 
+/* Route every HAL printf through the persistent debug log. */
+#undef printf
+#define printf(x...) mtk_dbg_log(x)
+
+/*
+ * mwx_mcu_alloc_msg() reserves room for the MCU TXD in front of the payload.
+ * Keep payload + TXD within one 4K cluster: a 4096-byte chunk needs a 16K
+ * jumbo cluster, which is often unavailable during early boot (ENOMEM).
+ */
+#define MWX_FW_CHUNK_SIZE	(4096 - sizeof(struct mwx_mcu_txd))
+
 #define MWX_LOG(x...) printf("SimpleMtkWlan-mwx: " x)
 #define MWX_DEV_LOG(sc, fmt, args...) \
 	printf("SimpleMtkWlan-mwx: %s: " fmt, DEVNAME(sc), ##args)
@@ -1487,6 +1498,54 @@ mwx_radiotap_attach(struct mwx_softc *sc)
 }
 #endif
 
+/*
+ * Copy a TX frame into one freshly allocated cluster so the firmware sees a
+ * single contiguous buffer. Experiment: the WFDMA stalled on the first DHCP
+ * frame (a multi-mbuf chain) on MT7921.
+ */
+static struct mbuf *
+mwx_tx_linearize(struct mbuf *m)
+{
+	size_t len = mbuf_pkthdr_len(m);
+	struct mbuf *n;
+
+	if (mbuf_next(m) == NULL || len == 0 || len > MCLBYTES * 2)
+		return m;
+	{
+		static uint32_t lin_log_count;
+		if (lin_log_count < 48) {
+			struct mbuf *c;
+			char chain[96];
+			size_t off = 0;
+
+			chain[0] = 0;
+			for (c = m; c != NULL && off < sizeof(chain) - 12;
+			    c = mbuf_next(c))
+				off += snprintf(chain + off, sizeof(chain) - off,
+				    "%zu%s@%p,", mbuf_len(c),
+				    (mbuf_flags(c) & MBUF_EXT) ? "e" : "",
+				    mbuf_data(c));
+			MWX_LOG("tx linearize len=%zu chain=%s\n", len, chain);
+			lin_log_count++;
+		}
+	}
+	n = MCLGETL(NULL, M_DONTWAIT, len);
+	if (n == NULL)
+		return m;
+	if (mbuf_next(n) != NULL) {
+		m_freem(n);
+		return m;
+	}
+	mbuf_setlen(n, len);
+	mbuf_pkthdr_setlen(n, len);
+	if (mbuf_copydata(m, 0, len, mtod(n, void *)) != 0) {
+		m_freem(n);
+		return m;
+	}
+	m_freem(m);
+	return n;
+}
+
 int
 mwx_tx(struct mwx_softc *sc, struct mbuf *m, struct ieee80211_node *ni)
 {
@@ -1499,6 +1558,7 @@ mwx_tx(struct mwx_softc *sc, struct mbuf *m, struct ieee80211_node *ni)
 		m_freem(m);
 		return ENOBUFS;
 	}
+	m = mwx_tx_linearize(m);
 	/* XXX DMA memory access without BUS_DMASYNC_PREWRITE */
 	txp = mt->mt_desc;
 	memset(txp, 0, sizeof(*txp));
@@ -1631,6 +1691,8 @@ mwx_count_nodes(struct ieee80211com *ic)
 /*
  * Driver specific functions.
  */
+static uint32_t mwx_intr_calls;
+
 int
 mwx_intr(void *arg)
 {
@@ -1639,6 +1701,8 @@ mwx_intr(void *arg)
 	uint32_t mask = sc->sc_intr_mask;
 	static uint32_t intr_log_count;
 	static uint32_t intr_unhandled_log_count;
+
+	mwx_intr_calls++;
 
 	mwx_write(sc, MT_WFDMA0_HOST_INT_ENA, 0);
 	intr = mwx_read(sc, MT_WFDMA0_HOST_INT_STA);
@@ -1675,15 +1739,35 @@ mwx_intr(void *arg)
 			intr |= MT_INT_RX_DONE_DATA;
 	}
 
-	if (intr & MT_INT_TX_DONE_ALL)
-		mwx_dma_tx_done(sc);
+	for (int pass = 0; ; pass++) {
+		if (intr & MT_INT_TX_DONE_ALL)
+			mwx_dma_tx_done(sc);
 
-	if (intr & MT_INT_RX_DONE_WM)
-		mwx_dma_rx_done(sc, &sc->sc_rxfwdlq);
-	if (intr & MT_INT_RX_DONE_WM2)
-		mwx_dma_rx_done(sc, &sc->sc_rxmcuq);
-	if (intr & MT_INT_RX_DONE_DATA)
-		mwx_dma_rx_done(sc, &sc->sc_rxq);
+		if (intr & MT_INT_RX_DONE_WM)
+			mwx_dma_rx_done(sc, &sc->sc_rxfwdlq);
+		if (intr & MT_INT_RX_DONE_WM2)
+			mwx_dma_rx_done(sc, &sc->sc_rxmcuq);
+		if (intr & MT_INT_RX_DONE_DATA)
+			mwx_dma_rx_done(sc, &sc->sc_rxq);
+
+		/*
+		 * MSI is edge triggered: events that arrived while the host
+		 * interrupt enable was cleared do not raise a new message, so
+		 * drain them here before re-enabling.
+		 */
+		if (pass >= 8)
+			break;
+		intr = mwx_read(sc, MT_WFDMA0_HOST_INT_STA) & mask;
+		if (intr == 0)
+			break;
+		mwx_write(sc, MT_WFDMA0_HOST_INT_STA, intr);
+		if (intr & MT_INT_MCU_CMD) {
+			intr_sw = mwx_read(sc, MT_MCU_CMD);
+			mwx_write(sc, MT_MCU_CMD, intr_sw);
+			if (intr_sw & MT_MCU_CMD_WAKE_RX_PCIE)
+				intr |= MT_INT_RX_DONE_DATA;
+		}
+	}
 
 	/* TODO power management */
 //	mt76_connac_pm_unref(&dev->mphy, &dev->pm);
@@ -2208,6 +2292,42 @@ mwx_txwi_enqueue(struct mwx_softc *sc, struct mwx_txwi *mt, struct mbuf *m)
 		return rv;
 
 	nsegs = mt->mt_map->dm_nsegs;
+
+	{
+		static uint32_t seg_log_count;
+		if (seg_log_count < 64) {
+			struct mbuf *c;
+			int nmb = 0;
+			char chain[96];
+			size_t off = 0;
+
+			chain[0] = 0;
+			for (c = m; c != NULL && off < sizeof(chain) - 12;
+			    c = mbuf_next(c), nmb++)
+				off += snprintf(chain + off, sizeof(chain) - off,
+				    "%zu%s,", mbuf_len(c),
+				    (mbuf_flags(c) & MBUF_EXT) ? "e" : "");
+			MWX_DEV_LOG(sc,
+			    "txseg idx=%u len=%zu nmbuf=%d chain=%s nsegs=%d bounce=%d s0=0x%llx/%llu s1=0x%llx/%llu s2=0x%llx/%llu s3=0x%llx/%llu\n",
+			    mt->mt_idx, mbuf_pkthdr_len(m), nmb, chain, nsegs,
+			    mt->mt_map->dm_bounce,
+			    nsegs > 0 ? (unsigned long long)mt->mt_map->dm_segs[0].ds_addr : 0ULL,
+			    nsegs > 0 ? (unsigned long long)mt->mt_map->dm_segs[0].ds_len : 0ULL,
+			    nsegs > 1 ? (unsigned long long)mt->mt_map->dm_segs[1].ds_addr : 0ULL,
+			    nsegs > 1 ? (unsigned long long)mt->mt_map->dm_segs[1].ds_len : 0ULL,
+			    nsegs > 2 ? (unsigned long long)mt->mt_map->dm_segs[2].ds_addr : 0ULL,
+			    nsegs > 2 ? (unsigned long long)mt->mt_map->dm_segs[2].ds_len : 0ULL,
+			    nsegs > 3 ? (unsigned long long)mt->mt_map->dm_segs[3].ds_addr : 0ULL,
+			    nsegs > 3 ? (unsigned long long)mt->mt_map->dm_segs[3].ds_len : 0ULL);
+			seg_log_count++;
+		}
+	}
+	if (nsegs > MT_HW_TXP_MAX_BUF_NUM) {
+		MWX_DEV_LOG(sc, "txseg idx=%u too many segments %d, dropping\n",
+		    mt->mt_idx, nsegs);
+		bus_dmamap_unload(sc->sc_dmat, mt->mt_map);
+		return EFBIG;
+	}
 
 	bus_dmamap_sync(sc->sc_dmat, mt->mt_map, 0, mt->mt_map->dm_mapsize,
 	    BUS_DMASYNC_PREWRITE);
@@ -3109,8 +3229,10 @@ mwx_mcu_send_msg(struct mwx_softc *sc, uint32_t cmd, void *data, size_t len,
 	struct mbuf *m;
 
 	m = mwx_mcu_alloc_msg(len);
-	if (m == NULL)
+	if (m == NULL) {
+		MWX_LOG("mcu msg alloc failed cmd=0x%08x len=%zu\n", cmd, len);
 		return ENOMEM;
+	}
 
 	if (len != 0)
 		memcpy(mtod(m, caddr_t), data, len);
@@ -3770,7 +3892,7 @@ mwx_load_firmware(struct mwx_softc *sc)
 			goto out;
 		}
 		rv = mwx_mcu_send_firmware(sc, MCU_CMD_FW_SCATTER,
-		    dl, len, 4096);
+		    dl, len, MWX_FW_CHUNK_SIZE);
 		if (rv != 0) {
 			MWX_DEV_LOG(sc, "patch send failed index=%d error=%d\n",
 			    i, rv);
@@ -3849,7 +3971,7 @@ out:
 		}
 
 		rv = mwx_mcu_send_firmware(sc, MCU_CMD_FW_SCATTER,
-		    fwbuf + offset, len, 4096);
+		    fwbuf + offset, len, MWX_FW_CHUNK_SIZE);
 		if (rv != 0) {
 			MWX_DEV_LOG(sc, "WM send failed index=%d error=%d\n",
 			    i, rv);
@@ -6811,4 +6933,88 @@ mt7921_mcu_set_associated_bss(struct mwx_softc *sc, int associated)
 	MWX_DEV_LOG(sc, "associated BSS RLM channel=%u band=%u rv=%d\n",
 	    channel.rlm.control_channel, channel.rlm.band, rv);
 	return rv;
+}
+
+void
+MtkMwx::debugPoll()
+{
+	struct mwx_softc *sc = com;
+	static uint32_t polls, last_intr_calls;
+	uint32_t sta, ena, lp, mcu;
+
+	if (sc == NULL || !sc->sc_fw_loaded)
+		return;
+	polls++;
+	sta = mwx_read(sc, MT_WFDMA0_HOST_INT_STA);
+	ena = mwx_read(sc, MT_WFDMA0_HOST_INT_ENA);
+	lp = mwx_read(sc, MT_CONN_ON_LPCTL);
+	mcu = mwx_read(sc, MT_MCU_CMD);
+
+	if ((sta & sc->sc_intr_mask) != 0 || polls % 5 == 0 ||
+	    mwx_intr_calls == last_intr_calls) {
+		MWX_DEV_LOG(sc,
+		    "poll state=%d intr_calls=%u sta=0x%08x ena=0x%08x mask=0x%08x lpctl=0x%08x mcu_cmd=0x%08x\n",
+		    sc->sc_ic.ic_state, mwx_intr_calls, sta, ena,
+		    sc->sc_intr_mask, lp, mcu);
+		MWX_DEV_LOG(sc,
+		    "poll txq cpu=%u dma=%u prod=%u cons=%u | txmcu cpu=%u dma=%u | rxq cpu=%u dma=%u cons=%u | rxmcu cpu=%u dma=%u cons=%u | rxfwdl cpu=%u dma=%u cons=%u\n",
+		    mwx_read(sc, sc->sc_txq.mq_regbase + MT_DMA_CPU_IDX),
+		    mwx_read(sc, sc->sc_txq.mq_regbase + MT_DMA_DMA_IDX),
+		    sc->sc_txq.mq_prod, sc->sc_txq.mq_cons,
+		    mwx_read(sc, sc->sc_txmcuq.mq_regbase + MT_DMA_CPU_IDX),
+		    mwx_read(sc, sc->sc_txmcuq.mq_regbase + MT_DMA_DMA_IDX),
+		    mwx_read(sc, sc->sc_rxq.mq_regbase + MT_DMA_CPU_IDX),
+		    mwx_read(sc, sc->sc_rxq.mq_regbase + MT_DMA_DMA_IDX),
+		    sc->sc_rxq.mq_cons,
+		    mwx_read(sc, sc->sc_rxmcuq.mq_regbase + MT_DMA_CPU_IDX),
+		    mwx_read(sc, sc->sc_rxmcuq.mq_regbase + MT_DMA_DMA_IDX),
+		    sc->sc_rxmcuq.mq_cons,
+		    mwx_read(sc, sc->sc_rxfwdlq.mq_regbase + MT_DMA_CPU_IDX),
+		    mwx_read(sc, sc->sc_rxfwdlq.mq_regbase + MT_DMA_DMA_IDX),
+		    sc->sc_rxfwdlq.mq_cons);
+	}
+	last_intr_calls = mwx_intr_calls;
+
+	{
+		static uint32_t last_dma = 0xffffffff, stuck_polls;
+		static int dumped;
+		uint32_t cpu = mwx_read(sc, sc->sc_txq.mq_regbase + MT_DMA_CPU_IDX);
+		uint32_t dma = mwx_read(sc, sc->sc_txq.mq_regbase + MT_DMA_DMA_IDX);
+
+		if (cpu != dma && dma == last_dma)
+			stuck_polls++;
+		else
+			stuck_polls = 0;
+		last_dma = dma;
+		if (stuck_polls >= 2 && !dumped && dma < sc->sc_txq.mq_count) {
+			struct mwx_desc *d = &sc->sc_txq.mq_desc[dma];
+			struct mwx_txwi *mt = sc->sc_txq.mq_data[dma].md_txwi;
+
+			dumped = 1;
+			MWX_DEV_LOG(sc,
+			    "TX STALL ring idx=%u desc buf0=0x%08x ctrl=0x%08x buf1=0x%08x info=0x%08x txwi=%p\n",
+			    dma, le32toh(d->buf0), le32toh(d->ctrl),
+			    le32toh(d->buf1), le32toh(d->info), (void *)mt);
+			if (mt != NULL && mt->mt_desc != NULL) {
+				struct mt76_txwi *t = mt->mt_desc;
+				MWX_DEV_LOG(sc,
+				    "TX STALL txwi idx=%u addr=0x%08x w=%08x %08x %08x %08x %08x %08x %08x %08x msdu=%04x ptr0=0x%08x/%04x/%04x/0x%08x ptr1=0x%08x/%04x/%04x/0x%08x\n",
+				    mt->mt_idx, mt->mt_addr,
+				    t->txwi[0], t->txwi[1], t->txwi[2], t->txwi[3],
+				    t->txwi[4], t->txwi[5], t->txwi[6], t->txwi[7],
+				    t->msdu_id[0],
+				    t->ptr[0].buf0, t->ptr[0].len0, t->ptr[0].len1,
+				    t->ptr[0].buf1,
+				    t->ptr[1].buf0, t->ptr[1].len0, t->ptr[1].len1,
+				    t->ptr[1].buf1);
+			}
+		}
+	}
+
+	/* Recover from a lost MSI: process anything left pending. */
+	if ((sta & sc->sc_intr_mask) != 0) {
+		MWX_DEV_LOG(sc, "poll found pending intr 0x%08x, servicing\n",
+		    sta & sc->sc_intr_mask);
+		mwx_intr(sc);
+	}
 }

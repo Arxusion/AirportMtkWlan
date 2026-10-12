@@ -127,7 +127,25 @@ void interruptTrampoline(OSObject *ih, IOInterruptEventSource *, int count) {
 void* pci_intr_establish(pci_chipset_tag_t pc, pci_intr_handle_t ih, int level, int (*handler)(void *), void *arg) {
 	ih->arg = arg;
 	ih->func = handler;
-	ih->intr = IOInterruptEventSource::interruptEventSource(ih, &interruptTrampoline, ih->dev);
+	/*
+	 * Register the MSI vector when the device exposes one. Index 0 is the
+	 * legacy INTx line, which the device stops asserting once MSI is enabled.
+	 * Registering the PCIMessaged index lets IOPCIFamily program the MSI
+	 * address/data and set the enable bit itself.
+	 */
+	int intIndex = 0;
+	for (int index = 0; ; index++) {
+		int interruptType;
+		if (ih->dev->getInterruptType(index, &interruptType) != kIOReturnSuccess)
+			break;
+		if (interruptType & kIOInterruptTypePCIMessaged) {
+			intIndex = index;
+			break;
+		}
+	}
+	ih->intr = IOInterruptEventSource::interruptEventSource(ih, &interruptTrampoline, ih->dev, intIndex);
+	mtk_dbg_log("SimpleMtkWlan: interrupt source index=%d (%s)\n", intIndex,
+	    intIndex ? "msi" : "intx");
 	
 	if (ih->intr == 0)
 		return 0;

@@ -54,6 +54,9 @@ public:
     virtual void free() override;
     virtual IOService* probe(IOService* provider, SInt32* score) override;
     virtual bool start(IOService *provider) override;
+    IOService* probeImpl(IOService* provider, SInt32* score);
+    bool startImpl(IOService *provider);
+    IOReturn halDebugPollAction(void *arg0, void *arg1, void *arg2, void *arg3);
     virtual void stop(IOService *provider) override;
     virtual IOReturn getHardwareAddress(IOEthernetAddress* addrP) override;
     virtual IOReturn setHardwareAddress(const IOEthernetAddress * addrP) override;

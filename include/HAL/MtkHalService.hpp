@@ -56,6 +56,9 @@ public:
     
     virtual MtkDriverController *getDriverController() = 0;
     
+    /* Periodic hardware state dump / interrupt poll, called on the main work loop. */
+    virtual void debugPoll() {}
+    
     virtual void free() override;
 
 public:
