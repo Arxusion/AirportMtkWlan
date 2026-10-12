@@ -1459,6 +1459,20 @@ mwx_set_key(struct ieee80211com *ic, struct ieee80211_node *ni,
 	DPRINTF("%s: set_key: ni %p, k_id %d, k_flags %x k_cipher %d\n",
 	    DEVNAME(sc), ni, k->k_id, k->k_flags, k->k_cipher);
 
+	/*
+	 * MT7921 does not reliably decrypt group-addressed frames with the
+	 * GTK installed in hardware; those arrive without RXI_HWDEC and were
+	 * dropped as wepfail (broadcast ARP / DHCP never reached the stack).
+	 * Also set up the software crypto context for group keys so net80211
+	 * can decrypt them itself. Group keys are RX-only for a station.
+	 */
+	if ((k->k_flags & IEEE80211_KEY_GROUP) &&
+	    !(k->k_flags & IEEE80211_KEY_SWCRYPTO)) {
+		int err = ieee80211_set_key(ic, ni, k);
+		MWX_DEV_LOG(sc, "group key id=%d cipher=%d sw crypto setup=%d\n",
+		    k->k_id, k->k_cipher, err);
+	}
+
 	if ((sc->sc_setkey_cur + 1) % nitems(sc->sc_setkey_arg) ==
 	    sc->sc_setkey_tail)
 		return ENOSPC;
@@ -1481,6 +1495,9 @@ mwx_delete_key(struct ieee80211com *ic, struct ieee80211_node *ni,
 	    DEVNAME(sc), ni, k->k_id, k->k_flags, k->k_cipher);
 
 	mt7921_mcu_sta_key_delete(sc, ni, k);
+	/* release the software crypto context set up in mwx_set_key() */
+	if (k->k_flags & IEEE80211_KEY_SWCRYPTO)
+		ieee80211_delete_key(ic, ni, k);
 }
 
 void
