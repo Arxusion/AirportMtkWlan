@@ -2972,7 +2972,13 @@ ieee80211_recv_disassoc(struct ieee80211com *ic, mbuf_t m,
                           ic->ic_state == IEEE80211_S_RUN);
             int roamscan = bgscan &&
                         (ic->ic_flags & IEEE80211_F_DISABLE_BG_AUTO_CONNECT) == 0;
-            if (!roamscan) /* ignore disassoc during bgscan */
+            /*
+             * Ignore disassoc during bgscan, and while still
+             * authenticating: the AP sends one to drop a stale session
+             * of ours, and jumping to ASSOC there loses the pending
+             * auth response.
+             */
+            if (!roamscan && ic->ic_state >= IEEE80211_S_ASSOC)
                 ieee80211_new_state(ic, IEEE80211_S_ASSOC,
                                     IEEE80211_FC0_SUBTYPE_DISASSOC);
         }

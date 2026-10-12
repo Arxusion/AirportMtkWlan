@@ -1418,6 +1418,14 @@ mwx_bgscan_done_task(void *arg)
 	}
 
 	/*
+	 * net80211 queued a deauth for the current AP. Push it out on the
+	 * current channel before switching; otherwise the AP keeps a stale
+	 * session and rejects us (disassoc 8 / deauth 9) when we come back.
+	 */
+	mwx_start(&ic->ic_if);
+	delay(30 * 1000);
+
+	/*
 	 * Remove installed crypto keys while we still have access to them.
 	 * Once mwx_newstate() is entered ic_bss will already contain
 	 * information about our next AP.
