@@ -57,6 +57,9 @@ OSDefineMetaClassAndStructors(MtkMwx, MtkHalService)
 #define PCI_PRODUCT_MEDIATEK_MT7921K   0x0608
 #define PCI_PRODUCT_MEDIATEK_MT7922    0x7922
 
+/* RX decrypt path counters, reported by MtkMwx::debugPoll(). */
+static uint32_t mwx_rx_hwdec_cnt, mwx_rx_swdec_cnt;
+
 /* RX drop reason counters, reported by MtkMwx::debugPoll(). */
 #define MWX_RX_DROP_REASONS	12
 static const char *mwx_rx_drop_name[MWX_RX_DROP_REASONS];
@@ -1360,6 +1363,23 @@ mwx_bgscan(struct ieee80211com *ic)
 	if (sc->sc_flags & MWX_FLAG_SCANNING)
 		return 0;
 
+	/*
+	 * While associated, a full hardware scan keeps the radio off the
+	 * home channel for ~11 s. The client asks for one every ~20 s to
+	 * refresh its network list, which halved throughput. Allow at most
+	 * one background scan per 2 minutes while in RUN.
+	 */
+	if (ic->ic_state == IEEE80211_S_RUN) {
+		static uint64_t last_bgscan_ns;
+		uint64_t now_ns;
+
+		absolutetime_to_nanoseconds(mach_absolute_time(), &now_ns);
+		if (last_bgscan_ns != 0 &&
+		    now_ns - last_bgscan_ns < 120ULL * 1000000000ULL)
+			return EBUSY;
+		last_bgscan_ns = now_ns;
+	}
+
 	err = mt7921_mcu_hw_scan(sc, 1);
 	if (err) {
 		printf("%s: could not initiate scan\n", DEVNAME(sc));
@@ -1688,6 +1708,10 @@ mwx_rx(struct mwx_softc *sc, struct mbuf *m, struct mbuf_list *ml)
 		}
 	}
 	sc->sc_rx_delivered++;
+	if (rxi.rxi_flags & IEEE80211_RXI_HWDEC)
+		mwx_rx_hwdec_cnt++;
+	else if (wh->i_fc[1] & IEEE80211_FC1_PROTECTED)
+		mwx_rx_swdec_cnt++;
 
 #if NBPFILTER > 0
 	if (__predict_false(sc->sc_drvbpf != NULL)) {
@@ -7108,7 +7132,8 @@ MtkMwx::debugPoll()
 			off += snprintf(drops + off, sizeof(drops) - off,
 			    "%s=%u ", mwx_rx_drop_name[i], mwx_rx_drop_cnt[i]);
 		MWX_DEV_LOG(sc,
-		    "stats ipkts=%llu ierr=%llu opkts=%llu oerr=%llu hwdrop[%s] dup=%u wrongbss=%u wrongdir=%u notassoc=%u unenc=%u wepfail=%u decap=%u decryptcrc=%u ccmp_replay=%u ccmp_dec=%u tooshort=%u nombuf=%u ba_below=%u ba_above=%u\n",
+		    "stats rx_hwdec=%u rx_swdec=%u ipkts=%llu ierr=%llu opkts=%llu oerr=%llu hwdrop[%s] dup=%u wrongbss=%u wrongdir=%u notassoc=%u unenc=%u wepfail=%u decap=%u decryptcrc=%u ccmp_replay=%u ccmp_dec=%u tooshort=%u nombuf=%u ba_below=%u ba_above=%u\n",
+		    mwx_rx_hwdec_cnt, mwx_rx_swdec_cnt,
 		    (unsigned long long)(ifp->netStat ? ifp->netStat->inputPackets : 0),
 		    (unsigned long long)(ifp->netStat ? ifp->netStat->inputErrors : 0),
 		    (unsigned long long)(ifp->netStat ? ifp->netStat->outputPackets : 0),
