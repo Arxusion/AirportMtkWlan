@@ -603,10 +603,30 @@ ieee80211_inputm(struct _ifnet *ifp, mbuf_t m, struct ieee80211_node *ni,
                         goto err;
                     }
                     /* do software decryption */
-                    m = ieee80211_decrypt(ic, m, ni);
-                    if (m == NULL) {
-                        ic->ic_stats.is_rx_wepfail++;
-                        goto err;
+                    {
+                        static uint32_t wepfail_log_count;
+                        int hdrlen = ieee80211_get_hdrlen(wh);
+                        int kid = -1, mcast = IEEE80211_IS_MULTICAST(wh->i_addr1);
+                        if (mbuf_len(m) > (size_t)hdrlen + 3)
+                            kid = (mtod(m, uint8_t *)[hdrlen + 3] >> 6) & 3;
+                        m = ieee80211_decrypt(ic, m, ni);
+                        if (m == NULL) {
+                            ic->ic_stats.is_rx_wepfail++;
+                            if (wepfail_log_count < 48) {
+                                struct ieee80211_key *k = (kid >= 0) ?
+                                    &ic->ic_nw_keys[kid] : NULL;
+                                XYLog("wepfail kid=%d mcast=%d def_txkey=%d "
+                                    "key_cipher=%d key_flags=0x%x pairwise_cipher=%d "
+                                    "rxi_flags=0x%x\n", kid, mcast,
+                                    ic->ic_def_txkey,
+                                    k ? (int)k->k_cipher : -1,
+                                    k ? (unsigned)k->k_flags : 0,
+                                    (int)ni->ni_pairwise_key.k_cipher,
+                                    rxi->rxi_flags);
+                                wepfail_log_count++;
+                            }
+                            goto err;
+                        }
                     }
                 } else {
                     m = ieee80211_input_hwdecrypt(ic, ni, m, rxi);
