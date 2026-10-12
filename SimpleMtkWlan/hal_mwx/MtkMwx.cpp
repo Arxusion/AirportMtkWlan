@@ -1298,6 +1298,19 @@ mwx_newstate_task(void *ptr)
 	case IEEE80211_S_RUN:
 		if (nstate != ostate)
 			mwx_mcu_set_deep_sleep(sc, 1);
+		/*
+		 * Leaving the BSS: tell the firmware the BSS is gone and remove
+		 * the peer station record (like Linux does on disassoc). Without
+		 * this the next association reused wcid 1 on top of the stale
+		 * record and the chip stopped decrypting RX in hardware.
+		 */
+		if (nstate < IEEE80211_S_RUN &&
+		    ic->ic_opmode == IEEE80211_M_STA) {
+			int brv = mt7921_mcu_set_associated_bss(sc, 0);
+			int srv = mt7921_mac_sta_update(sc, ic->ic_bss, 0, 0);
+			MWX_DEV_LOG(sc, "leave BSS: bss_off=%d sta_remove=%d\n",
+			    brv, srv);
+		}
 		break;
 	case IEEE80211_S_SCAN:
 		if (nstate == ostate) {
