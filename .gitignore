@@ -15,3 +15,8 @@ build/
 *.kext/
 *.zip
 *.tar.gz
+
+# Build output
+build/
+DerivedData/
+*.zip
