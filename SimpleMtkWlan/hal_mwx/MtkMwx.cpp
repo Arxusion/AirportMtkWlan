@@ -439,6 +439,7 @@ struct mwx_softc {
 	int			sc_coredump_cnt;
 	int8_t			sc_resetting;
 	int8_t			sc_hard_reset;	/* reload firmware on reset */
+	int8_t			sc_sta_added;	/* peer STA record exists in fw */
 	bool sc_detaching, sc_net_attached;
 	int8_t			sc_fw_loaded;
 
@@ -1318,6 +1319,7 @@ mwx_newstate_task(void *ptr)
 			int srv = mt7921_mac_sta_update(sc, ic->ic_bss, 0, 0);
 			MWX_DEV_LOG(sc, "leave BSS: bss_off=%d sta_remove=%d\n",
 			    brv, srv);
+			sc->sc_sta_added = 0;
 		}
 		break;
 	case IEEE80211_S_SCAN:
@@ -1348,7 +1350,18 @@ mwx_newstate_task(void *ptr)
 		if (rv)
 			break;
 		mwx_mcu_set_deep_sleep(sc, 0);
-		mt7921_mac_sta_update(sc, sc->sc_ic.ic_bss, 1, 1);
+		/*
+		 * A previous attempt (failed association, or AUTH retry on
+		 * another AP) may have left the peer record in firmware; adding
+		 * a new peer on top of it breaks hardware decryption.
+		 */
+		if (sc->sc_sta_added) {
+			int srv = mt7921_mac_sta_update(sc, sc->sc_ic.ic_bss, 0, 0);
+			MWX_DEV_LOG(sc, "AUTH: removed stale peer record rv=%d\n", srv);
+			sc->sc_sta_added = 0;
+		}
+		if (mt7921_mac_sta_update(sc, sc->sc_ic.ic_bss, 1, 1) == 0)
+			sc->sc_sta_added = 1;
 		break;
 	case IEEE80211_S_ASSOC:
 		mwx_mcu_set_deep_sleep(sc, 1);
@@ -1998,6 +2011,7 @@ mwx_preinit(struct mwx_softc *sc)
 	    !!(ic->ic_flags & IEEE80211_F_QOS),
 	    !!(ic->ic_flags & IEEE80211_F_VHTON), ic->ic_vhtcaps);
 
+	sc->sc_sta_added = 0;	/* fresh firmware has no peer records */
 	sc->sc_fw_loaded = 1;
 	MWX_DEV_LOG(sc, "preinit complete\n");
 	return 0;
