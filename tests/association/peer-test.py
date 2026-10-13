@@ -21,6 +21,7 @@ struct ieee80211_node{uint16_t ni_associd;uint32_t ni_flags=0;uint16_t ni_htcaps
 #define IEEE80211_VHTCAP_SUPP_CHAN_WIDTH_MASK 0x0000000C
 #define STA_REC_VHT 0x0a
 #define CMD_CBW_80MHZ 2
+#define CMD_CBW_40MHZ 1
 struct ieee80211_vht_mcs_info{uint16_t rx_mcs_map,rx_highest,tx_mcs_map,tx_highest;};
 struct sta_rec_vht_v1{uint16_t tag,len;uint32_t vht_cap;uint16_t vht_rx_mcs_map,vht_tx_mcs_map;uint8_t rts_bw_sig,rsv[3];};
 #ifndef htole16

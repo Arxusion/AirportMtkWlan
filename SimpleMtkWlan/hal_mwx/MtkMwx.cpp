@@ -714,6 +714,7 @@ int	mwx_mcu_wait_resp_msg(struct mwx_softc *, uint32_t, int,
 int		mwx_dma_disable(struct mwx_softc *sc, int force);
 void		mwx_dma_enable(struct mwx_softc *sc);
 int		mwx_pci_flr(struct mwx_softc *, IOPCIDevice *);
+static void	mwx_node_chan_width(struct ieee80211_node *, uint8_t *, uint8_t *);
 int		mwx_ampdu_rx_start(struct ieee80211com *, struct ieee80211_node *,
 		    uint8_t);
 void		mwx_ampdu_rx_stop(struct ieee80211com *, struct ieee80211_node *,
@@ -1418,11 +1419,13 @@ mwx_newstate_task(void *ptr)
 			    bni->ni_vht_chanwidth, bni->ni_vht_chan1,
 			    bni->ni_chan->ic_center_freq1, bni->ni_htcaps,
 			    bni->ni_vhtcaps);
-			if ((bni->ni_flags & IEEE80211_NODE_VHT) &&
-			    bni->ni_chw == IEEE80211_CHAN_WIDTH_80) {
+			uint8_t rbw, rcenter;
+			mwx_node_chan_width(bni, &rbw, &rcenter);
+			if (rbw != CMD_CBW_20MHZ) {
 				int crv = mt7921_mcu_set_chan_info(sc,
 				    MCU_EXT_CMD_CHANNEL_SWITCH);
-				MWX_DEV_LOG(sc, "RUN switch to 80 MHz rv=%d\n", crv);
+				MWX_DEV_LOG(sc, "RUN switch to %s MHz center=%u rv=%d\n",
+				    rbw == CMD_CBW_80MHZ ? "80" : "40", rcenter, crv);
 			}
 		}
 		rv = mt7921_mcu_set_associated_bss(sc, 1);
@@ -1995,7 +1998,8 @@ mwx_preinit(struct mwx_softc *sc)
 			 * from what net80211 negotiates (ni_chw).
 			 */
 			ic->ic_channels[chan].ic_flags = IEEE80211_CHAN_A |
-			    IEEE80211_CHAN_HT20 | IEEE80211_CHAN_VHT20 |
+			    IEEE80211_CHAN_HT20 | IEEE80211_CHAN_HT40 |
+			    IEEE80211_CHAN_VHT20 |
 			    IEEE80211_CHAN_VHT40 | IEEE80211_CHAN_VHT80;
 		}
 	}
@@ -2203,8 +2207,14 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 	    IEEE80211_C_QOS |		/* WMM, required for 11n */
 	    IEEE80211_C_TX_AMPDU;	/* TX A-MPDU, BA set up in firmware */
 
-	/* 802.11n, 20 MHz only for now (no 40 MHz / SGI40 yet). */
-	ic->ic_htcaps = IEEE80211_HTCAP_SGI20 |
+	/*
+	 * 802.11n. 20/40 MHz must be advertised even when only VHT80 is used:
+	 * an AP treats a station without the HT "20/40" bit as 20 MHz-only and
+	 * never transmits 80 MHz to it. 40 MHz is only actually used on 5 GHz
+	 * (2.4 GHz channels are not marked HT40, so net80211 masks the bit).
+	 */
+	ic->ic_htcaps = IEEE80211_HTCAP_SGI20 | IEEE80211_HTCAP_SGI40 |
+	    IEEE80211_HTCAP_CBW20_40 |
 	    (1U << IEEE80211_HTCAP_RXSTBC_SHIFT);	/* RX STBC, 1 stream */
 	ic->ic_htcaps |=
 	    (IEEE80211_HTCAP_SMPS_DIS << IEEE80211_HTCAP_SMPS_SHIFT);
@@ -4995,18 +5005,24 @@ mt7921_mcu_chan_bw(struct ieee80211_channel *channel)
 }
 
 /*
- * Operating bandwidth and center channel negotiated with the AP. 20 MHz
- * unless VHT 80 MHz was negotiated (HT40 is not advertised).
+ * Operating bandwidth and center channel negotiated with the AP: VHT80,
+ * HT40 or 20 MHz.
  */
 static void
 mwx_node_chan_width(struct ieee80211_node *ni, uint8_t *bw, uint8_t *center)
 {
 	*bw = CMD_CBW_20MHZ;
 	*center = ieee80211_mhz2ieee(ni->ni_chan->ic_freq, ni->ni_chan->ic_flags);
+	if (ni->ni_chan->ic_center_freq1 == 0)
+		return;
 	if ((ni->ni_flags & IEEE80211_NODE_VHT) &&
-	    ni->ni_chw == IEEE80211_CHAN_WIDTH_80 &&
-	    ni->ni_chan->ic_center_freq1 != 0) {
+	    ni->ni_chw == IEEE80211_CHAN_WIDTH_80) {
 		*bw = CMD_CBW_80MHZ;
+		*center = ieee80211_mhz2ieee(ni->ni_chan->ic_center_freq1,
+		    ni->ni_chan->ic_flags);
+	} else if ((ni->ni_flags & IEEE80211_NODE_HT) &&
+	    ni->ni_chw == IEEE80211_CHAN_WIDTH_40) {
+		*bw = CMD_CBW_40MHZ;
 		*center = ieee80211_mhz2ieee(ni->ni_chan->ic_center_freq1,
 		    ni->ni_chan->ic_flags);
 	}
@@ -7194,8 +7210,7 @@ int mt7921_mcu_set_associated_peer(struct mwx_softc *sc)
         /* 802.11n: peer HT caps, PHY type/A-MPDU params, RA MCS mask. */
         struct sta_rec_ht_v1 *ht = (struct sta_rec_ht_v1 *)mwx_append_tlv(m,
             &tlvnum, STA_REC_HT, sizeof(*ht));
-        ht->ht_cap = htole16(ni->ni_htcaps &
-            ~(IEEE80211_HTCAP_CBW20_40 | IEEE80211_HTCAP_SGI40));
+        ht->ht_cap = htole16(ni->ni_htcaps);
         struct sta_rec_phy *phy = (struct sta_rec_phy *)mwx_append_tlv(m,
             &tlvnum, STA_REC_PHY, sizeof(*phy));
         phy->basic_rate = htole16(0x0150);
@@ -7227,7 +7242,8 @@ int mt7921_mcu_set_associated_peer(struct mwx_softc *sc)
         /* bandwidth (0=20, 2=80) | (rx nss - 1) << 4 */
         uint8_t bw, center;
         mwx_node_chan_width(ni, &bw, &center);
-        state->vht_opmode = (bw == CMD_CBW_80MHZ ? 2 : 0) |
+        state->vht_opmode = (bw == CMD_CBW_80MHZ ? 2 :
+            bw == CMD_CBW_40MHZ ? 1 : 0) |
             ((sc->sc_capa.num_streams > 1 ? 1 : 0) << 4);
         MWX_DEV_LOG(sc, "assoc_peer VHT vhtcaps=0x%08x rxmcs=0x%04x txmcs=0x%04x chw=%d center=%u opmode=0x%02x\n",
             ni->ni_vhtcaps, ni->ni_vht_mcsinfo.rx_mcs_map,
