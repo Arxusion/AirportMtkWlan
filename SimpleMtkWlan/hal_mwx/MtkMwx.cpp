@@ -57,6 +57,43 @@ OSDefineMetaClassAndStructors(MtkMwx, MtkHalService)
 #define PCI_PRODUCT_MEDIATEK_MT7921K   0x0608
 #define PCI_PRODUCT_MEDIATEK_MT7922    0x7922
 
+/*
+ * RX rate histogram from the P-RXV (RXD group 3) of unicast frames, to see
+ * which rates the AP actually uses. Field layout from Linux mt76_connac2_mac.h.
+ */
+#define MWX_PRXV_TX_RATE(v)	((v) & 0x7f)
+#define MWX_PRXV_NSTS(v)	(((v) >> 7) & 0x7)
+#define MWX_PRXV_LDPC(v)	(((v) >> 11) & 0x1)
+#define MWX_PRXV_FRAME_MODE(v)	(((v) >> 12) & 0x7)
+#define MWX_PRXV_SGI(v)		(((v) >> 15) & 0x3)
+#define MWX_PRXV_STBC(v)	(((v) >> 22) & 0x3)
+#define MWX_PRXV_TX_MODE(v)	(((v) >> 24) & 0xf)
+static uint32_t mwx_rxr_mode[16], mwx_rxr_bw[4], mwx_rxr_nss[4], mwx_rxr_mcs[16];
+static uint32_t mwx_rxr_sgi, mwx_rxr_stbc, mwx_rxr_ldpc, mwx_rxr_total;
+
+static void
+mwx_rx_rate_account(uint32_t v0)
+{
+	uint32_t mode = MWX_PRXV_TX_MODE(v0), idx = MWX_PRXV_TX_RATE(v0);
+	uint32_t nss = MWX_PRXV_NSTS(v0) + 1;
+
+	mwx_rxr_total++;
+	mwx_rxr_mode[mode]++;
+	mwx_rxr_bw[MWX_PRXV_FRAME_MODE(v0) & 3]++;
+	if (mode == 2 || mode == 3) {		/* HT: idx = MCS 0-15 */
+		nss = (idx >> 3) + 1;
+		idx &= 7;
+	}
+	mwx_rxr_nss[(nss - 1) & 3]++;
+	mwx_rxr_mcs[idx & 0xf]++;
+	if (MWX_PRXV_SGI(v0))
+		mwx_rxr_sgi++;
+	if (MWX_PRXV_STBC(v0))
+		mwx_rxr_stbc++;
+	if (MWX_PRXV_LDPC(v0))
+		mwx_rxr_ldpc++;
+}
+
 /* RX decrypt path counters, reported by MtkMwx::debugPoll(). */
 static uint32_t mwx_rx_hwdec_cnt, mwx_rx_swdec_cnt;
 
@@ -2167,7 +2204,8 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 	    IEEE80211_C_TX_AMPDU;	/* TX A-MPDU, BA set up in firmware */
 
 	/* 802.11n, 20 MHz only for now (no 40 MHz / SGI40 yet). */
-	ic->ic_htcaps = IEEE80211_HTCAP_SGI20;
+	ic->ic_htcaps = IEEE80211_HTCAP_SGI20 |
+	    (1U << IEEE80211_HTCAP_RXSTBC_SHIFT);	/* RX STBC, 1 stream */
 	ic->ic_htcaps |=
 	    (IEEE80211_HTCAP_SMPS_DIS << IEEE80211_HTCAP_SMPS_SHIFT);
 	ic->ic_htxcaps = 0;
@@ -2181,6 +2219,7 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 	 */
 	ic->ic_vhtcaps = IEEE80211_VHTCAP_MAX_MPDU_LENGTH_3895 |
 	    IEEE80211_VHTCAP_RXLDPC | IEEE80211_VHTCAP_SHORT_GI_80 |
+	    IEEE80211_VHTCAP_RXSTBC_1 |
 	    (3U << IEEE80211_VHTCAP_MAX_A_MPDU_LENGTH_EXPONENT_SHIFT) |
 	    IEEE80211_VHTCAP_RX_ANTENNA_PATTERN |
 	    IEEE80211_VHTCAP_TX_ANTENNA_PATTERN;
@@ -5694,6 +5733,8 @@ mt7921_mac_fill_rx(struct mwx_softc *sc, struct mbuf *m,
 
 		v0 = le32toh(rxv[0]); /* XXX not implemented yet */ 
 		v1 = le32toh(rxv[1]);
+		if ((rxd3 & MT_RXD3_NORMAL_ADDR_TYPE_MASK) == MT_RXD3_NORMAL_U2M)
+			mwx_rx_rate_account(v0);
 
 		if (rxd1 & MT_RXD1_NORMAL_GROUP_5) {
 			num_rxd += 18;
@@ -7453,6 +7494,27 @@ MtkMwx::debugPoll()
 		    ic->ic_stats.is_rx_tooshort, ic->ic_stats.is_rx_nombuf,
 		    ic->ic_stats.is_ht_rx_frame_below_ba_winstart,
 		    ic->ic_stats.is_ht_rx_frame_above_ba_winend);
+	}
+	if (verbose && mwx_rxr_total != 0) {
+		MWX_DEV_LOG(sc,
+		    "rxrate n=%u mode[cck=%u ofdm=%u ht=%u vht=%u he=%u] bw[20=%u 40=%u 80=%u 160=%u] nss[1=%u 2=%u] "
+		    "mcs[0=%u 1=%u 2=%u 3=%u 4=%u 5=%u 6=%u 7=%u 8=%u 9=%u] sgi=%u stbc=%u ldpc=%u\n",
+		    mwx_rxr_total, mwx_rxr_mode[0], mwx_rxr_mode[1],
+		    mwx_rxr_mode[2] + mwx_rxr_mode[3], mwx_rxr_mode[4],
+		    mwx_rxr_mode[8] + mwx_rxr_mode[9] + mwx_rxr_mode[10] +
+		    mwx_rxr_mode[11],
+		    mwx_rxr_bw[0], mwx_rxr_bw[1], mwx_rxr_bw[2], mwx_rxr_bw[3],
+		    mwx_rxr_nss[0], mwx_rxr_nss[1],
+		    mwx_rxr_mcs[0], mwx_rxr_mcs[1], mwx_rxr_mcs[2], mwx_rxr_mcs[3],
+		    mwx_rxr_mcs[4], mwx_rxr_mcs[5], mwx_rxr_mcs[6], mwx_rxr_mcs[7],
+		    mwx_rxr_mcs[8], mwx_rxr_mcs[9], mwx_rxr_sgi, mwx_rxr_stbc,
+		    mwx_rxr_ldpc);
+		/* per-interval histogram */
+		memset(mwx_rxr_mode, 0, sizeof(mwx_rxr_mode));
+		memset(mwx_rxr_bw, 0, sizeof(mwx_rxr_bw));
+		memset(mwx_rxr_nss, 0, sizeof(mwx_rxr_nss));
+		memset(mwx_rxr_mcs, 0, sizeof(mwx_rxr_mcs));
+		mwx_rxr_sgi = mwx_rxr_stbc = mwx_rxr_ldpc = mwx_rxr_total = 0;
 	}
 	last_intr_calls = mwx_intr_calls;
 
