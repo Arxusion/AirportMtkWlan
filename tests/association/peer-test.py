@@ -15,10 +15,25 @@ pre=r'''
 #define IEEE80211_AID(x) ((x)&0x3fff)
 #define MCU_UNI_CMD_STA_REC_UPDATE 0x20003
 #define STA_REC_STATE 0x07
-struct ieee80211_node{uint16_t ni_associd;};
+struct ieee80211_node{uint16_t ni_associd;uint32_t ni_flags=0;uint16_t ni_htcaps=0;uint8_t ni_ampdu_param=0;uint8_t ni_rxmcs[10]={};};
+#define IEEE80211_NODE_HT 0x0400
+#ifndef htole16
+#define htole16(x) (x)
+#endif
+#define IEEE80211_HTCAP_CBW20_40 0x0002
+#define IEEE80211_HTCAP_SGI40 0x0040
+#define STA_REC_HT 0x09
+#define STA_REC_PHY 0x15
+#define STA_REC_RA 0x01
+#define HT_MCS_MASK_NUM 10
+#define RA_LEGACY_OFDM 0x3fc0
+struct sta_rec_ht_v1{uint16_t tag,len,ht_cap,rsv;};
+struct sta_rec_phy{uint16_t tag,len,basic_rate;uint8_t phy_type,ampdu,rts_policy,rcpi,rsv[2];};
+struct sta_rec_ra_info{uint16_t tag,len,legacy;uint8_t rx_mcs_bitmask[HT_MCS_MASK_NUM];};
 struct mwx_node{ieee80211_node ni;uint16_t wcid;};
 struct mwx_vif{uint8_t omac_idx;};
-struct mwx_softc{struct {ieee80211_node*ic_bss;}sc_ic;mwx_vif sc_vif;};
+struct mwx_softc{struct {ieee80211_node*ic_bss;uint8_t ic_sup_mcs[10];}sc_ic;mwx_vif sc_vif;};
+uint8_t mt7921_get_phy_mode_v2(mwx_softc*,ieee80211_node*){return 0;}
 struct sta_req_hdr{uint8_t unused[8];};
 struct mbuf{unsigned char bytes[256];size_t len;};
 mbuf storage;bool alloc_fail=false,header_fail=false;int send_rc=0,wait_rc=0,sends=0,waits=0;uint32_t fw=0;

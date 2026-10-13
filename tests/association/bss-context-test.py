@@ -33,7 +33,8 @@ code=r'''
 #define htole16(x) (x)
 #define htole32(x) (x)
 struct ieee80211_channel { int ic_freq; int width; };
-struct ieee80211_node { ieee80211_channel *ni_chan; uint8_t ni_bssid[6]; uint16_t ni_intval; uint8_t ni_dtimperiod; };
+struct ieee80211_node { ieee80211_channel *ni_chan; uint8_t ni_bssid[6]; uint16_t ni_intval; uint8_t ni_dtimperiod; uint32_t ni_flags = 0; };
+#define IEEE80211_NODE_HT 0x0400
 struct ieee80211com { int ic_opmode; ieee80211_node *ic_bss; };
 struct mwx_vif { uint8_t idx,omac_idx,band_idx,wmm_idx; struct {uint16_t wcid;} vif_mn; };
 struct mwx_softc { ieee80211com sc_ic; mwx_vif sc_vif; struct {uint8_t num_streams,antenna_mask;} sc_capa; };

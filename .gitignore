@@ -20,3 +20,5 @@ build/
 build/
 DerivedData/
 *.zip
+tests/scan/scan.cpp
+tests/scan/scan-test

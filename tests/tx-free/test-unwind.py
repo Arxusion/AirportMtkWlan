@@ -15,6 +15,7 @@ struct mwx_txwi{mt76_txwi*mt_desc;mbuf*mt_mbuf;bool busy;};
 struct mwx_softc{int sc_txq;};
 mt76_txwi desc; mwx_txwi mt{&desc,nullptr,false};int fail_at,freed,returned,mapped;
 void m_freem(mbuf*m){assert(!m->freed);m->freed=true;freed++;}
+mbuf* mwx_tx_linearize(mbuf*m){return m;}
 mwx_txwi* mwx_txwi_get(mwx_softc*){if(fail_at==1)return nullptr;assert(!mt.busy);mt.busy=true;return &mt;}
 void mt7921_mac_write_txwi(mwx_softc*,mbuf*,ieee80211_node*,mt76_txwi*){}
 int mwx_txwi_enqueue(mwx_softc*,mwx_txwi*t,mbuf*m){if(fail_at==2)return EFBIG;t->mt_mbuf=m;mapped++;return 0;}

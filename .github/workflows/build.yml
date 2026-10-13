@@ -1,0 +1,92 @@
+name: Build
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - name: Checkout (with MacKernelSDK submodule)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          clang --version | head -1
+
+      - name: Version
+        id: ver
+        run: |
+          # Kext bundle versions must be purely numeric (e.g. 1.1.0), otherwise
+          # the kernel refuses to load the kext. Tags look like v1.1.0.
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="$(sed -n 's/.*MODULE_VERSION = \([0-9.]*\);.*/\1/p' SimpleMtkWlan.xcodeproj/project.pbxproj | head -1)"
+          fi
+          if ! [[ "$VERSION" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
+            echo "::error::Invalid kext version '$VERSION' (use tags like v1.2.3)"; exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Host tests
+        run: ./tests/run-all.sh
+
+      - name: Build Debug and Release
+        run: |
+          for CONF in Debug Release; do
+            xcodebuild -project SimpleMtkWlan.xcodeproj -scheme SimpleMtkWlan \
+              -configuration "$CONF" -derivedDataPath build \
+              MODULE_VERSION="${{ steps.ver.outputs.version }}" \
+              CODE_SIGNING_ALLOWED=NO build
+          done
+
+      - name: Package
+        run: |
+          V="${{ steps.ver.outputs.version }}"
+          mkdir -p dist
+          for CONF in Debug Release; do
+            UP="$(echo "$CONF" | tr '[:lower:]' '[:upper:]')"
+            ditto -c -k --sequesterRsrc --keepParent \
+              "build/Build/Products/$CONF/SimpleMtkWlan.kext" \
+              "dist/SimpleMtkWlan-$V-$UP.zip"
+          done
+          ditto -c -k --sequesterRsrc --keepParent \
+            build/Build/Products/Release/SimpleMtkWlan.kext.dSYM \
+            "dist/SimpleMtkWlan-$V-RELEASE-dSYM.zip"
+          cp tools/mtklog.sh dist/
+          (cd dist && shasum -a 256 *.zip > SHA256SUMS.txt)
+          ls -la dist
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: SimpleMtkWlan-${{ steps.ver.outputs.version }}-${{ steps.ver.outputs.short }}
+          path: dist/*
+
+      - name: GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          body: |
+            **SimpleMtkWlan ${{ steps.ver.outputs.version }}** — MediaTek MT7921 / MT7921K (RZ608) / MT7922 Wi-Fi for macOS.
+
+            - `SimpleMtkWlan-*-RELEASE.zip` — optimized build.
+            - `SimpleMtkWlan-*-DEBUG.zip` — debug build (same features; this is the configuration the hardware tests were run with).
+            - `mtklog.sh` — prints the driver's persistent debug log (`./mtklog.sh > mtk.txt`).
+
+            A client app is required to scan/join networks: [SimpleMTKClient](https://github.com/laobamac/SimpleMTKClient).
+            See the README for installation (OpenCore `Kernel → Add`) and troubleshooting.
