@@ -8,6 +8,10 @@
 
 # SimpleMtkWlan
 
+[![Build](https://github.com/flxxxxddd/SimpleMtkWlan/actions/workflows/build.yml/badge.svg)](https://github.com/flxxxxddd/SimpleMtkWlan/actions/workflows/build.yml)
+[![Release](https://img.shields.io/github/v/release/flxxxxddd/SimpleMtkWlan)](https://github.com/flxxxxddd/SimpleMtkWlan/releases)
+[![License: GPL v2](https://img.shields.io/badge/license-GPLv2-blue.svg)](LICENSE)
+
 **Wi-Fi for MediaTek MT7921 / MT7921K (AMD RZ608) / MT7922 PCIe cards on macOS.**
 
 An experimental macOS kernel extension, based on the OpenBSD `mwx(4)` driver and
@@ -50,7 +54,7 @@ Other MediaTek devices are not supported.
 ## Installation
 
 1. Download the latest `SimpleMtkWlan-x.y.z-RELEASE.zip` from
-   [Releases](../../releases) (or build it yourself, see below).
+   [Releases](https://github.com/flxxxxddd/SimpleMtkWlan/releases) (or build it yourself, see below).
 2. Copy `SimpleMtkWlan.kext` to `EFI/OC/Kexts/`.
 3. Add it to `config.plist → Kernel → Add`:
 
@@ -106,7 +110,7 @@ headers come from [acidanthera/MacKernelSDK](https://github.com/acidanthera/MacK
 which is a git submodule.
 
 ```sh
-git clone --recurse-submodules https://github.com/<you>/SimpleMtkWlan.git
+git clone --recurse-submodules https://github.com/flxxxxddd/SimpleMtkWlan.git
 cd SimpleMtkWlan
 xcodebuild -project SimpleMtkWlan.xcodeproj -scheme SimpleMtkWlan \
   -configuration Release -derivedDataPath build CODE_SIGNING_ALLOWED=NO build
