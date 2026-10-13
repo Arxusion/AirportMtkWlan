@@ -7501,6 +7501,40 @@ MtkMwx::debugPoll()
 		return;
 	ic = &sc->sc_ic;
 	polls++;
+
+	/*
+	 * net80211 sends AUTH / ASSOC_REQ once and then waits the whole 5 s
+	 * management timer before rescanning every channel. A single lost
+	 * frame (seen on 2.4 GHz: AUTH answered, ASSOC response never came)
+	 * thus cost ~20 s at boot. Retransmit like mac80211 does, once per
+	 * poll, up to three times.
+	 */
+	{
+		static int retry_state = -1, retries;
+
+		if (ic->ic_opmode == IEEE80211_M_STA && ic->ic_mgt_timer != 0 &&
+		    (ic->ic_state == IEEE80211_S_AUTH ||
+		    ic->ic_state == IEEE80211_S_ASSOC)) {
+			if (retry_state != ic->ic_state) {
+				retry_state = ic->ic_state;
+				retries = 0;
+			} else if (retries < 3) {
+				retries++;
+				MWX_DEV_LOG(sc, "%s retry %d to %s\n",
+				    ic->ic_state == IEEE80211_S_AUTH ?
+				    "AUTH" : "ASSOC", retries,
+				    ether_sprintf(ic->ic_bss->ni_macaddr));
+				if (ic->ic_state == IEEE80211_S_AUTH)
+					IEEE80211_SEND_MGMT(ic, ic->ic_bss,
+					    IEEE80211_FC0_SUBTYPE_AUTH, 1);
+				else
+					IEEE80211_SEND_MGMT(ic, ic->ic_bss,
+					    IEEE80211_FC0_SUBTYPE_ASSOC_REQ, 0);
+			}
+		} else
+			retry_state = -1;
+	}
+
 	sta = mwx_read(sc, MT_WFDMA0_HOST_INT_STA);
 	ena = mwx_read(sc, MT_WFDMA0_HOST_INT_ENA);
 	lp = mwx_read(sc, MT_CONN_ON_LPCTL);
