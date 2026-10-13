@@ -680,6 +680,10 @@ int		mwx_ampdu_rx_start(struct ieee80211com *, struct ieee80211_node *,
 		    uint8_t);
 void		mwx_ampdu_rx_stop(struct ieee80211com *, struct ieee80211_node *,
 		    uint8_t);
+int		mwx_ampdu_tx_start(struct ieee80211com *, struct ieee80211_node *,
+		    uint8_t);
+void		mwx_ampdu_tx_stop(struct ieee80211com *, struct ieee80211_node *,
+		    uint8_t);
 int		mwx_mcu_fw_pmctrl(struct mwx_softc *);
 int		mwx_mcu_drv_pmctrl(struct mwx_softc *);
 int		mwx_wfsys_reset(struct mwx_softc *sc);
@@ -2117,7 +2121,8 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 #endif
 	    IEEE80211_C_SHSLOT |	/* short slot time supported */
 	    IEEE80211_C_SHPREAMBLE |	/* short preamble supported */
-	    IEEE80211_C_QOS;		/* WMM, required for 11n */
+	    IEEE80211_C_QOS |		/* WMM, required for 11n */
+	    IEEE80211_C_TX_AMPDU;	/* TX A-MPDU, BA set up in firmware */
 
 	/* 802.11n, 20 MHz only for now (no 40 MHz / SGI40 yet). */
 	ic->ic_htcaps = IEEE80211_HTCAP_SGI20;
@@ -2173,6 +2178,8 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 	ic->ic_set_key = mwx_set_key;
 	ic->ic_ampdu_rx_start = mwx_ampdu_rx_start;
 	ic->ic_ampdu_rx_stop = mwx_ampdu_rx_stop;
+	ic->ic_ampdu_tx_start = mwx_ampdu_tx_start;
+	ic->ic_ampdu_tx_stop = mwx_ampdu_tx_stop;
 	ic->ic_delete_key = mwx_delete_key;
 
 	/* Override 802.11 state transition machine. */
@@ -5955,6 +5962,20 @@ mt7921_mac_write_txwi_80211(struct mwx_softc *sc, struct mbuf *m,
 	}
 #endif
 
+	/* Let the firmware know about our ADDBA requests (as Linux does). */
+	if (type == (IEEE80211_FC0_TYPE_MGT >> IEEE80211_FC0_TYPE_SHIFT) &&
+	    subtype == (IEEE80211_FC0_SUBTYPE_ACTION >>
+	    IEEE80211_FC0_SUBTYPE_SHIFT) &&
+	    mbuf_len(m) >= hdrlen + 5) {
+		uint8_t *act = mtod(m, uint8_t *) + hdrlen;
+		if (act[0] == IEEE80211_CATEG_BA &&
+		    act[1] == IEEE80211_ACTION_ADDBA_REQ) {
+			uint16_t capab = act[3] | (act[4] << 8);
+			txp->txwi[5] |= htole32(MT_TXD5_ADD_BA);
+			tid = (capab >> 2) & 0xf;
+		}
+	}
+
 	val = MT_HDR_FORMAT_802_11 | MT_TXD1_HDR_INFO(hdrlen / 2) |
 	    MT_TXD1_TID(tid);
 	txp->txwi[1] |= htole32(val);
@@ -6218,7 +6239,8 @@ mt7921_get_phy_mode_v2(struct mwx_softc *sc, struct ieee80211_node *ni)
 		mode |= PHY_TYPE_BIT_OFDM;
 		if (ieee80211_node_supports_ht(ni))
 			mode |= PHY_TYPE_BIT_HT;
-		if (ieee80211_node_supports_vht(ni))
+		/* only once VHT is actually negotiated (not just supported) */
+		if (ni->ni_flags & IEEE80211_NODE_VHT)
 			mode |= PHY_TYPE_BIT_VHT;
 #ifdef NOTYET
 		if (ieee80211_node_supports_he(ni))
@@ -7089,7 +7111,7 @@ int mt7921_mcu_set_associated_peer(struct mwx_softc *sc)
  */
 static int
 mwx_mcu_sta_ba(struct mwx_softc *sc, struct ieee80211_node *ni, uint8_t tid,
-    uint16_t ssn, uint16_t winsize, int enable)
+    uint16_t ssn, uint16_t winsize, int enable, int tx)
 {
 	struct mwx_node *mn = (struct mwx_node *)ni;
 	struct sta_rec_ba *ba;
@@ -7102,7 +7124,7 @@ mwx_mcu_sta_ba(struct mwx_softc *sc, struct ieee80211_node *ni, uint8_t tid,
 	ba = (struct sta_rec_ba *)mwx_append_tlv(m, &tlvnum, STA_REC_BA,
 	    sizeof(*ba));
 	ba->tid = tid;
-	ba->ba_type = MT_BA_TYPE_RECIPIENT;
+	ba->ba_type = tx ? MT_BA_TYPE_ORIGINATOR : MT_BA_TYPE_RECIPIENT;
 	ba->amsdu = 0;
 	ba->ba_en = enable ? (1U << tid) : 0;
 	ba->ssn = htole16(ssn);
@@ -7122,7 +7144,7 @@ mwx_ampdu_rx_start(struct ieee80211com *ic, struct ieee80211_node *ni,
 	struct ieee80211_rx_ba *ba = &ni->ni_rx_ba[tid];
 	int rv;
 
-	rv = mwx_mcu_sta_ba(sc, ni, tid, ba->ba_winstart, ba->ba_winsize, 1);
+	rv = mwx_mcu_sta_ba(sc, ni, tid, ba->ba_winstart, ba->ba_winsize, 1, 0);
 	MWX_DEV_LOG(sc, "rx BA start tid=%u ssn=%u win=%u rv=%d\n", tid,
 	    ba->ba_winstart, ba->ba_winsize, rv);
 	return rv;
@@ -7135,8 +7157,41 @@ mwx_ampdu_rx_stop(struct ieee80211com *ic, struct ieee80211_node *ni,
 	struct mwx_softc *sc = (struct mwx_softc *)ic->ic_softc;
 	int rv;
 
-	rv = mwx_mcu_sta_ba(sc, ni, tid, 0, 0, 0);
+	rv = mwx_mcu_sta_ba(sc, ni, tid, 0, 0, 0, 0);
 	MWX_DEV_LOG(sc, "rx BA stop tid=%u rv=%d\n", tid, rv);
+}
+
+/*
+ * TX Block Ack session (we are the originator): the firmware aggregates the
+ * TID into A-MPDUs and syncs its hardware sequence number to the SSN we sent
+ * in the ADDBA request.
+ */
+int
+mwx_ampdu_tx_start(struct ieee80211com *ic, struct ieee80211_node *ni,
+    uint8_t tid)
+{
+	struct mwx_softc *sc = (struct mwx_softc *)ic->ic_softc;
+	struct ieee80211_tx_ba *ba = &ni->ni_tx_ba[tid];
+	uint16_t win = ba->ba_winsize;
+	int rv;
+
+	if (win == 0 || win > 64)
+		win = 64;
+	rv = mwx_mcu_sta_ba(sc, ni, tid, ba->ba_winstart, win, 1, 1);
+	MWX_DEV_LOG(sc, "tx BA start tid=%u ssn=%u win=%u rv=%d\n", tid,
+	    ba->ba_winstart, win, rv);
+	return rv;
+}
+
+void
+mwx_ampdu_tx_stop(struct ieee80211com *ic, struct ieee80211_node *ni,
+    uint8_t tid)
+{
+	struct mwx_softc *sc = (struct mwx_softc *)ic->ic_softc;
+	int rv;
+
+	rv = mwx_mcu_sta_ba(sc, ni, tid, 0, 0, 0, 1);
+	MWX_DEV_LOG(sc, "tx BA stop tid=%u rv=%d\n", tid, rv);
 }
 
 int
