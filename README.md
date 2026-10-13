@@ -20,7 +20,8 @@ the itlwm-style `net80211` port. It exposes the card as an Ethernet interface
 [SimpleMTK](https://github.com/laobamac/SimpleMTKClient) menu-bar client.
 
 > This fork contains the fixes needed to make **MT7921 / RZ608** actually work
-> (it was attaching but never passing traffic), plus 802.11n. See
+> (it was attaching but never passing traffic), plus 802.11n and 802.11ac
+> (VHT80). See
 > [What changed in this fork](#what-changed-in-this-fork).
 
 ## Status
@@ -32,11 +33,13 @@ the itlwm-style `net80211` port. It exposes the card as an Ethernet interface
 | WPA2-PSK (CCMP) association, 4-way handshake | ✅ |
 | Hardware RX decryption (software fallback for anything the chip misses) | ✅ |
 | Switching between networks / bands | ✅ |
-| 802.11n (HT20, MCS 0–15, SGI20, WMM) | ✅ |
+| 802.11n (HT20/HT40, MCS 0–15, SGI, RX STBC, WMM) | ✅ |
+| 802.11ac (VHT20/40/80, 2×2 MCS 0–9, RX STBC) | ✅ |
 | A-MPDU: RX Block Ack + TX aggregation | ✅ |
+| Auto-join at boot, 5 GHz preferred over 2.4 GHz of the same router | ✅ |
+| AUTH / ASSOC retransmission (lost frames no longer cost a full rescan) | ✅ |
 | Auto-recovery of a wedged chip (DMA stall watchdog, PCIe FLR at attach) | ✅ |
-| 802.11n HT40 | ❌ not yet |
-| 802.11ac (VHT) / 802.11ax (HE) | ❌ not yet |
+| 802.11ax (HE) | ❌ not yet |
 | Native macOS Wi-Fi menu (IO80211Family) | ❌ use SimpleMTK |
 | Sleep / wake | ⚠️ untested |
 | AirDrop / Handoff / Continuity | ❌ not possible with this design |
@@ -45,7 +48,7 @@ the itlwm-style `net80211` port. It exposes the card as an Ethernet interface
 
 | Card | PCI ID | macOS | Result |
 |---|---|---|---|
-| MediaTek MT7921K (AMD RZ608) | `14c3:0608` | 15.8.1 Sequoia, Intel desktop | 22 Mbit/s down / 4 Mbit/s up on 5 GHz HT20 with a weak signal; 2.4 GHz works |
+| MediaTek MT7921K (AMD RZ608) | `14c3:0608` | 15.8.1 Sequoia, Intel desktop | 30–50 Mbit/s on 5 GHz VHT80 (2SS, weak signal, 100 Mbit/s line; a MacBook in the same spot gets ~85); 2.4 GHz works; joins automatically at boot |
 | MediaTek MT7922 | `14c3:7922` | Tahoe (upstream PR #5) | legacy 20 MHz on 5 GHz |
 | MediaTek MT7921 | `14c3:7961` | — | same chip family as RZ608, expected to work |
 
@@ -100,6 +103,15 @@ Optional boot-args: `-novht`, `-noht40`.
   compared to `rx_hwdec`. Speed tests are only meaningful with the SimpleMTK
   menu closed (the client triggers scans; they are throttled to one per two
   minutes while connected).
+* **A 2.4 GHz wireless mouse/keyboard stutters while Wi-Fi is on 2.4 GHz.**
+  That is RF coexistence in the same band, not a driver bug: keep the card on
+  5 GHz (leave only the 5 GHz network in SimpleMTK) or move the dongle away
+  from the antennas with a USB extension.
+* **Slow to connect after boot.** The network is chosen by the SimpleMTK app,
+  which only starts after login; the driver scans until then.
+* **Throughput below a real Mac.** Block Ack Request frames from the AP are
+  not delivered by the firmware yet, so reorder gaps are closed by a 100 ms
+  timeout; this is the main remaining throughput limit.
 * Unrelated kernel panics (`element modified after free` at ~2 s of uptime)
   were caused by `NVMeFix.kext` on the test machine, not by this driver.
 
@@ -169,7 +181,15 @@ On top of upstream and [PR #5](https://github.com/laobamac/SimpleMtkWlan/pull/5)
   2.4 and 5 GHz networks of the same router every few seconds).
 * **Throughput:** background scans while associated are throttled.
 * **802.11n:** HT capabilities, WMM, full peer STA record on association, RX
-  Block Ack and TX A-MPDU sessions passed to the firmware.
+  Block Ack and TX A-MPDU sessions passed to the firmware. HT 20/40 is
+  advertised (APs only send 80 MHz to clients that claim 40 MHz support).
+* **802.11ac:** VHT capabilities, STA_REC_VHT, operating width (20/40/80 MHz)
+  taken from the association, RX STBC; per-interval RX rate histogram in the
+  debug log.
+* **Joining:** 5 GHz preferred when within 15 RSSI points of 2.4 GHz, stale
+  peer records and stale scan results cleaned up, deauth before the first
+  AUTH and on stop, AUTH/ASSOC retransmitted up to 3 times (one lost
+  association response used to cost ~20 s).
 * **Robustness:** DMA stall watchdog with hard reset + firmware reload, chip
   recovery at attach (WFSYS reset → PCIe FLR), TXWI leak fix.
 * **Debuggability:** persistent `MtkDebugLog` ring buffer published on the PCI

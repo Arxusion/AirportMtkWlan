@@ -74,7 +74,16 @@ stubs (new fields, structs or helper calls) rather than weakening its asserts.
 - MCU commands sent from RX/interrupt context (BA setup) must not wait for the
   response; the response arrives through the same interrupt path.
 - Only advertise VHT to the firmware (`PHY_TYPE_BIT_VHT`) once VHT is
-  negotiated. HT40/VHT are not implemented yet.
+  negotiated. The operating width comes from the association
+  (`mwx_node_chan_width`); the channel is switched to 40/80 MHz on RUN.
+- Advertise HT `CBW20_40` in the HT caps even when running VHT80: APs only
+  transmit 80 MHz to clients that claim 40 MHz support.
+- net80211 sends AUTH/ASSOC_REQ once and waits 5 s; `debugPoll()` retransmits
+  them up to 3 times. A lost association response is common on 2.4 GHz.
+- Scan completions that arrive in RUN without `F_BGSCAN` are stale and must
+  be ignored (they caused re-joins). Prefer 5 GHz within 15 RSSI points.
+- BAR frames are not delivered by the firmware (`bar_rx=0` in the `ba` debug
+  line); reorder gaps rely on the 100 ms `IEEE80211_BA_GAP_TIMEOUT`.
 - A warm reboot keeps the M.2 card powered; attach recovers via WFSYS reset and
   PCIe FLR.
 
