@@ -35,11 +35,17 @@ code=r'''
 struct ieee80211_channel { int ic_freq; int width; };
 struct ieee80211_node { ieee80211_channel *ni_chan; uint8_t ni_bssid[6]; uint16_t ni_intval; uint8_t ni_dtimperiod; uint32_t ni_flags = 0; };
 #define IEEE80211_NODE_HT 0x0400
+#define IEEE80211_NODE_VHT 0x2000
+#define CMD_CBW_80MHZ 2
 struct ieee80211com { int ic_opmode; ieee80211_node *ic_bss; };
 struct mwx_vif { uint8_t idx,omac_idx,band_idx,wmm_idx; struct {uint16_t wcid;} vif_mn; };
 struct mwx_softc { ieee80211com sc_ic; mwx_vif sc_vif; struct {uint8_t num_streams,antenna_mask;} sc_capa; };
 int ieee80211_mhz2ieee(int f,int) {return f==2484?14:f<3000?(f-2407)/5:(f-5000)/5;}
 int mt7921_mcu_chan_bw(ieee80211_channel *c){return c->width;}
+/* Mirrors the driver: 80 MHz only once VHT80 is negotiated (stub: width==2 -> center 42). */
+void mwx_node_chan_width(ieee80211_node *ni,uint8_t *bw,uint8_t *center){
+ *bw=CMD_CBW_20MHZ;*center=ieee80211_mhz2ieee(ni->ni_chan->ic_freq,0);
+ if((ni->ni_flags&IEEE80211_NODE_VHT)&&ni->ni_chan->width==2){*bw=CMD_CBW_80MHZ;*center=42;}}
 std::vector<std::vector<uint8_t>> sent;
 int fail_at=0;
 int mwx_send_assoc_status(mwx_softc*,int cmd,void *p,int n){assert(cmd==0x20002);auto b=(uint8_t*)p;sent.emplace_back(b,b+n);return int(sent.size())==fail_at?EIO:0;}
@@ -61,9 +67,17 @@ int main(){
  fail_at=0;sent.clear();sc.sc_ic.ic_bss=nullptr;assert(mt7921_mcu_set_associated_bss(&sc,1)==EINVAL);assert(sent.empty());
  sc.sc_ic.ic_bss=&n;n.ni_chan=nullptr;assert(mt7921_mcu_set_associated_bss(&sc,1)==EINVAL);assert(sent.empty());
  n.ni_chan=IEEE80211_CHAN_ANYC;assert(mt7921_mcu_set_associated_bss(&sc,1)==EINVAL);assert(sent.empty());
- n.ni_chan=&c;c.width=1;assert(mt7921_mcu_set_associated_bss(&sc,1)==EOPNOTSUPP);assert(sent.empty());
+ /* Channel width flags are capabilities only: a non-VHT peer is always 20 MHz. */
+ n.ni_chan=&c;c.ic_freq=5180;c.width=2;sent.clear();assert(mt7921_mcu_set_associated_bss(&sc,1)==0);assert(sent.size()==2);
+ assert(sent[1][9]==36&&sent[1][11]==CMD_CBW_20MHZ&&sent[1][15]==0&&sent[1][16]==0);
+ /* VHT80 golden RLM: control 36, center 42, bw 80, 40MHz+ allowed, SCA; phymode A|AC. */
+ n.ni_flags=IEEE80211_NODE_VHT;sent.clear();assert(mt7921_mcu_set_associated_bss(&sc,1)==0);assert(sent.size()==2);
+ assert(sent[0][29]==(1|(1<<5)));
+ std::vector<uint8_t> rlm80={3,0,0,0,2,0,16,0,36,42,0,CMD_CBW_80MHZ,2,3,1,4,1,1,0,0};
+ assert(sent[1]==rlm80);
+ n.ni_flags=0;sent.clear();
  c.width=0;sc.sc_ic.ic_opmode=2;assert(mt7921_mcu_set_associated_bss(&sc,1)==0);assert(sent.empty());
- puts("PASS: real BSS constructor, golden wire packets on 7 channels, disassociation, firmware failures, null/unsupported guards");
+ puts("PASS: real BSS constructor, golden wire packets on 7 channels, VHT80 RLM, 20 MHz for non-VHT peers, disassociation, firmware failures, null guards");
 }
 '''
 p=base/'tests/association/bss-context-test.cpp';p.write_text(code)

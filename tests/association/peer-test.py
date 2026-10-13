@@ -15,10 +15,19 @@ pre=r'''
 #define IEEE80211_AID(x) ((x)&0x3fff)
 #define MCU_UNI_CMD_STA_REC_UPDATE 0x20003
 #define STA_REC_STATE 0x07
-struct ieee80211_node{uint16_t ni_associd;uint32_t ni_flags=0;uint16_t ni_htcaps=0;uint8_t ni_ampdu_param=0;uint8_t ni_rxmcs[10]={};};
+struct ieee80211_node{uint16_t ni_associd;uint32_t ni_flags=0;uint16_t ni_htcaps=0;uint8_t ni_ampdu_param=0;uint8_t ni_rxmcs[10]={};uint32_t ni_vhtcaps=0;struct{uint16_t rx_mcs_map,rx_highest,tx_mcs_map,tx_highest;} ni_vht_mcsinfo={};int ni_chw=0;};
 #define IEEE80211_NODE_HT 0x0400
+#define IEEE80211_NODE_VHT 0x2000
+#define IEEE80211_VHTCAP_SUPP_CHAN_WIDTH_MASK 0x0000000C
+#define STA_REC_VHT 0x0a
+#define CMD_CBW_80MHZ 2
+struct ieee80211_vht_mcs_info{uint16_t rx_mcs_map,rx_highest,tx_mcs_map,tx_highest;};
+struct sta_rec_vht_v1{uint16_t tag,len;uint32_t vht_cap;uint16_t vht_rx_mcs_map,vht_tx_mcs_map;uint8_t rts_bw_sig,rsv[3];};
 #ifndef htole16
 #define htole16(x) (x)
+#endif
+#ifndef htole32
+#define htole32(x) (x)
 #endif
 #define IEEE80211_HTCAP_CBW20_40 0x0002
 #define IEEE80211_HTCAP_SGI40 0x0040
@@ -32,7 +41,8 @@ struct sta_rec_phy{uint16_t tag,len,basic_rate;uint8_t phy_type,ampdu,rts_policy
 struct sta_rec_ra_info{uint16_t tag,len,legacy;uint8_t rx_mcs_bitmask[HT_MCS_MASK_NUM];};
 struct mwx_node{ieee80211_node ni;uint16_t wcid;};
 struct mwx_vif{uint8_t omac_idx;};
-struct mwx_softc{struct {ieee80211_node*ic_bss;uint8_t ic_sup_mcs[10];}sc_ic;mwx_vif sc_vif;};
+struct mwx_softc{struct {ieee80211_node*ic_bss;uint8_t ic_sup_mcs[10];}sc_ic;mwx_vif sc_vif;struct{uint8_t num_streams;}sc_capa;};
+void mwx_node_chan_width(ieee80211_node*,uint8_t*bw,uint8_t*center){*bw=0;*center=0;}
 uint8_t mt7921_get_phy_mode_v2(mwx_softc*,ieee80211_node*){return 0;}
 struct sta_req_hdr{uint8_t unused[8];};
 struct mbuf{unsigned char bytes[256];size_t len;};

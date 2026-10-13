@@ -1343,6 +1343,17 @@ struct sta_rec_ba {
 	uint16_t	winsize;
 } __packed;
 
+#define	STA_REC_VHT			0x0a
+struct sta_rec_vht_v1 {
+	uint16_t	tag;
+	uint16_t	len;
+	uint32_t	vht_cap;
+	uint16_t	vht_rx_mcs_map;
+	uint16_t	vht_tx_mcs_map;
+	uint8_t		rts_bw_sig;
+	uint8_t		rsv[3];
+} __packed;
+
 #define	STA_REC_HT			0x09
 struct sta_rec_ht_v1 {
 	uint16_t	tag;

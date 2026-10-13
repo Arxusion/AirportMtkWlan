@@ -1359,6 +1359,22 @@ mwx_newstate_task(void *ptr)
 
 		mt7921_mcu_hw_scan_cancel(sc);
 		mwx_mcu_set_deep_sleep(sc, 0);
+		{
+			struct ieee80211_node *bni = ic->ic_bss;
+			MWX_DEV_LOG(sc,
+			    "RUN peer ht=%d vht=%d chw=%d vht_chanwidth=%u vht_chan1=%u center_freq1=%u htcaps=0x%04x vhtcaps=0x%08x\n",
+			    !!(bni->ni_flags & IEEE80211_NODE_HT),
+			    !!(bni->ni_flags & IEEE80211_NODE_VHT), bni->ni_chw,
+			    bni->ni_vht_chanwidth, bni->ni_vht_chan1,
+			    bni->ni_chan->ic_center_freq1, bni->ni_htcaps,
+			    bni->ni_vhtcaps);
+			if ((bni->ni_flags & IEEE80211_NODE_VHT) &&
+			    bni->ni_chw == IEEE80211_CHAN_WIDTH_80) {
+				int crv = mt7921_mcu_set_chan_info(sc,
+				    MCU_EXT_CMD_CHANNEL_SWITCH);
+				MWX_DEV_LOG(sc, "RUN switch to 80 MHz rv=%d\n", crv);
+			}
+		}
 		rv = mt7921_mcu_set_associated_bss(sc, 1);
 		if (!rv)
 			rv = mt7921_mcu_set_associated_peer(sc);
@@ -1924,8 +1940,13 @@ mwx_preinit(struct mwx_softc *sc)
 			chan = mwx_channels_5ghz[i];
 			ic->ic_channels[chan].ic_freq =
 			    ieee80211_ieee2mhz(chan, IEEE80211_CHAN_5GHZ);
+			/*
+			 * Capability flags only; the operating width comes
+			 * from what net80211 negotiates (ni_chw).
+			 */
 			ic->ic_channels[chan].ic_flags = IEEE80211_CHAN_A |
-			    IEEE80211_CHAN_HT20;
+			    IEEE80211_CHAN_HT20 | IEEE80211_CHAN_VHT20 |
+			    IEEE80211_CHAN_VHT40 | IEEE80211_CHAN_VHT80;
 		}
 	}
 #ifdef NOTYET
@@ -1945,6 +1966,8 @@ mwx_preinit(struct mwx_softc *sc)
 
 	/* Configure channel information obtained from firmware. */
 	ieee80211_channel_init(ifp);
+	/* VHT channels make net80211 claim 11ax too; HE is not supported. */
+	ic->ic_modecaps &= ~(1 << IEEE80211_MODE_11AX);
 	MWX_DEV_LOG(sc, "preinit channel table ready\n");
 
 	if (IEEE80211_ADDR_EQ(etheranyaddr, sc->sc_ic.ic_myaddr))
@@ -1965,10 +1988,15 @@ mwx_preinit(struct mwx_softc *sc)
 	 * so together with TX A-MPDU, which the driver does not support yet.
 	 */
 	ic->ic_flags |= IEEE80211_F_QOS;
-	MWX_DEV_LOG(sc, "preinit 11n htcaps=0x%04x mcs=%02x%02x hton=%d qos=%d\n",
+	/* media_init does not turn VHT on by itself; never enable HE. */
+	ic->ic_flags &= ~IEEE80211_F_HEON;
+	if (ic->ic_modecaps & (1 << IEEE80211_MODE_11AC))
+		ic->ic_flags |= IEEE80211_F_VHTON;
+	MWX_DEV_LOG(sc, "preinit 11n htcaps=0x%04x mcs=%02x%02x hton=%d qos=%d vhton=%d vhtcaps=0x%08x\n",
 	    ic->ic_htcaps, ic->ic_sup_mcs[1], ic->ic_sup_mcs[0],
 	    !!(ic->ic_flags & IEEE80211_F_HTON),
-	    !!(ic->ic_flags & IEEE80211_F_QOS));
+	    !!(ic->ic_flags & IEEE80211_F_QOS),
+	    !!(ic->ic_flags & IEEE80211_F_VHTON), ic->ic_vhtcaps);
 
 	sc->sc_fw_loaded = 1;
 	MWX_DEV_LOG(sc, "preinit complete\n");
@@ -2132,6 +2160,21 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 	ic->ic_txbfcaps = 0;
 	ic->ic_aselcaps = 0;
 	ic->ic_ampdu_params = (IEEE80211_AMPDU_PARAM_SS_4 | 0x3 /* 64k */);
+
+	/*
+	 * 802.11ac: 80 MHz, SGI80, RX LDPC, MCS 0-9 on 2 streams. MPDUs are
+	 * capped at 3895 bytes and A-MPDUs at 64K (RX buffers are 2 KB clusters).
+	 */
+	ic->ic_vhtcaps = IEEE80211_VHTCAP_MAX_MPDU_LENGTH_3895 |
+	    IEEE80211_VHTCAP_RXLDPC | IEEE80211_VHTCAP_SHORT_GI_80 |
+	    (3U << IEEE80211_VHTCAP_MAX_A_MPDU_LENGTH_EXPONENT_SHIFT) |
+	    IEEE80211_VHTCAP_RX_ANTENNA_PATTERN |
+	    IEEE80211_VHTCAP_TX_ANTENNA_PATTERN;
+	/* 2 bits per NSS: 2 = MCS 0-9, 3 = not supported */
+	ic->ic_vht_rx_mcs_map = 0xfffa;
+	ic->ic_vht_tx_mcs_map = 0xfffa;
+	ic->ic_vht_rx_highest = 0;
+	ic->ic_vht_tx_highest = 0;
 
 #if NOTYET
 	ic->ic_vhtcaps = IEEE80211_VHTCAP_MAX_MPDU_LENGTH_11454 |
@@ -4898,6 +4941,24 @@ mt7921_mcu_chan_bw(struct ieee80211_channel *channel)
 	return CMD_CBW_20MHZ;
 }
 
+/*
+ * Operating bandwidth and center channel negotiated with the AP. 20 MHz
+ * unless VHT 80 MHz was negotiated (HT40 is not advertised).
+ */
+static void
+mwx_node_chan_width(struct ieee80211_node *ni, uint8_t *bw, uint8_t *center)
+{
+	*bw = CMD_CBW_20MHZ;
+	*center = ieee80211_mhz2ieee(ni->ni_chan->ic_freq, ni->ni_chan->ic_flags);
+	if ((ni->ni_flags & IEEE80211_NODE_VHT) &&
+	    ni->ni_chw == IEEE80211_CHAN_WIDTH_80 &&
+	    ni->ni_chan->ic_center_freq1 != 0) {
+		*bw = CMD_CBW_80MHZ;
+		*center = ieee80211_mhz2ieee(ni->ni_chan->ic_center_freq1,
+		    ni->ni_chan->ic_flags);
+	}
+}
+
 int
 mt7921_mcu_set_chan_info(struct mwx_softc *sc, int cmd)
 {
@@ -4932,9 +4993,12 @@ mt7921_mcu_set_chan_info(struct mwx_softc *sc, int cmd)
 
 	req.control_ch = ieee80211_mhz2ieee(channel->ic_freq,
 		    channel->ic_flags);
-	req.center_ch = ieee80211_mhz2ieee(channel->ic_freq,
-		    channel->ic_flags);
-	req.bw = mt7921_mcu_chan_bw(channel);
+	req.center_ch = req.control_ch;
+	req.bw = CMD_CBW_20MHZ;
+	/* Use the negotiated operating width, not the channel capabilities. */
+	if (sc->sc_ic.ic_opmode == IEEE80211_M_STA && sc->sc_ic.ic_bss != NULL &&
+	    channel == sc->sc_ic.ic_bss->ni_chan)
+		mwx_node_chan_width(sc->sc_ic.ic_bss, &req.bw, &req.center_ch);
 
 #ifdef NOTYET
 	if (channel->ic_flags & IEEE80211_CHAN_6GHZ)
@@ -7093,8 +7157,28 @@ int mt7921_mcu_set_associated_peer(struct mwx_softc *sc)
             ni->ni_htcaps, ni->ni_ampdu_param, phy->phy_type,
             ra->rx_mcs_bitmask[1], ra->rx_mcs_bitmask[0]);
     }
+    if (ni->ni_flags & IEEE80211_NODE_VHT) {
+        struct sta_rec_vht_v1 *vht = (struct sta_rec_vht_v1 *)mwx_append_tlv(m,
+            &tlvnum, STA_REC_VHT, sizeof(*vht));
+        /* peer capabilities without 160/80+80 (we only do 80 MHz) */
+        vht->vht_cap = htole32(ni->ni_vhtcaps &
+            ~IEEE80211_VHTCAP_SUPP_CHAN_WIDTH_MASK);
+        vht->vht_rx_mcs_map = htole16(ni->ni_vht_mcsinfo.rx_mcs_map);
+        vht->vht_tx_mcs_map = htole16(ni->ni_vht_mcsinfo.tx_mcs_map);
+    }
     struct sta_rec_state *state = (struct sta_rec_state *)mwx_append_tlv(m, &tlvnum, STA_REC_STATE, sizeof(*state));
     state->state = 2; /* MT76_STA_INFO_STATE_ASSOC: NONE=0, AUTH=1, ASSOC=2. */
+    if (ni->ni_flags & IEEE80211_NODE_VHT) {
+        /* bandwidth (0=20, 2=80) | (rx nss - 1) << 4 */
+        uint8_t bw, center;
+        mwx_node_chan_width(ni, &bw, &center);
+        state->vht_opmode = (bw == CMD_CBW_80MHZ ? 2 : 0) |
+            ((sc->sc_capa.num_streams > 1 ? 1 : 0) << 4);
+        MWX_DEV_LOG(sc, "assoc_peer VHT vhtcaps=0x%08x rxmcs=0x%04x txmcs=0x%04x chw=%d center=%u opmode=0x%02x\n",
+            ni->ni_vhtcaps, ni->ni_vht_mcsinfo.rx_mcs_map,
+            ni->ni_vht_mcsinfo.tx_mcs_map, ni->ni_chw, center,
+            state->vht_opmode);
+    }
     m = mwx_fill_sta_req_hdr(m, &sc->sc_vif, sc->sc_vif.omac_idx, ((struct mwx_node *)ni)->wcid, tlvnum);
     if (!m) return ENOBUFS;
     int seq, rv = mwx_mcu_send_mbuf(sc, MCU_UNI_CMD_STA_REC_UPDATE, m, &seq);
@@ -7222,8 +7306,8 @@ mt7921_mcu_set_associated_bss(struct mwx_softc *sc, int associated)
 	if (ni == NULL || ni->ni_chan == NULL ||
 	    ni->ni_chan == IEEE80211_CHAN_ANYC)
 		return EINVAL;
-	if (mt7921_mcu_chan_bw(ni->ni_chan) != CMD_CBW_20MHZ)
-		return EOPNOTSUPP;
+	uint8_t op_bw, op_center;
+	mwx_node_chan_width(ni, &op_bw, &op_center);
 	is_2g = IEEE80211_IS_CHAN_2GHZ(ni->ni_chan);
 	bss.bss_idx = mvif->idx;
 	bss.basic.tag = htole16(UNI_BSS_INFO_BASIC);
@@ -7246,6 +7330,8 @@ mt7921_mcu_set_associated_bss(struct mwx_softc *sc, int associated)
 	if (ni->ni_flags & IEEE80211_NODE_HT)
 		bss.basic.phymode |= is_2g ? (1U << 3) /* GN */ :
 		    (1U << 4) /* AN */;
+	if (ni->ni_flags & IEEE80211_NODE_VHT)
+		bss.basic.phymode |= (1U << 5); /* AC */
 	bss.basic.nonht_basic_phy = htole16(is_2g ?
 	    PHY_TYPE_BIT_HR_DSSS | PHY_TYPE_BIT_ERP : PHY_TYPE_BIT_OFDM);
 	rv = mwx_send_assoc_status(sc, MCU_UNI_CMD_BSS_INFO_UPDATE, &bss, sizeof(bss));
@@ -7258,8 +7344,15 @@ mt7921_mcu_set_associated_bss(struct mwx_softc *sc, int associated)
 	channel.rlm.tag = htole16(UNI_BSS_INFO_RLM);
 	channel.rlm.len = htole16(sizeof(channel.rlm));
 	channel.rlm.control_channel = ieee80211_mhz2ieee(ni->ni_chan->ic_freq, 0);
-	channel.rlm.center_chan = channel.rlm.control_channel;
-	channel.rlm.bw = CMD_CBW_20MHZ;
+	channel.rlm.center_chan = op_center;
+	channel.rlm.bw = op_bw;
+	if (op_bw != CMD_CBW_20MHZ) {
+		channel.rlm.ht_op_info = 4;	/* 40 MHz+ allowed */
+		if (channel.rlm.control_channel < channel.rlm.center_chan)
+			channel.rlm.sco = 1;	/* SCA */
+		else if (channel.rlm.control_channel > channel.rlm.center_chan)
+			channel.rlm.sco = 3;	/* SCB */
+	}
 	channel.rlm.tx_streams = sc->sc_capa.num_streams;
 	channel.rlm.rx_streams = sc->sc_capa.antenna_mask;
 	channel.rlm.short_st = 1;
