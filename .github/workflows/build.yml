@@ -88,5 +88,7 @@ jobs:
             - `SimpleMtkWlan-*-DEBUG.zip` — debug build (same features; this is the configuration the hardware tests were run with).
             - `mtklog.sh` — prints the driver's persistent debug log (`./mtklog.sh > mtk.txt`).
 
+            Bluetooth for the same card: [SimpleMtkBtFw](https://github.com/flxxxxddd/SimpleMtkBtFw).
+
             A client app is required to scan/join networks: [SimpleMTKClient](https://github.com/laobamac/SimpleMTKClient).
             See the README for installation (OpenCore `Kernel → Add`) and troubleshooting.

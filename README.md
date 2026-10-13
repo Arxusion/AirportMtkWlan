@@ -19,6 +19,9 @@ the itlwm-style `net80211` port. It exposes the card as an Ethernet interface
 (`enX`); networks are scanned and joined with the
 [SimpleMTK](https://github.com/laobamac/SimpleMTKClient) menu-bar client.
 
+> **Bluetooth** for the same card: **[SimpleMtkBtFw](https://github.com/flxxxxddd/SimpleMtkBtFw)**
+> (firmware loader + patcher; AirPods audio works).
+
 > This fork contains the fixes needed to make **MT7921 / RZ608** actually work
 > (it was attaching but never passing traffic), plus 802.11n and 802.11ac
 > (VHT80). See
@@ -212,5 +215,7 @@ MediaTek firmware license (as in linux-firmware).
 * [OpenIntelWireless/itlwm](https://github.com/OpenIntelWireless/itlwm) (zxystd) — net80211 port and driver architecture
 * Linux [mt76](https://github.com/openwrt/mt76) — hardware reference
 * [acidanthera](https://github.com/acidanthera) — MacKernelSDK
+
+Related: [SimpleMtkBtFw](https://github.com/flxxxxddd/SimpleMtkBtFw) — Bluetooth for MT7921 / RZ608 / MT7922.
 
 See also [CREDITS.md](CREDITS.md).
