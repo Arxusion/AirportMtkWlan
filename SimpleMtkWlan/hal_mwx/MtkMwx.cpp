@@ -98,6 +98,7 @@ extern uint32_t ieee80211_bar_rx_count;
 
 /* RX decrypt path counters, reported by MtkMwx::debugPoll(). */
 static uint32_t mwx_rx_hwdec_cnt, mwx_rx_swdec_cnt;
+static uint32_t mwx_rx_ctl_cnt, mwx_rx_bar_cnt;	/* control frames reaching the driver */
 
 /* RX drop reason counters, reported by MtkMwx::debugPoll(). */
 #define MWX_RX_DROP_REASONS	12
@@ -1408,6 +1409,20 @@ mwx_newstate_task(void *ptr)
 		 * another AP) may have left the peer record in firmware; adding
 		 * a new peer on top of it breaks hardware decryption.
 		 */
+		/*
+		 * Starting a new connection: send a deauth first so the AP drops
+		 * any session it kept from before (e.g. across a reboot); it
+		 * otherwise ignored our first association request. An AP that
+		 * has no session for us just ignores the frame.
+		 */
+		if (ostate == IEEE80211_S_SCAN && ic->ic_bss != NULL) {
+			IEEE80211_SEND_MGMT(ic, ic->ic_bss,
+			    IEEE80211_FC0_SUBTYPE_DEAUTH,
+			    IEEE80211_REASON_AUTH_LEAVE);
+			mwx_start(&ic->ic_if);
+			MWX_DEV_LOG(sc, "AUTH: pre-auth deauth sent to %s\n",
+			    ether_sprintf(ic->ic_bss->ni_macaddr));
+		}
 		if (sc->sc_sta_added) {
 			int srv = mt7921_mac_sta_update(sc, sc->sc_ic.ic_bss, 0, 0);
 			MWX_DEV_LOG(sc, "AUTH: removed stale peer record rv=%d\n", srv);
@@ -1821,6 +1836,12 @@ mwx_rx(struct mwx_softc *sc, struct mbuf *m, struct mbuf_list *ml)
 		}
 	}
 	sc->sc_rx_delivered++;
+	if ((wh->i_fc[0] & IEEE80211_FC0_TYPE_MASK) == IEEE80211_FC0_TYPE_CTL) {
+		mwx_rx_ctl_cnt++;
+		if ((wh->i_fc[0] & IEEE80211_FC0_SUBTYPE_MASK) ==
+		    IEEE80211_FC0_SUBTYPE_BAR)
+			mwx_rx_bar_cnt++;
+	}
 	if (rxi.rxi_flags & IEEE80211_RXI_HWDEC)
 		mwx_rx_hwdec_cnt++;
 	else if (wh->i_fc[1] & IEEE80211_FC1_PROTECTED)
@@ -7541,14 +7562,15 @@ MtkMwx::debugPoll()
 	}
 	if (verbose)
 		MWX_DEV_LOG(sc,
-		    "ba gap_timeout=%u frame_lost=%u slide=%u jump=%u below=%u bar_rx=%u rx_agreements=%u\n",
+		    "ba gap_timeout=%u frame_lost=%u slide=%u jump=%u below=%u bar_rx=%u rx_agreements=%u drv_ctl=%u drv_bar=%u\n",
 		    ic->ic_stats.is_ht_rx_ba_window_gap_timeout,
 		    ic->ic_stats.is_ht_rx_ba_frame_lost,
 		    ic->ic_stats.is_ht_rx_ba_window_slide,
 		    ic->ic_stats.is_ht_rx_ba_window_jump,
 		    ic->ic_stats.is_ht_rx_frame_below_ba_winstart,
 		    ieee80211_bar_rx_count,
-		    ic->ic_stats.is_ht_rx_ba_agreements);
+		    ic->ic_stats.is_ht_rx_ba_agreements, mwx_rx_ctl_cnt,
+		    mwx_rx_bar_cnt);
 	if (verbose && mwx_rxr_total != 0) {
 		MWX_DEV_LOG(sc,
 		    "rxrate n=%u mode[cck=%u ofdm=%u ht=%u vht=%u he=%u] bw[20=%u 40=%u 80=%u 160=%u] nss[1=%u 2=%u] "
