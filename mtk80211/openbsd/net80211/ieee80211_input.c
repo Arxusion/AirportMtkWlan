@@ -146,6 +146,7 @@ void    ieee80211_recv_action(struct ieee80211com *, mbuf_t,
 void    ieee80211_recv_pspoll(struct ieee80211com *, mbuf_t,
                               struct ieee80211_node *);
 #endif
+uint32_t ieee80211_bar_rx_count;
 void    ieee80211_recv_bar(struct ieee80211com *, mbuf_t,
                            struct ieee80211_node *);
 void    ieee80211_bar_tid(struct ieee80211com *, struct ieee80211_node *,
@@ -3603,6 +3604,7 @@ void
 ieee80211_recv_bar(struct ieee80211com *ic, mbuf_t m,
                    struct ieee80211_node *ni)
 {
+    ieee80211_bar_rx_count++;
     const struct ieee80211_frame_min *wh;
     const u_int8_t *frm;
     u_int16_t ctl, ssn;

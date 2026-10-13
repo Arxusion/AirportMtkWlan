@@ -302,7 +302,11 @@ struct ieee80211_rx_ba {
 	u_int16_t		ba_winsize;
 	u_int16_t		ba_head;
 	CTimeout*		ba_gap_to;
-#define IEEE80211_BA_GAP_TIMEOUT	300 /* msec */
+/*
+ * 300 ms (OpenBSD) stalls TCP badly when BlockAckReq frames are not delivered
+ * by the firmware; Linux mt76 releases the reorder buffer after 100 ms.
+ */
+#define IEEE80211_BA_GAP_TIMEOUT	100 /* msec */
 
 	/*
 	 * Counter for frames forced to wait in the reordering buffer

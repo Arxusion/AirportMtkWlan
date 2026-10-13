@@ -94,6 +94,8 @@ mwx_rx_rate_account(uint32_t v0)
 		mwx_rxr_ldpc++;
 }
 
+extern uint32_t ieee80211_bar_rx_count;
+
 /* RX decrypt path counters, reported by MtkMwx::debugPoll(). */
 static uint32_t mwx_rx_hwdec_cnt, mwx_rx_swdec_cnt;
 
@@ -1032,6 +1034,19 @@ mwx_stop(struct ifnet *ifp)
 	int was_running = (ifp->if_flags & IFF_RUNNING) != 0;
 
 	DPRINTF("%s: stop\n", DEVNAME(sc));
+
+	/*
+	 * Tell the AP we are leaving (shutdown, interface down). Otherwise it
+	 * keeps our session and ignores the first association after reboot.
+	 */
+	if (was_running && ic->ic_state == IEEE80211_S_RUN &&
+	    ic->ic_opmode == IEEE80211_M_STA && ic->ic_bss != NULL) {
+		int drv = IEEE80211_SEND_MGMT(ic, ic->ic_bss,
+		    IEEE80211_FC0_SUBTYPE_DEAUTH, IEEE80211_REASON_AUTH_LEAVE);
+		mwx_start(ifp);
+		delay(30 * 1000);
+		MWX_DEV_LOG(sc, "stop: deauth sent to AP rv=%d\n", drv);
+	}
 
 	/* Cancel scheduled tasks and let any stale tasks finish up. */
 	if (sc->sc_nswq != NULL) {
@@ -4839,6 +4854,19 @@ mwx_end_scan_task(void *arg)
 	int s;
 
 	s = splnet();
+	/*
+	 * Entering RUN cancels the hardware scan, but the firmware can still
+	 * report its completion afterwards. Ending that stale scan made
+	 * net80211 choose and re-join the BSS we had just associated to
+	 * (without a deauth), which the AP then ignored. Only background
+	 * scans may complete while associated.
+	 */
+	if (ic->ic_state == IEEE80211_S_RUN &&
+	    (ic->ic_flags & IEEE80211_F_BGSCAN) == 0) {
+		MWX_DEV_LOG(sc, "ignoring stale scan completion in RUN\n");
+		splx(s);
+		return;
+	}
 	ieee80211_end_scan(&ic->ic_if);
 	splx(s);
 }
@@ -7511,6 +7539,16 @@ MtkMwx::debugPoll()
 		    ic->ic_stats.is_ht_rx_frame_below_ba_winstart,
 		    ic->ic_stats.is_ht_rx_frame_above_ba_winend);
 	}
+	if (verbose)
+		MWX_DEV_LOG(sc,
+		    "ba gap_timeout=%u frame_lost=%u slide=%u jump=%u below=%u bar_rx=%u rx_agreements=%u\n",
+		    ic->ic_stats.is_ht_rx_ba_window_gap_timeout,
+		    ic->ic_stats.is_ht_rx_ba_frame_lost,
+		    ic->ic_stats.is_ht_rx_ba_window_slide,
+		    ic->ic_stats.is_ht_rx_ba_window_jump,
+		    ic->ic_stats.is_ht_rx_frame_below_ba_winstart,
+		    ieee80211_bar_rx_count,
+		    ic->ic_stats.is_ht_rx_ba_agreements);
 	if (verbose && mwx_rxr_total != 0) {
 		MWX_DEV_LOG(sc,
 		    "rxrate n=%u mode[cck=%u ofdm=%u ht=%u vht=%u he=%u] bw[20=%u 40=%u 80=%u 160=%u] nss[1=%u 2=%u] "
