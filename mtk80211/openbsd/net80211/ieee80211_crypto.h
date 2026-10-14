@@ -92,6 +92,24 @@ enum ieee80211_akm {
 
 #ifdef _KERNEL 
 
+/*
+ * One byte derived from a key, for the driver log: two log lines with
+ * different values used different keys (equal values: almost surely the
+ * same key). It cannot be turned back into the key.
+ */
+static __inline u_int8_t
+ieee80211_key_check(const u_int8_t *key, size_t len)
+{
+	u_int32_t h = 2166136261U;
+	size_t i;
+
+	for (i = 0; i < len; i++) {
+		h ^= key[i];
+		h *= 16777619U;
+	}
+	return (u_int8_t)(h ^ (h >> 8) ^ (h >> 16) ^ (h >> 24));
+}
+
 static __inline int
 ieee80211_is_8021x_akm(enum ieee80211_akm akm)
 {

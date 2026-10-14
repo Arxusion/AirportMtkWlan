@@ -14,6 +14,7 @@
 #include <net80211/ieee80211_node.h>
 #include <net80211/ieee80211_ioctl.h>
 #include <net80211/ieee80211_priv.h>
+#include <crypto/sha1.h>
 
 extern IOCommandGate *_fCommandGate;
 
@@ -385,6 +386,10 @@ IOReturn AirportItlwmSkywalkInterface::beginWCLJoin(apple80211AssocCandidates *r
 IOReturn AirportItlwmSkywalkInterface::startWCLJoin(AirportWCL::JoinRequest &join)
 {
     auto auth = AirportWCL::classifyLegacyAuth(join);
+    XYLog("WCL join ssid_len=%u bssid=%s chanspec=0x%x auth lower=%u upper=0x%x -> %s, key len=%u type=%u%s, rsn_ie len=%u\n",
+          join.ssidLength, ether_sprintf(join.bssid), join.channelSpec, join.lowerAuth, join.upperAuth,
+          AirportWCL::legacyAuthName(auth), join.keyLength, join.keyCipher,
+          AirportWCL::isPassphrase(join) ? " (passphrase)" : "", join.rsnLength);
     bool personal = auth == AirportWCL::LegacyAuth::Personal;
     bool enterprise = auth == AirportWCL::LegacyAuth::Enterprise;
     bool supported = auth != AirportWCL::LegacyAuth::Invalid;
@@ -442,8 +447,17 @@ IOReturn AirportItlwmSkywalkInterface::startWCLJoin(AirportWCL::JoinRequest &joi
             return kIOReturnBadArgument;
         }
         if (personal) {
-            memcpy(ic->ic_psk, join.key, sizeof(ic->ic_psk));
+            if (AirportWCL::isPassphrase(join)) {
+                char passphrase[33] = {};
+                memcpy(passphrase, join.key, join.keyLength);
+                pbkdf2_sha1(passphrase, join.ssid, join.ssidLength, 4096,
+                            ic->ic_psk, sizeof(ic->ic_psk));
+                explicit_bzero(passphrase, sizeof(passphrase));
+            } else
+                memcpy(ic->ic_psk, join.key, sizeof(ic->ic_psk));
             ic->ic_flags |= IEEE80211_F_PSK;
+            XYLog("WCL join PSK key check %02x\n",
+                  ieee80211_key_check(ic->ic_psk, sizeof(ic->ic_psk)));
         } else if (join.keyLength == IEEE80211_PMK_LEN) {
             bool cached = true;
             if (join.upperAuth & (APPLE80211_AUTHTYPE_WPA | APPLE80211_AUTHTYPE_WPA2))

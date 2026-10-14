@@ -478,7 +478,29 @@ inline bool validRSNOverride(const uint8_t *ie, size_t length) {
         ie[4] == 0xf2 && ie[5] == 1 && ie[6] == 1 && ie[7] == 0;
 }
 
+// A WPA passphrase (8-63 printable characters, at most 32 fit the request)
+// instead of the 32-byte PMK that macOS normally derives itself.
+inline bool isPassphrase(const JoinRequest &j) {
+    if (j.keyLength < 8 || j.keyLength > 32 ||
+        (j.keyLength == 32 && (j.keyCipher == 6 || j.keyCipher == 7)))
+        return false;
+    for (uint32_t i = 0; i < j.keyLength; ++i)
+        if (j.key[i] < 0x20 || j.key[i] > 0x7e)
+            return false;
+    return true;
+}
+
 enum class LegacyAuth { Invalid, Open, Wep, Personal, Enterprise };
+inline const char *legacyAuthName(LegacyAuth auth) {
+    switch (auth) {
+        case LegacyAuth::Open: return "open";
+        case LegacyAuth::Wep: return "WEP";
+        case LegacyAuth::Personal: return "personal";
+        case LegacyAuth::Enterprise: return "enterprise";
+        default: return "invalid";
+    }
+}
+
 inline LegacyAuth classifyLegacyAuth(const JoinRequest &j) {
     // Values from apple80211_authtype/cipher_type, used by the WCL association request.
     if (!validRSNOverride(j.rsn, j.rsnLength)) return LegacyAuth::Invalid;
@@ -495,7 +517,7 @@ inline LegacyAuth classifyLegacyAuth(const JoinRequest &j) {
     if (j.upperAuth & ~(personal | enterprise)) return LegacyAuth::Invalid;
     if ((j.upperAuth & personal) && (j.upperAuth & enterprise)) return LegacyAuth::Invalid;
     if (j.upperAuth & personal)
-        return j.keyLength == 32 && (j.keyCipher == 6 || j.keyCipher == 7) ?
+        return (j.keyLength == 32 && (j.keyCipher == 6 || j.keyCipher == 7)) || isPassphrase(j) ?
             LegacyAuth::Personal : LegacyAuth::Invalid;
     if (j.upperAuth & enterprise)
         return (!j.keyLength || (j.keyLength == 32 && (j.keyCipher == 6 || j.keyCipher == 7))) ?

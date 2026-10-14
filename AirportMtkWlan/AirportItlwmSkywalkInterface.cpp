@@ -148,7 +148,16 @@ void AirportItlwmSkywalkInterface::associateSSID(uint8_t *ssid, uint32_t ssid_le
         XYLog("%s %d\n", __FUNCTION__, __LINE__);
         wpa.i_akms |= IEEE80211_WPA_AKM_PSK | IEEE80211_WPA_AKM_SHA256_PSK;
         wpa.i_enabled = 1;
-        memcpy(ic->ic_psk, key, sizeof(ic->ic_psk));
+        if (key_len >= 8 && key_len < IEEE80211_PMK_LEN) {
+            // a passphrase rather than the PMK macOS normally derives
+            char passphrase[IEEE80211_PMK_LEN + 1] = {};
+            memcpy(passphrase, key, key_len);
+            pbkdf2_sha1(passphrase, ssid, ssid_len, 4096, ic->ic_psk, sizeof(ic->ic_psk));
+            explicit_bzero(passphrase, sizeof(passphrase));
+        } else
+            memcpy(ic->ic_psk, key, sizeof(ic->ic_psk));
+        XYLog("%s key len=%u, PSK key check %02x\n", __FUNCTION__, key_len,
+              ieee80211_key_check(ic->ic_psk, sizeof(ic->ic_psk)));
         ic->ic_flags |= IEEE80211_F_PSK;
         ieee80211_ioctl_setwpaparms(ic, &wpa);
     }
