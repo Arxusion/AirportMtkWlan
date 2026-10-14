@@ -520,7 +520,8 @@ getMCS_VHT(struct apple80211_mcs_vht_data *data)
     memset(data, 0, sizeof(struct apple80211_mcs_vht_data));
     data->version = APPLE80211_VERSION;
     data->guard_interval = (ieee80211_node_supports_vht_sgi80(ic->ic_bss) || ieee80211_node_supports_vht_sgi160(ic->ic_bss)) ? APPLE80211_GI_SHORT : APPLE80211_GI_LONG;
-    data->index = ic->ic_bss->ni_txmcs;
+    int mcs = fHalService->getDriverInfo()->getRxRateMcs();
+    data->index = mcs >= 0 ? mcs : ic->ic_bss->ni_txmcs;
     data->nss = fHalService->getDriverInfo()->getTxNSS();
     switch (ic->ic_bss->ni_chw) {
         case IEEE80211_CHAN_WIDTH_40:
@@ -601,9 +602,12 @@ getRATE(struct apple80211_rate_data *rd)
         rd->version = APPLE80211_VERSION;
         rd->num_radios = 1;
         sgi = ieee80211_node_supports_sgi(ic->ic_bss);
-        if (ic->ic_bss->ni_flags & IEEE80211_NODE_HE) {
-            /* The MT7922 firmware reports no TX rate here; its last RX rate is the best estimate. */
-            rd->rate[0] = fHalService->getDriverInfo()->getRxRateKbps() / 1000;
+        /* The MT7922 firmware picks TX rates itself and reports none; its last RX rate is the best estimate. */
+        uint32_t rx_kbps = fHalService->getDriverInfo()->getRxRateKbps();
+        if (rx_kbps != 0 && (ic->ic_bss->ni_flags & (IEEE80211_NODE_HE | IEEE80211_NODE_VHT | IEEE80211_NODE_HT))) {
+            rd->rate[0] = (rx_kbps + 500) / 1000;
+        } else if (ic->ic_bss->ni_flags & IEEE80211_NODE_HE) {
+            rd->rate[0] = 0;
         } else if (ic->ic_curmode == IEEE80211_MODE_11AC) {
             if (sgi)
                 index += 1;
@@ -917,7 +921,8 @@ getMCS(struct apple80211_mcs_data* md)
     if (ic->ic_state != IEEE80211_S_RUN ||  ic->ic_bss == NULL || !md)
         return 6;
     md->version = APPLE80211_VERSION;
-    md->index = ic->ic_bss->ni_txmcs;
+    int mcs = fHalService->getDriverInfo()->getRxRateMcs();
+    md->index = mcs >= 0 ? mcs : ic->ic_bss->ni_txmcs;
     return kIOReturnSuccess;
 }
 

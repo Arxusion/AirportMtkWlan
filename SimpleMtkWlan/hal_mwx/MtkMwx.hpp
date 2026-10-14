@@ -45,6 +45,8 @@ public:
     UInt32 supportedFeatures() override;
     const char *getFirmwareCountryCode() override;
     uint32_t getTxQueueSize() override;
+    uint32_t getRxRateKbps() override;
+    int getRxRateMcs() override;
 
     void clearScanningFlags() override;
     void debugPoll() override;

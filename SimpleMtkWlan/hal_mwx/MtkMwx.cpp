@@ -73,6 +73,16 @@ OSDefineMetaClassAndStructors(MtkMwx, MtkHalService)
 #define MWX_PRXV_TX_MODE(v)	(((v) >> 24) & 0xf)
 static uint32_t mwx_rxr_mode[16], mwx_rxr_bw[4], mwx_rxr_nss[4], mwx_rxr_mcs[16];
 static uint32_t mwx_rxr_sgi, mwx_rxr_stbc, mwx_rxr_ldpc, mwx_rxr_total;
+/* Last unicast RX rate: the firmware does TX rate control and reports none. */
+static int mwx_rxr_last_mcs = -1;
+static uint32_t mwx_rxr_last_kbps;
+
+/* HT/VHT 1SS long GI data rates in 100 kbit/s, by bandwidth and MCS. */
+static const uint16_t mwx_vht_rate[3][10] = {
+	{ 65, 130, 195, 260, 390, 520, 585, 650, 780, 867 },
+	{ 135, 270, 405, 540, 810, 1080, 1215, 1350, 1620, 1800 },
+	{ 293, 585, 878, 1170, 1755, 2340, 2633, 2925, 3510, 3900 },
+};
 
 static void
 mwx_rx_rate_account(uint32_t v0)
@@ -95,6 +105,15 @@ mwx_rx_rate_account(uint32_t v0)
 		mwx_rxr_stbc++;
 	if (MWX_PRXV_LDPC(v0))
 		mwx_rxr_ldpc++;
+
+	if (mode >= 2 && mode <= 4 && idx <= 9 && (MWX_PRXV_FRAME_MODE(v0) & 3) < 3) {
+		uint32_t kbps = mwx_vht_rate[MWX_PRXV_FRAME_MODE(v0) & 3][idx] *
+		    100 * nss;
+		if (MWX_PRXV_SGI(v0))
+			kbps = kbps * 10 / 9;
+		mwx_rxr_last_kbps = kbps;
+		mwx_rxr_last_mcs = mode == 4 ? (int)idx : (int)(idx + 8 * (nss - 1));
+	}
 }
 
 extern uint32_t ieee80211_bar_rx_count;
@@ -7296,6 +7315,18 @@ uint32_t
 MtkMwx::getTxQueueSize()
 {
 	return 256;
+}
+
+uint32_t
+MtkMwx::getRxRateKbps()
+{
+	return mwx_rxr_last_kbps;
+}
+
+int
+MtkMwx::getRxRateMcs()
+{
+	return mwx_rxr_last_mcs;
 }
 
 void

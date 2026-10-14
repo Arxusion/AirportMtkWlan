@@ -42,6 +42,12 @@ public:
     virtual const char *getFirmwareCountryCode() = 0;
 
     virtual uint32_t getTxQueueSize() = 0;
+
+    // Rate of the last received unicast data frame, 0 if unknown
+    virtual uint32_t getRxRateKbps() = 0;
+
+    // MCS of the last received data frame (HT: 0-15, VHT: 0-9), -1 if unknown
+    virtual int getRxRateMcs() = 0;
 };
 
 #endif /* MtkDriverInfo_h */
