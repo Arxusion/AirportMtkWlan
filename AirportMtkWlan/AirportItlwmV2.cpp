@@ -22,6 +22,29 @@ OSDefineMetaClassAndStructors(CTimeout, OSObject)
 IO80211WorkQueue *_fWorkloop;
 IOCommandGate *_fCommandGate;
 
+void AirportItlwm::checkInterfaceRole(const char *when, bool restore)
+{
+    if (!fNetIf)
+        return;
+    OSString *role = OSDynamicCast(OSString, fNetIf->getProperty("IO80211InterfaceRole"));
+    XYLog("interface role property %s: %s\n", when, role ? role->getCStringNoCopy() : "missing");
+    if (!role && restore && fNetIf->getInterfaceRole() == 1) {
+        fNetIf->setProperty("IO80211InterfaceRole", "Infrastructure");
+        XYLog("interface role property put back\n");
+    }
+}
+
+void AirportItlwm::roleTimerFired(OSObject *owner, IOTimerEventSource *sender)
+{
+    static const uint32_t delays[] = {2000, 7000, 20000};
+    AirportItlwm *self = OSDynamicCast(AirportItlwm, owner);
+    if (!self)
+        return;
+    self->checkInterfaceRole("timer", true);
+    if (self->roleChecks < sizeof(delays) / sizeof(delays[0]))
+        sender->setTimeoutMS(delays[self->roleChecks++]);
+}
+
 void AirportItlwm::releaseAll()
 {
 #ifdef AIRPORT_WCL
@@ -383,6 +406,7 @@ bool AirportItlwm::start(IOService *provider)
         return false;
     }
     fNetIf->setInterfaceRole(1);
+    checkInterfaceRole("after setInterfaceRole", false);
     fNetIf->setInterfaceId(1);
 
 #ifndef AIRPORT_WCL
@@ -393,6 +417,7 @@ bool AirportItlwm::start(IOService *provider)
         return false;
     }
 #endif
+    checkInterfaceRole("before attach", false);
     if (!fNetIf->attach(this)) {
         XYLog("attach to service fail\n");
         super::stop(provider);
@@ -436,6 +461,7 @@ bool AirportItlwm::start(IOService *provider)
     memcpy(fNetIf->mExpansionData2->fRegistrationInfo, &registInfo, sizeof(registInfo));
     if (fNetIf->getInterfaceRole() == 1)
         fNetIf->deferBSDAttach(true);
+    checkInterfaceRole("before interface start", false);
     if (!fNetIf->start(this)) {
         super::stop(provider);
         releaseAll();
@@ -458,6 +484,7 @@ bool AirportItlwm::start(IOService *provider)
     fNetIf->start(this);
 
 #endif
+    checkInterfaceRole("after interface start", true);
     setLinkStatus(kIONetworkLinkValid);
     if (TAILQ_EMPTY(&fHalService->get80211Controller()->ic_ess))
         fHalService->get80211Controller()->ic_flags |= IEEE80211_F_AUTO_JOIN;
@@ -465,13 +492,25 @@ bool AirportItlwm::start(IOService *provider)
     bsdInterface->registerService();
 #endif
     registerService();
+    checkInterfaceRole("after registerService", true);
+    roleChecks = 0;
+    roleTimer = IOTimerEventSource::timerEventSource(this, &AirportItlwm::roleTimerFired);
+    if (roleTimer && _fWorkloop->addEventSource(roleTimer) == kIOReturnSuccess)
+        roleTimer->setTimeoutMS(1000);
+    else
+        OSSafeReleaseNULL(roleTimer);
     return true;
 }
 
 void AirportItlwm::stop(IOService *provider)
 {
-    XYLog("%s\n", __PRETTY_FUNCTION__);XYLog("%s\n", __PRETTY_FUNCTION__);
+    XYLog("%s\n", __PRETTY_FUNCTION__);
     struct _ifnet *ifp = &fHalService->get80211Controller()->ic_ac.ac_if;
+    if (roleTimer) {
+        roleTimer->cancelTimeout();
+        _fWorkloop->removeEventSource(roleTimer);
+        OSSafeReleaseNULL(roleTimer);
+    }
 #ifdef AIRPORT_WCL
     if (fNetIf)
         static_cast<AirportItlwmSkywalkInterface *>(fNetIf)->stopWCL();

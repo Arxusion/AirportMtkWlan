@@ -156,6 +156,16 @@ public:
 
     bool createMediumTables(const IONetworkMedium **primary);
     void releaseAll();
+    /*
+     * macOS (Apple80211's _isInfraInterface, used by airportd and the installer)
+     * only takes an interface whose registry entry has IO80211InterfaceRole =
+     * Infrastructure. IO80211SkywalkInterface::setInterfaceRole() sets it, yet it
+     * was gone after start; these log where it disappears and put it back.
+     */
+    void checkInterfaceRole(const char *when, bool restore);
+    static void roleTimerFired(OSObject *owner, IOTimerEventSource *sender);
+    IOTimerEventSource *roleTimer;
+    uint32_t roleChecks;
     void watchdogAction(IOTimerEventSource *timer);
     
     virtual SInt32 enableFeature(IO80211FeatureCode, void*) override;
