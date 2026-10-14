@@ -7,6 +7,7 @@
 //
 
 #include "IOPCIEDeviceWrapper.hpp"
+#include "MtkLog.hpp"
 #include "Apple80211.h"
 
 #include "MtkMwx.hpp"
@@ -26,17 +27,6 @@ static IOPMPowerState powerStateArray[2] =
     {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
     {1, kIOPMDeviceUsable, kIOPMPowerOn, kIOPMPowerOn, 0, 0, 0, 0, 0, 0, 0, 0}
 };
-
-static void pciMsiSetEnable(IOPCIDevice *device, UInt8 msiCap, int enable)
-{
-    UInt16 control;
-    
-    control = device->configRead16(msiCap + PCI_MSI_FLAGS);
-    control &= ~PCI_MSI_FLAGS_ENABLE;
-    if (enable)
-        control |= PCI_MSI_FLAGS_ENABLE;
-    device->configWrite16(msiCap + PCI_MSI_FLAGS, control);
-}
 
 static void pciMsiXClearAndSet(IOPCIDevice *device, UInt8 msixCap, UInt16 clear, UInt16 set)
 {
@@ -58,6 +48,7 @@ IOWorkLoop *IOPCIEDeviceWrapper::getWorkLoop() const
 IOService* IOPCIEDeviceWrapper::
 probe(IOService *provider, SInt32 *score)
 {
+    mtk_dbg_set_nub(provider);
     XYLog("%s\n", __PRETTY_FUNCTION__);
     bool isMatch = false;
     super::probe(provider, score);
@@ -76,8 +67,12 @@ probe(IOService *provider, SInt32 *score)
         if (msixCap)
             pciMsiXClearAndSet(device, msixCap, PCI_MSIX_FLAGS_ENABLE, 0);
         device->findPCICapability(PCI_CAP_ID_MSI, &msiCap);
-        if (msiCap)
-            pciMsiSetEnable(device, msiCap, 1);
+        /*
+         * Do not set the MSI enable bit by hand: nothing has programmed the
+         * MSI address/data yet, and with MSI enabled the device stops raising
+         * INTx. IOPCIFamily enables MSI when the PCIMessaged vector is
+         * registered (see pci_intr_establish).
+         */
         if (!msiCap && !msixCap) {
             XYLog("%s No MSI cap\n", __FUNCTION__);
             fHalService->release();
@@ -104,14 +99,40 @@ start(IOService *provider)
     PMinit();
     registerPowerDriver(this, powerStateArray, 2);
     provider->joinPMtree(this);
+    logTimer = IOTimerEventSource::timerEventSource(this, &IOPCIEDeviceWrapper::logTimerFired);
+    if (logTimer && _fWorkloop->addEventSource(logTimer) == kIOReturnSuccess)
+        logTimer->setTimeoutMS(500);
+    else
+        OSSafeReleaseNULL(logTimer);
     registerService();
     return true;
+}
+
+void IOPCIEDeviceWrapper::
+publishLog()
+{
+    mtk_dbg_publish();
+}
+
+void IOPCIEDeviceWrapper::
+logTimerFired(OSObject *owner, IOTimerEventSource *sender)
+{
+    IOPCIEDeviceWrapper *self = OSDynamicCast(IOPCIEDeviceWrapper, owner);
+    if (!self)
+        return;
+    self->publishLog();
+    sender->setTimeoutMS(2000);
 }
 
 void IOPCIEDeviceWrapper::
 stop(IOService *provider)
 {
     XYLog("%s\n", __PRETTY_FUNCTION__);
+    if (logTimer) {
+        logTimer->cancelTimeout();
+        _fWorkloop->removeEventSource(logTimer);
+        OSSafeReleaseNULL(logTimer);
+    }
     PMstop();
     super::stop(provider);
 }

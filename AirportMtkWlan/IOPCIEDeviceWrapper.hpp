@@ -13,6 +13,7 @@
 #include <IOKit/pci/IOPCIDevice.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOTypes.h>
+#include <IOKit/IOTimerEventSource.h>
 
 #include <HAL/MtkHalService.hpp>
 
@@ -31,6 +32,16 @@ public:
 public:
     MtkHalService *fHalService;
     IOPCIDevice *pciNub;
+
+private:
+    /*
+     * The driver log, published as MtkDebugLog on the PCI device every 2 s
+     * (tools/mtklog.sh): IOLog from an OpenCore-injected kext never reaches
+     * the unified log, also when the Wi-Fi controller fails to start.
+     */
+    IOTimerEventSource *logTimer;
+    void publishLog();
+    static void logTimerFired(OSObject *owner, IOTimerEventSource *sender);
 };
 
 #endif /* IOPCIEDeviceWrapper_hpp */

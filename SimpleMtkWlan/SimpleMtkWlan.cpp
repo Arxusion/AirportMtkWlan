@@ -20,6 +20,7 @@
 * GNU General Public License for more details.
 */
 #include "SimpleMtkWlan.hpp"
+#include "MtkLog.hpp"
 #include <linux/types.h>
 #include <linux/kernel.h>
 
@@ -35,80 +36,6 @@
 OSDefineMetaClassAndStructors(SimpleMtkWlan, IOEthernetController)
 OSDefineMetaClassAndStructors(CTimeout, OSObject)
 
-
-/*
- * Persistent debug log. Early boot messages are lost from the unified log
- * (no uuidtext for OpenCore-injected kexts, small msgbuf), so every message
- * is also kept in a ring buffer and published as the "MtkDebugLog" property
- * on the PCI provider, where it survives a failed probe/start.
- */
-#define MTK_DBG_BUF_SIZE (128 * 1024)
-static char gMtkDbgBuf[MTK_DBG_BUF_SIZE];
-static size_t gMtkDbgLen;
-static volatile SInt32 gMtkDbgLock;
-static IOService *gMtkDbgNub;
-
-static void mtkDbgLock()
-{
-    while (!OSCompareAndSwap(0, 1, &gMtkDbgLock)) {}
-}
-
-static void mtkDbgUnlock()
-{
-    OSCompareAndSwap(1, 0, &gMtkDbgLock);
-}
-
-extern "C" void mtk_dbg_log(const char *fmt, ...)
-{
-    char line[512];
-    uint64_t ns;
-    va_list ap;
-    int prefix;
-    size_t len;
-
-    absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
-    prefix = snprintf(line, sizeof(line), "[%llu.%03llu] ",
-        ns / 1000000000ULL, (ns / 1000000ULL) % 1000ULL);
-    va_start(ap, fmt);
-    vsnprintf(line + prefix, sizeof(line) - prefix, fmt, ap);
-    va_end(ap);
-
-    len = strnlen(line, sizeof(line));
-    mtkDbgLock();
-    if (gMtkDbgLen + len >= MTK_DBG_BUF_SIZE) {
-        size_t drop = MTK_DBG_BUF_SIZE / 2;
-        memmove(gMtkDbgBuf, gMtkDbgBuf + drop, gMtkDbgLen - drop);
-        gMtkDbgLen -= drop;
-    }
-    memcpy(gMtkDbgBuf + gMtkDbgLen, line, len);
-    gMtkDbgLen += len;
-    gMtkDbgBuf[gMtkDbgLen] = 0;
-    mtkDbgUnlock();
-}
-
-static void mtkDbgPublish()
-{
-    IOService *nub = gMtkDbgNub;
-    char *copy;
-    size_t len;
-
-    if (nub == NULL)
-        return;
-    copy = (char *)IOMalloc(MTK_DBG_BUF_SIZE);
-    if (copy == NULL)
-        return;
-    mtkDbgLock();
-    len = gMtkDbgLen;
-    memcpy(copy, gMtkDbgBuf, len);
-    mtkDbgUnlock();
-    copy[len] = 0;
-    OSString *str = OSString::withCString(copy);
-    IOFree(copy, MTK_DBG_BUF_SIZE);
-    if (str != NULL) {
-        nub->setProperty("MtkDebugLog", str);
-        str->release();
-    }
-}
 
 IOWorkLoop *_fWorkloop;
 IOCommandGate *_fCommandGate;
@@ -148,11 +75,11 @@ static void pciMsiXClearAndSet(IOPCIDevice *device, UInt8 msixCap, UInt16 clear,
 
 IOService* SimpleMtkWlan::probe(IOService *provider, SInt32 *score)
 {
-    gMtkDbgNub = provider;
+    mtk_dbg_set_nub(provider);
     XYLog("probe begin provider=%s\n", provider ? provider->getName() : "NULL");
     IOService *ret = probeImpl(provider, score);
     XYLog("probe end ret=%p\n", (void *)ret);
-    mtkDbgPublish();
+    mtk_dbg_publish();
     return ret;
 }
 
@@ -386,11 +313,11 @@ void SimpleMtkWlan::associateSSID(const char *ssid, const char *pwd)
 
 bool SimpleMtkWlan::start(IOService *provider)
 {
-    gMtkDbgNub = provider;
+    mtk_dbg_set_nub(provider);
     XYLog("start begin\n");
     bool ret = startImpl(provider);
     XYLog("start end ret=%d\n", ret);
-    mtkDbgPublish();
+    mtk_dbg_publish();
     return ret;
 }
 
@@ -529,7 +456,7 @@ void SimpleMtkWlan::watchdogAction(IOTimerEventSource *timer)
         XYLog("watchdog: main work loop busy, poll skipped\n");
     static int publishTick;
     if (++publishTick % 5 == 0)
-        mtkDbgPublish();
+        mtk_dbg_publish();
     watchdogTimer->setTimeoutMS(kWatchDogTimerPeriod);
 }
 
@@ -588,7 +515,7 @@ IOReturn SimpleMtkWlan::selectMedium(const IONetworkMedium *medium) {
 void SimpleMtkWlan::stop(IOService *provider)
 {
     XYLog("stop\n");
-    mtkDbgPublish();
+    mtk_dbg_publish();
     XYLog("%s\n", __FUNCTION__);
     if (fWatchdogWorkLoop && watchdogTimer) {
         watchdogTimer->cancelTimeout();
