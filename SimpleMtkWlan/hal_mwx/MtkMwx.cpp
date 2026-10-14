@@ -937,6 +937,7 @@ mwx_init_hw(struct ifnet *ifp)
 	struct mwx_softc *sc = (struct mwx_softc *)ifp->if_softc;
 	struct ieee80211com *ic = &sc->sc_ic;
 	struct mwx_node *mn;
+	const uint8_t *lladdr = ((struct arpcom *)ifp)->ac_enaddr;
 	int rv;
 
 	if (!sc->sc_fw_loaded) {
@@ -945,6 +946,19 @@ mwx_init_hw(struct ifnet *ifp)
 			MWX_DEV_LOG(sc, "init preinit failed error=%d\n", rv);
 			return rv;
 		}
+	}
+
+	/*
+	 * Use the address the upper layers set (macOS's private Wi-Fi address
+	 * per network), like iwx_preinit(): net80211 sends with ic_myaddr and
+	 * the firmware's vif (registered below) filters on it. Otherwise DHCP
+	 * runs on the private address while the AP knows us by the factory one.
+	 */
+	if (!IEEE80211_ADDR_EQ(lladdr, etheranyaddr) &&
+	    !IEEE80211_ADDR_EQ(lladdr, ic->ic_myaddr)) {
+		IEEE80211_ADDR_COPY(ic->ic_myaddr, lladdr);
+		MWX_DEV_LOG(sc, "init mac address now %s\n",
+		    ether_sprintf(ic->ic_myaddr));
 	}
 
 	MWX_DEV_LOG(sc, "init start opmode=%d flags=0x%x ic_state=%d\n",
@@ -1118,6 +1132,7 @@ mwx_stop(struct ifnet *ifp)
 	ic->ic_wcl_scan_requested = false;
 	ic->ic_wcl_scan_active = false;
 	ic->ic_wcl_scan_ssid_length = 0;
+	ic->ic_wcl_scan_idle = false;
 	if (ic->ic_event_handler)
 		ic->ic_event_handler(ic, IEEE80211_EVT_DRIVER_STOPPED, NULL);
 #endif
@@ -5509,7 +5524,10 @@ mt7921_mcu_uni_add_dev(struct mwx_softc *sc, struct mwx_vif *mvif,
 	idx = mvif->omac_idx > EXT_BSSID_START ? HW_BSSID_0 : mvif->omac_idx;
 	basic_req.basic.hw_bss_idx = idx;
 
-	memcpy(dev_req.tlv.omac_addr, sc->sc_lladdr, ETHER_ADDR_LEN);
+	/* The address the vif answers to: the current one, not the factory one. */
+	memcpy(dev_req.tlv.omac_addr,
+	    IEEE80211_ADDR_EQ(sc->sc_ic.ic_myaddr, etheranyaddr) ?
+	    sc->sc_lladdr : sc->sc_ic.ic_myaddr, ETHER_ADDR_LEN);
 
 	if (enable) {
 		cmd = MCU_UNI_CMD_DEV_INFO_UPDATE;

@@ -862,6 +862,9 @@ ieee80211_begin_scan(struct _ifnet *ifp)
 {
     XYLog("%s\n", __FUNCTION__);
     struct ieee80211com *ic = (struct ieee80211com *)ifp;
+#ifdef AIRPORT_WCL
+    ic->ic_wcl_scan_idle = false;
+#endif
     
     /*
      * In all but hostap mode scanning starts off in
@@ -912,6 +915,9 @@ ieee80211_next_scan(struct _ifnet *ifp)
     struct ieee80211com *ic = (struct ieee80211com *)ifp;
     struct ieee80211_channel *chan;
     
+#ifdef AIRPORT_WCL
+    ic->ic_wcl_scan_idle = false;
+#endif
     chan = ic->ic_bss->ni_chan;
     for (;;) {
         if (++chan > &ic->ic_channels[IEEE80211_CHAN_MAX])
@@ -1475,6 +1481,18 @@ ieee80211_end_scan(struct _ifnet *ifp)
         }
 #endif
         if (ic->ic_state != IEEE80211_S_RUN) {
+#ifdef AIRPORT_WCL
+            /*
+             * macOS asks for every scan (and joins only what it picked), so
+             * do not sweep again on our own: a running sweep would make its
+             * next request wait for it. beginWCLScan/startWCLJoin restart.
+             */
+            if (!ic->ic_wcl_join_requested) {
+                ieee80211_reset_scan(ifp);
+                ic->ic_wcl_scan_idle = true;
+                return;
+            }
+#endif
             /*
              * Reset the list of channels to scan and scan the next mode
              * if nothing has been found.

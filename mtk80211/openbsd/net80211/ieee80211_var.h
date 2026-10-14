@@ -460,6 +460,7 @@ struct ieee80211com {
     uint32_t ic_wcl_scan_away_time_ms;
     uint64_t ic_wcl_tx_packets[4];
     uint64_t ic_wcl_rx_packets[4];
+    bool ic_wcl_scan_idle;   /* scan finished, nothing asked for: wait for macOS */
 #endif
     /* The channel width has changed (20<->2040) */
     void            (*ic_update_chw)(struct ieee80211com *);

@@ -240,6 +240,11 @@ IOReturn AirportItlwmSkywalkInterface::beginWCLScan(apple80211ScanRequest *reque
             scanSource->cancelTimeout();
             return kIOReturnError;
         }
+    } else if (ic->ic_wcl_scan_idle) {
+        // The stack waits for us between scans (ieee80211_end_scan).
+        ic->ic_wcl_scan_idle = false;
+        scanSkipCompletion = false;
+        ieee80211_next_scan(&ic->ic_if);
     }
     return kIOReturnSuccess;
 }
@@ -480,6 +485,11 @@ IOReturn AirportItlwmSkywalkInterface::startWCLJoin(AirportWCL::JoinRequest &joi
     bzero(wclBeaconInfo, sizeof(wclBeaconInfo));
     disassocIsVoluntary = false;
     joinTimer->setTimeoutMS(30000);
+    if (ic->ic_state == IEEE80211_S_SCAN && ic->ic_wcl_scan_idle) {
+        // The stack waits for us between scans (ieee80211_end_scan).
+        ic->ic_wcl_scan_idle = false;
+        ieee80211_next_scan(&ic->ic_if);
+    }
     if (ic->ic_state != IEEE80211_S_SCAN && ic->ic_newstate(ic, IEEE80211_S_SCAN, -1)) {
         joinPending = false;
         joinTimer->cancelTimeout();
