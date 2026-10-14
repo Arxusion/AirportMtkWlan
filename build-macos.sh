@@ -107,7 +107,7 @@ if [[ "$product" == all || "$product" == SimpleMtkWlan ]]; then
 	echo "built $out/mtkwifi"
 fi
 if [[ "$product" == all || "$product" == AirportMtkWlan ]] && [[ -d "$here/AirportMtkWlan" ]]; then
-	build AirportMtkWlan com.pengubow.AirportMtkWlan AirportMtkWlan/Sequoia-Info.plist \
+	build AirportMtkWlan com.pengubow.AirportMtkWlan AirportMtkWlan/WCL/Sequoia-Info.plist \
 		-DAIRPORT -DAIRPORT_WCL "-D__IO80211_TARGET=__MAC_15_2" -DIO80211FAMILY_V2 -- "${common_sources[@]}" \
 		$(cd "$here" && ls AirportMtkWlan/*.cpp AirportMtkWlan/WCL/*.cpp 2>/dev/null)
 fi

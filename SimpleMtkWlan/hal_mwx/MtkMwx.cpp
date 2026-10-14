@@ -29,6 +29,9 @@
  */
 
 #include "MtkMwx.hpp"
+#ifdef AIRPORT_WCL
+#include "WCL/WCL.hpp"
+#endif
 
 #include <linux/kernel.h>
 #include <linux/types.h>
@@ -642,6 +645,7 @@ pkt_hex_dump(struct mbuf *m)
 #endif
 
 int	mwx_init(struct ifnet *);
+int	mwx_init_hw(struct ifnet *);
 void	mwx_stop(struct ifnet *);
 void	mwx_watchdog(struct ifnet *);
 void	mwx_start(struct ifnet *);
@@ -906,6 +910,30 @@ mwx_poll(struct mwx_softc *sc, uint32_t reg, uint32_t val, uint32_t mask,
 int
 mwx_init(struct ifnet *ifp)
 {
+#ifdef AIRPORT_WCL
+	/*
+	 * The native Wi-Fi interface (AirportMtkWlan) reports the adapter to
+	 * macOS as resetting, then available or gone, from these events.
+	 */
+	struct mwx_softc *sc = (struct mwx_softc *)ifp->if_softc;
+	struct ieee80211com *ic = &sc->sc_ic;
+	int rv;
+
+	if (ic->ic_event_handler)
+		ic->ic_event_handler(ic, IEEE80211_EVT_DRIVER_RESET_BEGIN, NULL);
+	rv = mwx_init_hw(ifp);
+	if (ic->ic_event_handler)
+		ic->ic_event_handler(ic, rv ? IEEE80211_EVT_DRIVER_STOPPED :
+		    IEEE80211_EVT_DRIVER_READY, NULL);
+	return rv;
+#else
+	return mwx_init_hw(ifp);
+#endif
+}
+
+int
+mwx_init_hw(struct ifnet *ifp)
+{
 	struct mwx_softc *sc = (struct mwx_softc *)ifp->if_softc;
 	struct ieee80211com *ic = &sc->sc_ic;
 	struct mwx_node *mn;
@@ -1083,6 +1111,16 @@ mwx_stop(struct ifnet *ifp)
 	sc->sc_newstate(ic, IEEE80211_S_INIT, -1);
 	sc->sc_ns_state = IEEE80211_S_INIT;
 	ifp->if_timer = 0;
+
+#ifdef AIRPORT_WCL
+	/* A stopped firmware scan cannot deliver its completion event. */
+	ic->ic_flags &= ~(IEEE80211_F_BGSCAN | IEEE80211_F_ASCAN);
+	ic->ic_wcl_scan_requested = false;
+	ic->ic_wcl_scan_active = false;
+	ic->ic_wcl_scan_ssid_length = 0;
+	if (ic->ic_event_handler)
+		ic->ic_event_handler(ic, IEEE80211_EVT_DRIVER_STOPPED, NULL);
+#endif
 
 	splx(s);
 }
@@ -1746,6 +1784,11 @@ mwx_tx(struct mwx_softc *sc, struct mbuf *m, struct ieee80211_node *ni)
 	struct mwx_txwi *mt;
 	struct mt76_txwi *txp;
 	int rv;
+#ifdef AIRPORT_WCL
+	struct ieee80211_frame *wcl_wh;
+	bool wcl_data;
+	unsigned wcl_ac;
+#endif
 
 	if ((mt = mwx_txwi_get(sc)) == NULL) {
 		m_freem(m);
@@ -1757,6 +1800,14 @@ mwx_tx(struct mwx_softc *sc, struct mbuf *m, struct ieee80211_node *ni)
 	memset(txp, 0, sizeof(*txp));
 	mt7921_mac_write_txwi(sc, m, ni, txp);
 
+#ifdef AIRPORT_WCL
+	/* Per access category data counters for macOS's link quality. */
+	wcl_wh = mtod(m, struct ieee80211_frame *);
+	wcl_data = (wcl_wh->i_fc[0] & IEEE80211_FC0_TYPE_MASK) == IEEE80211_FC0_TYPE_DATA &&
+	    !(wcl_wh->i_fc[0] & IEEE80211_FC0_SUBTYPE_NODATA);
+	wcl_ac = ieee80211_has_qos(wcl_wh) ?
+	    ieee80211_wcl_ac(ieee80211_get_qos(wcl_wh) & IEEE80211_QOS_TID) : EDCA_AC_BE;
+#endif
 	rv = mwx_txwi_enqueue(sc, mt, m);
 	if (rv != 0) {
 		/* Mapping failed before ownership reached the TXWI. */
@@ -1764,6 +1815,10 @@ mwx_tx(struct mwx_softc *sc, struct mbuf *m, struct ieee80211_node *ni)
 		mwx_txwi_put(sc, mt);
 		return rv;
 	}
+#ifdef AIRPORT_WCL
+	if (wcl_data)
+		++sc->sc_ic.ic_wcl_tx_packets[wcl_ac];
+#endif
 
 	static uint32_t tx_log_count;
 	if (tx_log_count < 32) {
@@ -4759,6 +4814,27 @@ mt7921_mcu_hw_scan(struct mwx_softc *sc, int bgscan)
 	req->probe_req_num = /* sreq->n_ssids ? 2 : */ 0;
 	req->version = 1;
 
+#ifdef AIRPORT_WCL
+	/*
+	 * A scan macOS asked for (AirportMtkWlan): active when it wants probes,
+	 * with its SSID (hidden networks), on its channels. Scans the driver
+	 * starts itself stay passive over every channel, as with SimpleMtkWlan.
+	 * Like Linux mt76: probing with no SSID is the wildcard (ssid_type 1).
+	 */
+	if (ic->ic_wcl_scan_requested &&
+	    AirportWCL::scanUsesProbes(true, ic->ic_wcl_scan_active)) {
+		req->scan_type = 1;
+		req->probe_req_num = 2;
+		if (ic->ic_wcl_scan_ssid_length > 0 &&
+		    ic->ic_wcl_scan_ssid_length <= IEEE80211_NWID_LEN) {
+			req->ssids[0].ssid_len = htole32(ic->ic_wcl_scan_ssid_length);
+			memcpy(req->ssids[0].ssid, ic->ic_wcl_scan_ssid,
+			    ic->ic_wcl_scan_ssid_length);
+			n_ssids = 1;
+		}
+	}
+#endif
+
 #ifdef NOTYET
 	for (i = 0; i < sreq->n_ssids; i++) {
 		if (!sreq->ssids[i].ssid_len)
@@ -4782,6 +4858,12 @@ mt7921_mcu_hw_scan(struct mwx_softc *sc, int bgscan)
 
 		if (c->ic_flags == 0)
 			continue;
+#ifdef AIRPORT_WCL
+		if (!AirportWCL::scanChannelSelected(ic->ic_wcl_scan_channels,
+		    ic->ic_wcl_scan_requested && ic->ic_wcl_scan_restricted,
+		    ieee80211_mhz2ieee(c->ic_freq, 0)))
+			continue;
+#endif
 
 		if (nchan < 32)
 			chan = &req->channels[nchan];

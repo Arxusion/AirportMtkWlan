@@ -1063,6 +1063,10 @@ ieee80211_match_bss(struct ieee80211com *ic, struct ieee80211_node *ni,
     u_int8_t rate;
     int fail;
     
+#ifdef AIRPORT_WCL
+    if (!ic->ic_wcl_join_requested)
+        return IEEE80211_NODE_ASSOCFAIL_ESSID;
+#endif
     fail = 0;
     if ((ic->ic_flags & IEEE80211_F_BGSCAN) == 0 &&
         isclr(ic->ic_chan_active, ieee80211_chan2ieee(ic, ni->ni_chan)))

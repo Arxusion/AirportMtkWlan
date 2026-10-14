@@ -126,10 +126,17 @@ void mtk_dbg_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 }
 #endif
 
+/* Which kext is talking: the native Wi-Fi build (AIRPORT) or the SimpleMTK one. */
+#ifdef AIRPORT
+#define MTK_LOG_NAME "AirportMtkWlan"
+#else
+#define MTK_LOG_NAME "SimpleMtkWlan"
+#endif
+
 #define XYLog(fmt, x...)\
 do\
 {\
-mtk_dbg_log("%s: " fmt, "SimpleMtkWlan", ##x);\
+mtk_dbg_log("%s: " fmt, MTK_LOG_NAME, ##x);\
 }while(0)
 
 typedef UInt8  u8;

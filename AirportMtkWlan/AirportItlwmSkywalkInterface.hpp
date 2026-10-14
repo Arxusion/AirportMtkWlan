@@ -466,7 +466,7 @@ private:
 
 private:
     AirportItlwm *instance;
-    ItlHalService *fHalService;
+    MtkHalService *fHalService;
     
     //IO80211
     struct ieee80211_node *fNextNodeToSend;

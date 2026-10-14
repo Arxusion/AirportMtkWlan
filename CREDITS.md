@@ -26,6 +26,10 @@ files.
   including credits retained in `SimpleMtkWlan/hal_mwx/MtkMwx.cpp` and
   `SimpleMtkWlan/hal_mwx/if_mwxreg.h`.
 - Firmware blobs and firmware packaging support for MediaTek MT7921 and MT7922.
+- `AirportMtkWlan/` and `include/Airport/`: AirportItlwm by zxystd (钟先耀) and
+  the OpenIntelWireless contributors, with laobamac's Sequoia/Tahoe (WCL) native
+  Wi-Fi work (https://github.com/laobamac/itlwm, GPL-2.0), adapted to this
+  driver's HAL.
 
 ## Current Project Work
 

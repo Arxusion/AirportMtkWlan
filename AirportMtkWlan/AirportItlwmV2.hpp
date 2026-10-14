@@ -27,9 +27,12 @@
 #include <libkern/c++/OSMetaClass.h>
 #include <IOKit/IOFilterInterruptEventSource.h>
 
-#include "ItlIwm.hpp"
-#include "ItlIwx.hpp"
-#include "ItlIwn.hpp"
+#include "MtkMwx.hpp"
+
+/* Intel's RSSI floor; the MediaTek HAL keeps ni_rssi the same way (dBm + 100). */
+#ifndef IWM_MIN_DBM
+#define IWM_MIN_DBM -100
+#endif
 
 #include "AirportItlwmEthernetInterface.hpp"
 
@@ -231,7 +234,7 @@ public:
     IO80211SkywalkInterface *fNetIf;
 #endif
     IOWorkLoop *fWatchdogWorkLoop;
-    ItlHalService *fHalService;
+    MtkHalService *fHalService;
     
     //IO80211
     uint8_t power_state;

@@ -1922,6 +1922,18 @@ enum ieee80211_he_highest_mcs_supported_subfield_enc {
     HIGHEST_MCS_SUPPORTED_MCS11,
 };
 
+/* Per-stream intersection of two HE MCS/NSS maps (2 bits per stream, 3 = not supported). */
+static inline uint16_t
+ieee80211_he_mcs_intersection(uint16_t a, uint16_t b)
+{
+    uint16_t result = 0;
+    for (unsigned i = 0; i < 8; i++) {
+        unsigned x = (a >> (2 * i)) & 3, y = (b >> (2 * i)) & 3;
+        result |= ((x == 3 || y == 3) ? 3 : (x < y ? x : y)) << (2 * i);
+    }
+    return result;
+}
+
 /* Calculate 802.11ax HE capabilities IE Tx/Rx HE MCS NSS Support Field size */
 static inline uint8_t
 ieee80211_he_mcs_nss_size(const struct ieee80211_he_cap_elem *he_cap)

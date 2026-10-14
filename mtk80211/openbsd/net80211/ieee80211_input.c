@@ -648,6 +648,10 @@ ieee80211_inputm(struct _ifnet *ifp, mbuf_t m, struct ieee80211_node *ni,
                 bpf_mtap(ic->ic_rawbpf, m, BPF_DIRECTION_IN);
 #endif
             
+#ifdef AIRPORT_WCL
+            if (ic->ic_opmode == IEEE80211_M_STA)
+                ++ic->ic_wcl_rx_packets[hasqos ? ieee80211_wcl_ac(tid) : EDCA_AC_BE];
+#endif
             if ((ni->ni_flags & IEEE80211_NODE_HT) &&
                 hasqos && (qos & IEEE80211_QOS_AMSDU))
                 ieee80211_amsdu_decap(ic, m, ni, hdrlen, ml);
@@ -1158,7 +1162,14 @@ ieee80211_enqueue_data(struct ieee80211com *ic, mbuf_t m,
             if (ifp->if_bpf && m1 == NULL)
                 bpf_mtap(ifp->if_bpf, m, BPF_DIRECTION_IN);
 #endif
-#ifdef USE_APPLE_SUPPLICANT
+#if defined(AIRPORT_WCL)
+            if (ic->ic_wcl_enterprise) {
+                mbuf_t eapCopy = NULL;
+                if (mbuf_dup(m, MBUF_DONTWAIT, &eapCopy) == 0 && eapCopy)
+                    ml_enqueue(ml, eapCopy);
+            }
+            ieee80211_eapol_key_input(ic, m, ni);
+#elif defined(USE_APPLE_SUPPLICANT)
             ml_enqueue(ml, m);
 #else
 #ifdef IO80211FAMILY_V2
@@ -2053,7 +2064,11 @@ ieee80211_recv_probe_resp(struct ieee80211com *ic, mbuf_t m,
         (ic->ic_flags & IEEE80211_F_BGSCAN)) {
         struct ieee80211_rsnparams rsn, wpa;
         
+#ifdef AIRPORT_WCL
+        uint32_t tlv_len = (mtod(m, u_int8_t *) + mbuf_len(m)) - (u_int8_t *)&wh[1] - 8 - 2 - 2;
+#else
         uint32_t tlv_len = (mtod(m, u_int8_t *) + mbuf_len(m)) - (u_int8_t *)&wh[1] + 1 - 8 - 2 - 2;
+#endif
         ieee80211_save_ie_tlv(((u_int8_t *)&wh[1]) + 8 + 2 + 2, &ni->ni_rsnie_tlv, &ni->ni_rsnie_tlv_len, tlv_len);
         ni->ni_rsnprotos = IEEE80211_PROTO_NONE;
         ni->ni_supported_rsnprotos = IEEE80211_PROTO_NONE;
@@ -2149,6 +2164,17 @@ ieee80211_recv_probe_resp(struct ieee80211com *ic, mbuf_t m,
     ni->ni_erp = erp;
     /* NB: must be after ni_chan is setup */
     ieee80211_setup_rates(ic, ni, rates, xrates, IEEE80211_F_DOSORT);
+#ifdef AIRPORT_WCL
+    if (ic->ic_event_handler) {
+        const uint8_t *ies = (const uint8_t *)&wh[1] + 12;
+        const uint8_t *end = mtod(m, const uint8_t *) + mbuf_len(m);
+        if (end >= ies) {
+            struct ieee80211_beacon_event event = {ni, ies, (size_t)(end - ies),
+                (const uint8_t *)wh, (size_t)(end - (const uint8_t *)wh)};
+            ic->ic_event_handler(ic, IEEE80211_EVT_BEACON, &event);
+        }
+    }
+#endif
 #ifndef IEEE80211_STA_ONLY
     if (ic->ic_opmode == IEEE80211_M_IBSS && is_new && isprobe) {
         /*
