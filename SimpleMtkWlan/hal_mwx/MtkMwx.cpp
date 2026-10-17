@@ -1563,11 +1563,18 @@ mwx_bgscan(struct ieee80211com *ic)
 	 */
 	if (ic->ic_state == IEEE80211_S_RUN) {
 		static uint64_t last_bgscan_ns;
-		uint64_t now_ns;
+		uint64_t now_ns, min_ns = 120ULL * 1000000000ULL;
 
+#ifdef AIRPORT_WCL
+		/*
+		 * macOS asks for a few channels at a time (well under a second
+		 * off channel); only full sweeps get the 2 minute limit.
+		 */
+		if (ic->ic_wcl_scan_requested && ic->ic_wcl_scan_restricted)
+			min_ns = 10ULL * 1000000000ULL;
+#endif
 		absolutetime_to_nanoseconds(mach_absolute_time(), &now_ns);
-		if (last_bgscan_ns != 0 &&
-		    now_ns - last_bgscan_ns < 120ULL * 1000000000ULL)
+		if (last_bgscan_ns != 0 && now_ns - last_bgscan_ns < min_ns)
 			return EBUSY;
 		last_bgscan_ns = now_ns;
 	}
