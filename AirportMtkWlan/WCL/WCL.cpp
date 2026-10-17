@@ -112,7 +112,50 @@ void AirportItlwmSkywalkInterface::stopWCL()
 IOReturn AirportItlwmSkywalkInterface::stopWCLGated(
     OSObject *, void *arg, void *, void *, void *)
 {
-    static_cast<AirportItlwmSkywalkInterface *>(arg)->wclStopping = true;
+    auto self = static_cast<AirportItlwmSkywalkInterface *>(arg);
+    self->portAuthorized = false;
+    self->updateWCLLinkQuality(true);
+    self->wclStopping = true;
+    return kIOReturnSuccess;
+}
+
+void AirportItlwmSkywalkInterface::updateWCLLinkQuality(bool force)
+{
+    if (_fCommandGate)
+        _fCommandGate->runAction(updateWCLLinkQualityGated, this,
+                                reinterpret_cast<void *>(uintptr_t(force)));
+}
+
+IOReturn AirportItlwmSkywalkInterface::updateWCLLinkQualityGated(
+    OSObject *, void *arg0, void *arg1, void *, void *)
+{
+    auto self = static_cast<AirportItlwmSkywalkInterface *>(arg0);
+    if (self->wclStopping || !self->fHalService)
+        return kIOReturnNotReady;
+    auto queue = self->instance->getWorkQueue();
+    if (!queue || !queue->inGate())
+        return kIOReturnNotPermitted;
+    auto interface = self->mExpansionData ? self->getBSDInterface() : nullptr;
+    if (!interface) {
+        self->wclLinkQualityInterface = nullptr;
+        self->wclReportedLinkQuality = -2;
+        return kIOReturnNotReady;
+    }
+    auto ic = self->fHalService->get80211Controller();
+    int quality = -2;
+    if (self->portAuthorized && self->linkState() == kIO80211NetworkLinkUp &&
+        (ifnet_flags(interface) & (IFF_UP | IFF_RUNNING)) == (IFF_UP | IFF_RUNNING) &&
+        ic && ic->ic_state == IEEE80211_S_RUN && ic->ic_bss &&
+        IEEE80211_ADDR_EQ(ic->ic_bss->ni_bssid, self->joinBSSID)) {
+        int rssi = IWM_MIN_DBM + ic->ic_bss->ni_rssi;
+        quality = rssi >= -70 ? 100 : (rssi >= -85 ? 50 : 20);
+    }
+    if (arg1 || quality != self->wclReportedLinkQuality ||
+        interface != self->wclLinkQualityInterface) {
+        self->setLQM(static_cast<unsigned long long>(static_cast<long long>(quality)));
+        self->wclReportedLinkQuality = quality;
+        self->wclLinkQualityInterface = interface;
+    }
     return kIOReturnSuccess;
 }
 
@@ -547,6 +590,8 @@ void AirportItlwmSkywalkInterface::finishWCLJoin(uint16_t status, uint16_t reaso
     joinTimer->cancelTimeout();
     instance->postMessage(this, AirportWCL::ConnectComplete, &event, sizeof(event), true);
     if (status) {
+        portAuthorized = false;
+        updateWCLLinkQuality(true);
         ieee80211com *ic = fHalService->get80211Controller();
         ic->ic_wcl_join_requested = false;
         clearWCLPMKSA();
@@ -567,6 +612,8 @@ void AirportItlwmSkywalkInterface::wclJoinTimeout(OSObject *owner, IOTimerEventS
 IOReturn AirportItlwmSkywalkInterface::leaveWCLNetwork()
 {
     ieee80211com *ic = fHalService->get80211Controller();
+    portAuthorized = false;
+    updateWCLLinkQuality(true);
     joinPending = false;
     joinDeferred = false;
     explicit_bzero(&deferredJoin, sizeof(deferredJoin));
@@ -611,6 +658,7 @@ void AirportItlwmSkywalkInterface::handleWCLLink(bool up)
     }
     if (up && joinPending && firstBeaconNotified)
         finishWCLJoin(0, 0, kIOReturnSuccess);
+    updateWCLLinkQuality(true);
 }
 
 void AirportItlwmSkywalkInterface::handleWCLEvent(int code, void *data)
@@ -631,6 +679,8 @@ void AirportItlwmSkywalkInterface::handleWCLEvent(int code, void *data)
             deferWCLCountryUpdate();
             break;
         case IEEE80211_EVT_DRIVER_RESET_BEGIN: {
+            portAuthorized = false;
+            updateWCLLinkQuality(true);
             if (ic->ic_wcl_mac_reconfig) {
                 break;
             }
@@ -645,6 +695,7 @@ void AirportItlwmSkywalkInterface::handleWCLEvent(int code, void *data)
                 finishWCLScan(ic->ic_wcl_mac_reconfig ? kIOReturnAborted : kIOReturnOffline);
                 finishWCLJoin(1, 0, kIOReturnOffline);
                 portAuthorized = false;
+                updateWCLLinkQuality(true);
                 ic->ic_wcl_join_requested = false;
                 clearWCLPMKSA();
                 ic->ic_wcl_enterprise = false;
@@ -709,6 +760,7 @@ void AirportItlwmSkywalkInterface::handleWCLEvent(int code, void *data)
                         wclLqmReportedBeacons = wclLqmBeacons;
                     }
 #endif
+                    updateWCLLinkQuality();
                 }
             }
             if (scanPending || joinPending || ic->ic_state == IEEE80211_S_SCAN ||
@@ -756,6 +808,8 @@ void AirportItlwmSkywalkInterface::handleWCLEvent(int code, void *data)
             }
             break;
         case IEEE80211_EVT_STA_DEAUTH: {
+            portAuthorized = false;
+            updateWCLLinkQuality(true);
             AirportWCL::DeauthEvent event = {};
             event.reason = ic->ic_deauth_reason;
             if (ic->ic_bss)
@@ -796,11 +850,13 @@ IOReturn AirportItlwmSkywalkInterface::setWCL_LINK_STATE_UPDATE(apple80211_wcl_u
         setCurrentApAddress(nullptr);
         setLinkState(kIO80211NetworkLinkDown, 0, debounce != 0, debounce);
     }
-    return kIOReturnSuccess;
+    IOReturn status = kIOReturnSuccess;
 #else
     IOReturn status = IO80211InfraInterface::setWCL_LINK_STATE_UPDATE(data);
-    return status;
 #endif
+    if (status == kIOReturnSuccess)
+        updateWCLLinkQuality(true);
+    return status;
 }
 
 IOReturn AirportItlwmSkywalkInterface::getWCL_BSS_INFO(apple80211_beacon_msg *data)

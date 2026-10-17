@@ -428,7 +428,9 @@ private:
     static void wclCountryUpdateThread(void *, void *);
     static IOReturn wclCountryUpdateGated(OSObject *, void *, void *, void *, void *);
     static IOReturn stopWCLGated(OSObject *, void *, void *, void *, void *);
+    static IOReturn updateWCLLinkQualityGated(OSObject *, void *, void *, void *, void *);
     void deferWCLCountryUpdate();
+    void updateWCLLinkQuality(bool = false);
     static void wclJoinTimeout(OSObject *, IOTimerEventSource *);
     IOReturn beginWCLScan(apple80211ScanRequest *);
     void clearWCLPMKSA();
@@ -454,6 +456,8 @@ private:
     uint32_t wclAssociatedBeacons = 0;
     uint32_t wclLqmBeacons = 0;
     uint32_t wclLqmReportedBeacons = 0;
+    int wclReportedLinkQuality = -2;
+    ifnet_t wclLinkQualityInterface = nullptr;
     bool joinPending;
     bool joinDeferred = false;
     AirportWCL::JoinRequest deferredJoin = {};

@@ -168,6 +168,10 @@ inputPacket(mbuf_t packet, UInt32 length, IOOptionBits options, void *param)
 #ifdef AIRPORT_WCL
     if (!packet)
         return 0;
+    if (!getIfnet()) {
+        mbuf_freem(packet);
+        return 0;
+    }
     const bool directInput = param == packet;
     packet = normalizeInputPacket(packet, length);
     if (!packet) {
