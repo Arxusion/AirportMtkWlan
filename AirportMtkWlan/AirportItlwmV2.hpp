@@ -172,6 +172,7 @@ public:
     IOTimerEventSource *roleTimer;
     uint32_t roleChecks;
     void watchdogAction(IOTimerEventSource *timer);
+    static IOReturn halDebugPollGated(OSObject *, void *, void *, void *, void *);
     
     virtual SInt32 enableFeature(IO80211FeatureCode, void*) override;
     virtual bool isCommandProhibited(int command) override {

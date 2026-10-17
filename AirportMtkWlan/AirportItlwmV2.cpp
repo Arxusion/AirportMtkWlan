@@ -136,10 +136,24 @@ eventHandler(struct ieee80211com *ic, int msgCode, void *data)
 #endif
 }
 
+IOReturn AirportItlwm::halDebugPollGated(OSObject *owner, void *, void *, void *, void *)
+{
+    auto self = static_cast<AirportItlwm *>(owner);
+    if (self->fHalService)
+        self->fHalService->debugPoll();
+    return kIOReturnSuccess;
+}
+
 void AirportItlwm::watchdogAction(IOTimerEventSource *timer)
 {
     struct _ifnet *ifp = &fHalService->get80211Controller()->ic_ac.ac_if;
     (*ifp->if_watchdog)(ifp);
+    /*
+     * MediaTek HAL housekeeping on the main work loop: AUTH/ASSOC
+     * retransmission, DMA stall recovery (firmware reload), stats lines.
+     */
+    if (_fCommandGate && _fCommandGate->attemptAction(halDebugPollGated) != kIOReturnSuccess)
+        XYLog("watchdog: main work loop busy, poll skipped\n");
 
     watchdogTimer->setTimeoutMS(kWatchDogTimerPeriod);
 }

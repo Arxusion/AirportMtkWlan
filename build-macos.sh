@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # Builds on macOS with Xcode's toolchain:
 #   ./build-macos.sh [Debug|Release] [SimpleMtkWlan|AirportMtkWlan|all]
-# SimpleMtkWlan: the driver with HeliPort / mtkwifi control.
-# AirportMtkWlan: the same driver behind macOS's native Wi-Fi interface (Sequoia 15.2+),
-#                 from laobamac's AirportItlwm (WCL) on our MediaTek HAL.
+# SimpleMtkWlan: the driver with SimpleMTK / HeliPort control (the Xcode project builds it too).
+# AirportMtkWlan: the same driver behind macOS's native Wi-Fi interface, from laobamac's
+#                 AirportItlwm (WCL) on our MediaTek HAL. AIRPORT_OS=tahoe (default, macOS 26)
+#                 or sequoia (15.2+) picks the IO80211 ABI; the kext only works on that one.
 set -euo pipefail
 config="${1:-Release}"
 product="${2:-all}"
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 version="${MODULE_VERSION:-1.0.20}"
 commit="$(git -C "$here" rev-parse --short HEAD 2>/dev/null || echo unknown)"
-kernelsdk="${MACKERNELSDK:-$here/../deps/MacKernelSDK}"
+kernelsdk="${MACKERNELSDK:-$here/MacKernelSDK}"
 sdkhdr="$kernelsdk/Headers"
 libkmod="$kernelsdk/Library/x86_64/libkmod.a"
 clangxx="$(xcrun -f clang++)"; clang="$(xcrun -f clang)"; ld64="$(xcrun -f ld)"
@@ -107,7 +108,14 @@ if [[ "$product" == all || "$product" == SimpleMtkWlan ]]; then
 	echo "built $out/mtkwifi"
 fi
 if [[ "$product" == all || "$product" == AirportMtkWlan ]] && [[ -d "$here/AirportMtkWlan" ]]; then
-	build AirportMtkWlan com.pengubow.AirportMtkWlan AirportMtkWlan/WCL/Sequoia-Info.plist \
-		-DAIRPORT -DAIRPORT_WCL "-D__IO80211_TARGET=__MAC_15_2" -DIO80211FAMILY_V2 -- "${common_sources[@]}" \
+	case "${AIRPORT_OS:-tahoe}" in
+		tahoe)   target=__MAC_26_0 ;;
+		sequoia) target=__MAC_15_2 ;;
+		*) echo "AIRPORT_OS must be tahoe or sequoia" >&2; exit 2 ;;
+	esac
+	out="$here/build/$config/${AIRPORT_OS:-tahoe}"
+	mkdir -p "$out"
+	build AirportMtkWlan com.flxxxxddd.AirportMtkWlan AirportMtkWlan/WCL/Info.plist \
+		-DAIRPORT -DAIRPORT_WCL "-D__IO80211_TARGET=$target" -DIO80211FAMILY_V2 -- "${common_sources[@]}" \
 		$(cd "$here" && ls AirportMtkWlan/*.cpp AirportMtkWlan/WCL/*.cpp 2>/dev/null)
 fi

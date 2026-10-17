@@ -16,6 +16,7 @@
 /* Begin PBXBuildFile section */
 		024A07B023FCBC3C009FBA6C /* SimpleMtkWlan.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 024A07AF23FCBC3C009FBA6C /* SimpleMtkWlan.hpp */; };
 		024A07B223FCBC3C009FBA6C /* SimpleMtkWlan.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 024A07B123FCBC3C009FBA6C /* SimpleMtkWlan.cpp */; };
+		F1A0C0DE00000000000000B1 /* MtkLog.cpp in Sources */ = {isa = PBXBuildFile; fileRef = F1A0C0DE00000000000000F1 /* MtkLog.cpp */; };
 		024A082E23FCBC6C009FBA6C /* aes.c in Sources */ = {isa = PBXBuildFile; fileRef = 024A07C923FCBC6C009FBA6C /* aes.c */; };
 		024A082F23FCBC6C009FBA6C /* hmac.c in Sources */ = {isa = PBXBuildFile; fileRef = 024A07CA23FCBC6C009FBA6C /* hmac.c */; };
 		024A083023FCBC6C009FBA6C /* sha2.c in Sources */ = {isa = PBXBuildFile; fileRef = 024A07CB23FCBC6C009FBA6C /* sha2.c */; };
@@ -135,6 +136,8 @@
 		024A07AC23FCBC3C009FBA6C /* SimpleMtkWlan.kext */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SimpleMtkWlan.kext; sourceTree = BUILT_PRODUCTS_DIR; };
 		024A07AF23FCBC3C009FBA6C /* SimpleMtkWlan.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = SimpleMtkWlan.hpp; sourceTree = "<group>"; };
 		024A07B123FCBC3C009FBA6C /* SimpleMtkWlan.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = SimpleMtkWlan.cpp; sourceTree = "<group>"; };
+		F1A0C0DE00000000000000F1 /* MtkLog.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = MtkLog.cpp; sourceTree = "<group>"; };
+		F1A0C0DE00000000000000F2 /* MtkLog.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = MtkLog.hpp; sourceTree = "<group>"; };
 		024A07B323FCBC3C009FBA6C /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		024A07BA23FCBC6C009FBA6C /* compat.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = compat.cpp; sourceTree = "<group>"; };
 		024A07C923FCBC6C009FBA6C /* aes.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = aes.c; sourceTree = "<group>"; };
@@ -299,6 +302,8 @@
 				B00000000000000000000005 /* hal_mwx */,
 				024A07AF23FCBC3C009FBA6C /* SimpleMtkWlan.hpp */,
 				024A07B123FCBC3C009FBA6C /* SimpleMtkWlan.cpp */,
+				F1A0C0DE00000000000000F1 /* MtkLog.cpp */,
+				F1A0C0DE00000000000000F2 /* MtkLog.hpp */,
 				024A07B323FCBC3C009FBA6C /* Info.plist */,
 				F8D76361244F21BB00DEA040 /* pm.cpp */,
 				F8E49A12249B923500BE6868 /* MtkWlanUserClient.cpp */,
@@ -677,6 +682,7 @@
 				024A082E23FCBC6C009FBA6C /* aes.c in Sources */,
 				F8C2EC4F2408031A007A9422 /* ieee80211_proto.c in Sources */,
 				024A07B223FCBC3C009FBA6C /* SimpleMtkWlan.cpp in Sources */,
+				F1A0C0DE00000000000000B1 /* MtkLog.cpp in Sources */,
 				024A084923FCBC6C009FBA6C /* ecb_enc.c in Sources */,
 				024A084F23FCBC6C009FBA6C /* md5.c in Sources */,
 				024A083623FCBC6C009FBA6C /* michael.c in Sources */,
