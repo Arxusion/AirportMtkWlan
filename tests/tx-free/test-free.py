@@ -23,6 +23,7 @@ void m_freem(mbuf*m){free(m->raw);delete m;}
 #define MT_TX_FREE_PAIR (1u<<31)
 #define MT_TX_FREE0_MSDU_CNT_GET(x) (((x)>>16)&0x3ff)
 #define MT_TX_FREE_MSDU_ID_GET(x) (((x)>>16)&0x7fff)
+void mwx_tx_kick(mwx_softc*){}
 unsigned releases;
 void mwx_txwi_put(mwx_softc*,mwx_txwi*mt){assert(mt->mt_busy);mt->mt_busy=0;releases++;}
 mbuf* packet(size_t len){auto m=new mbuf{(unsigned char*)calloc(1,len),len,0};return m;}

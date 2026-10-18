@@ -401,6 +401,7 @@ struct mwx_txwi_desc {
 	struct mwx_txwi			*mt_data;
 
 	u_int				mt_count;
+	u_int				mt_nfree;	/* entries on mt_freelist */
 	bus_dmamap_t			mt_map;
 	bus_dma_segment_t		mt_seg;
 	LIST_HEAD(, mwx_txwi)		mt_freelist;
@@ -501,6 +502,8 @@ struct mwx_softc {
 	int			sc_coredump_cnt;
 	int8_t			sc_resetting;
 	int8_t			sc_hard_reset;	/* reload firmware on reset */
+	int8_t			sc_tx_amsdu;	/* hardware TX A-MSDU (-mtknoamsdu: off) */
+	uint32_t		sc_tx_full_cnt;	/* output paused: no TXWI / ring slot */
 	int8_t			sc_sta_added;	/* peer STA record exists in fw */
 	bool sc_detaching, sc_net_attached;
 	int8_t			sc_fw_loaded;
@@ -1166,6 +1169,32 @@ mwx_watchdog(struct ifnet *ifp)
 	ieee80211_watchdog(ifp);
 }
 
+static inline int mwx_dma_free_slots(struct mwx_queue *);
+
+/* Free TXWIs and TX ring slots for at least `need` frames. */
+static inline int
+mwx_tx_has_room(struct mwx_softc *sc, u_int need)
+{
+	return sc->sc_txwi.mt_nfree >= need &&
+	    mwx_dma_free_slots(&sc->sc_txq) >= (int)need;
+}
+
+/* Restart output after TX completions freed enough room. */
+static void
+mwx_tx_kick(struct mwx_softc *sc)
+{
+	struct ifnet *ifp = &sc->sc_ic.ic_if;
+
+	if (!ifq_is_oactive(&ifp->if_snd) || !mwx_tx_has_room(sc, 32))
+		return;
+	ifq_clr_oactive(&ifp->if_snd);
+	mwx_start(ifp);
+#ifdef __PRIVATE_SPI__
+	if (ifp->iface != NULL)
+		ifp->iface->signalOutputThread();
+#endif
+}
+
 void
 mwx_start(struct ifnet *ifp)
 {
@@ -1179,9 +1208,16 @@ mwx_start(struct ifnet *ifp)
 		return;
 
 	for (;;) {
-		/* XXX TODO handle oactive
+		/*
+		 * Stop pulling packets while the TXWI pool or the TX ring is
+		 * full instead of dropping them (TCP saw that as loss); the TX
+		 * free event restarts output (mwx_tx_kick).
+		 */
+		if (!mwx_tx_has_room(sc, 1)) {
 			ifq_set_oactive(&ifp->if_snd);
-		*/
+			sc->sc_tx_full_cnt++;
+			break;
+		}
 
 		/* need to send management frames even if we're not RUNning */
 		m = mq_dequeue(&ic->ic_mgtq);
@@ -1222,8 +1258,12 @@ mwx_start(struct ifnet *ifp)
 		ieee80211_release_node(ic, ni);
 		if (rv != 0) {
 			ifp->if_oerrors++;
+			if (ifp->netStat)
+				ifp->netStat->outputErrors++;
 			continue;
 		}
+		if (ifp->netStat)
+			ifp->netStat->outputPackets++;
 
 		if (ifp->if_flags & IFF_UP)
 			ifp->if_timer = 1;
@@ -2340,6 +2380,20 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 	    IEEE80211_C_TX_AMPDU;	/* TX A-MPDU, BA set up in firmware */
 
 	/*
+	 * Hardware TX A-MSDU (MT_TXD7_HW_AMSDU), like Linux mt7921 and
+	 * pengubow's MT7922 port: the MAC packs several MSDUs of a TID with a
+	 * Block Ack agreement into one A-MSDU when the AP allows A-MSDU in
+	 * A-MPDU. Fewer, larger frames: more upload.
+	 */
+	{
+		int off = 0;
+		sc->sc_tx_amsdu = !PE_parse_boot_argn("-mtknoamsdu", &off,
+		    sizeof(off));
+		if (sc->sc_tx_amsdu)
+			ic->ic_caps |= IEEE80211_C_TX_AMSDU_IN_AMPDU;
+	}
+
+	/*
 	 * 802.11n. 20/40 MHz must be advertised even when only VHT80 is used:
 	 * an AP treats a station without the HT "20/40" bit as 20 MHz-only and
 	 * never transmits 80 MHz to it. 40 MHz is only actually used on 5 GHz
@@ -2532,6 +2586,7 @@ mwx_txwi_alloc(struct mwx_softc *sc, int count)
 	MWX_DEV_LOG(sc, "txwi alloc start count=%d size=%zu\n",
 	    count, (size_t)size);
 	LIST_INIT(&q->mt_freelist);
+	q->mt_nfree = 0;
 	q->mt_count = count;
 
 	error = bus_dmamap_create(sc->sc_dmat, size, 1, size, 0,
@@ -2586,8 +2641,10 @@ mwx_txwi_alloc(struct mwx_softc *sc, int count)
 		}
 	}
 
-	for (i = count - 1; i >= MT_PACKET_ID_FIRST; i--)
+	for (i = count - 1; i >= MT_PACKET_ID_FIRST; i--) {
 		LIST_INSERT_HEAD(&q->mt_freelist, &q->mt_data[i], mt_entry);
+		q->mt_nfree++;
+	}
 
 	MWX_DEV_LOG(sc, "txwi alloc ok count=%d dma=0x%08x\n", count, addr);
 	return 0;
@@ -2643,6 +2700,7 @@ mwx_txwi_get(struct mwx_softc *sc)
 	if (mt == NULL)
 		return NULL;
 	LIST_REMOVE(mt, mt_entry);
+	sc->sc_txwi.mt_nfree--;
 	mt->mt_busy = 1;
 	return mt;
 }
@@ -2667,6 +2725,7 @@ mwx_txwi_put(struct mwx_softc *sc, struct mwx_txwi *mt)
 	if (mt->mt_idx < MT_PACKET_ID_FIRST)
 		return;
 	LIST_INSERT_HEAD(&sc->sc_txwi.mt_freelist, mt, mt_entry);
+	sc->sc_txwi.mt_nfree++;
 }
 
 int
@@ -6266,6 +6325,22 @@ mt7921_mac_write_txwi_80211(struct mwx_softc *sc, struct mbuf *m,
 		tid = qos & IEEE80211_QOS_TID;
 	}
 
+	/*
+	 * Like Linux: aggregate only TIDs with a TX Block Ack agreement, and
+	 * let the MAC build A-MSDUs where the AP allowed A-MSDU in A-MPDU.
+	 */
+	if (type == (IEEE80211_FC0_TYPE_DATA >> IEEE80211_FC0_TYPE_SHIFT) &&
+	    !multicast) {
+		struct ieee80211_tx_ba *ba = ieee80211_has_qos(wh) && tid < 8 ?
+		    &ni->ni_tx_ba[tid] : NULL;
+
+		if (ba == NULL || ba->ba_state != IEEE80211_BA_AGREED)
+			txp->txwi[3] |= htole32(MT_TXD3_BA_DISABLE);
+		else if (sc->sc_tx_amsdu &&
+		    (ba->ba_params & IEEE80211_ADDBA_AMSDU))
+			txp->txwi[7] |= htole32(MT_TXD7_HW_AMSDU);
+	}
+
 #ifdef NOTYET
 	if (ieee80211_is_action(fc) &&
 	    mgmt->u.action.category == WLAN_CATEGORY_BACK &&
@@ -6409,11 +6484,28 @@ mt7921_mac_write_txwi(struct mwx_softc *sc, struct mbuf *m,
 	uint32_t val, p_fmt, omac_idx;
 	uint8_t q_idx, wmm_idx, band_idx;
 	uint8_t phy_idx = 0;
-	/* XXX hardcoded and wrong */
-	int pid = MT_PACKET_ID_FIRST;
+	/*
+	 * No per-frame TX status: TXWIs are released by the TX free event,
+	 * and a TXS event for every frame only loaded the RX ring (Linux
+	 * asks for status only when mac80211 needs it).
+	 */
+	int pid = MT_PACKET_ID_NO_SKB;
 	enum mt76_txq_id qid = MT_TXQ_BE;
+	/* mac80211 AC index (VO=0, VI=1, BE=2, BK=3) of the hardware queue */
+	uint8_t ac = 0;
 
 	wh = mtod(m, struct ieee80211_frame *);
+	/*
+	 * Data goes to the queue of its access category; management and
+	 * control frames stay on VO, like mac80211. Everything used to go to
+	 * VO, where the hardware does not aggregate best-effort traffic well.
+	 */
+	if ((wh->i_fc[0] & IEEE80211_FC0_TYPE_MASK) == IEEE80211_FC0_TYPE_DATA) {
+		static const uint8_t tid_to_ac[8] = { 2, 3, 3, 2, 1, 1, 0, 0 };
+
+		ac = ieee80211_has_qos(wh) ?
+		    tid_to_ac[ieee80211_get_qos(wh) & IEEE80211_QOS_TID & 7] : 2;
+	}
 	omac_idx = sc->sc_vif.omac_idx << MT_TXD1_OWN_MAC_SHIFT;
 	wmm_idx = sc->sc_vif.wmm_idx;
 	band_idx = sc->sc_vif.band_idx;
@@ -6423,8 +6515,7 @@ mt7921_mac_write_txwi(struct mwx_softc *sc, struct mbuf *m,
 		q_idx = MT_LMAC_ALTX0;
 	} else {
 		p_fmt = MT_TX_TYPE_CT;
-		q_idx = wmm_idx * MWX_MAX_WMM_SETS +
-		    mt7921_lmac_mapping(/* skb_get_queue_mapping(skb) */ 0);
+		q_idx = wmm_idx * MWX_MAX_WMM_SETS + mt7921_lmac_mapping(ac);
 
 #ifdef NOTYET
 		/* counting non-offloading skbs */
@@ -6519,6 +6610,7 @@ mwx_mac_tx_free(struct mwx_softc *sc, struct mbuf *m)
 
 out:
 	m_freem(m);
+	mwx_tx_kick(sc);
 }
 
 int
@@ -7424,6 +7516,14 @@ int mt7921_mcu_set_associated_peer(struct mwx_softc *sc)
             ni->ni_htcaps, ni->ni_ampdu_param, phy->phy_type,
             ra->rx_mcs_bitmask[1], ra->rx_mcs_bitmask[0]);
     }
+    if ((ni->ni_flags & IEEE80211_NODE_HT) && sc->sc_tx_amsdu) {
+        /* Hardware TX A-MSDU (Linux mt76_connac_mcu_sta_amsdu_tlv). */
+        struct sta_rec_amsdu *amsdu = (struct sta_rec_amsdu *)mwx_append_tlv(m,
+            &tlvnum, STA_REC_HW_AMSDU, sizeof(*amsdu));
+        amsdu->max_amsdu_num = 8;
+        amsdu->amsdu_en = 1;
+        amsdu->max_mpdu_size = 0;	/* A-MSDUs up to 3839 bytes */
+    }
     if (ni->ni_flags & IEEE80211_NODE_VHT) {
         struct sta_rec_vht_v1 *vht = (struct sta_rec_vht_v1 *)mwx_append_tlv(m,
             &tlvnum, STA_REC_VHT, sizeof(*vht));
@@ -7463,7 +7563,7 @@ int mt7921_mcu_set_associated_peer(struct mwx_softc *sc)
  */
 static int
 mwx_mcu_sta_ba(struct mwx_softc *sc, struct ieee80211_node *ni, uint8_t tid,
-    uint16_t ssn, uint16_t winsize, int enable, int tx)
+    uint16_t ssn, uint16_t winsize, int enable, int tx, int amsdu)
 {
 	struct mwx_node *mn = (struct mwx_node *)ni;
 	struct sta_rec_ba *ba;
@@ -7477,7 +7577,7 @@ mwx_mcu_sta_ba(struct mwx_softc *sc, struct ieee80211_node *ni, uint8_t tid,
 	    sizeof(*ba));
 	ba->tid = tid;
 	ba->ba_type = tx ? MT_BA_TYPE_ORIGINATOR : MT_BA_TYPE_RECIPIENT;
-	ba->amsdu = 0;
+	ba->amsdu = amsdu ? 1 : 0;
 	ba->ba_en = enable ? (1U << tid) : 0;
 	ba->ssn = htole16(ssn);
 	ba->winsize = htole16(winsize);
@@ -7496,7 +7596,7 @@ mwx_ampdu_rx_start(struct ieee80211com *ic, struct ieee80211_node *ni,
 	struct ieee80211_rx_ba *ba = &ni->ni_rx_ba[tid];
 	int rv;
 
-	rv = mwx_mcu_sta_ba(sc, ni, tid, ba->ba_winstart, ba->ba_winsize, 1, 0);
+	rv = mwx_mcu_sta_ba(sc, ni, tid, ba->ba_winstart, ba->ba_winsize, 1, 0, 0);
 	MWX_DEV_LOG(sc, "rx BA start tid=%u ssn=%u win=%u rv=%d\n", tid,
 	    ba->ba_winstart, ba->ba_winsize, rv);
 	return rv;
@@ -7509,7 +7609,7 @@ mwx_ampdu_rx_stop(struct ieee80211com *ic, struct ieee80211_node *ni,
 	struct mwx_softc *sc = (struct mwx_softc *)ic->ic_softc;
 	int rv;
 
-	rv = mwx_mcu_sta_ba(sc, ni, tid, 0, 0, 0, 0);
+	rv = mwx_mcu_sta_ba(sc, ni, tid, 0, 0, 0, 0, 0);
 	MWX_DEV_LOG(sc, "rx BA stop tid=%u rv=%d\n", tid, rv);
 }
 
@@ -7525,13 +7625,14 @@ mwx_ampdu_tx_start(struct ieee80211com *ic, struct ieee80211_node *ni,
 	struct mwx_softc *sc = (struct mwx_softc *)ic->ic_softc;
 	struct ieee80211_tx_ba *ba = &ni->ni_tx_ba[tid];
 	uint16_t win = ba->ba_winsize;
-	int rv;
+	int amsdu, rv;
 
 	if (win == 0 || win > 64)
 		win = 64;
-	rv = mwx_mcu_sta_ba(sc, ni, tid, ba->ba_winstart, win, 1, 1);
-	MWX_DEV_LOG(sc, "tx BA start tid=%u ssn=%u win=%u rv=%d\n", tid,
-	    ba->ba_winstart, win, rv);
+	amsdu = sc->sc_tx_amsdu && (ba->ba_params & IEEE80211_ADDBA_AMSDU);
+	rv = mwx_mcu_sta_ba(sc, ni, tid, ba->ba_winstart, win, 1, 1, amsdu);
+	MWX_DEV_LOG(sc, "tx BA start tid=%u ssn=%u win=%u amsdu=%d rv=%d\n",
+	    tid, ba->ba_winstart, win, amsdu, rv);
 	return rv;
 }
 
@@ -7542,7 +7643,7 @@ mwx_ampdu_tx_stop(struct ieee80211com *ic, struct ieee80211_node *ni,
 	struct mwx_softc *sc = (struct mwx_softc *)ic->ic_softc;
 	int rv;
 
-	rv = mwx_mcu_sta_ba(sc, ni, tid, 0, 0, 0, 1);
+	rv = mwx_mcu_sta_ba(sc, ni, tid, 0, 0, 0, 1, 0);
 	MWX_DEV_LOG(sc, "tx BA stop tid=%u rv=%d\n", tid, rv);
 }
 
@@ -7753,6 +7854,12 @@ MtkMwx::debugPoll()
 		    ieee80211_bar_rx_count,
 		    ic->ic_stats.is_ht_rx_ba_agreements, mwx_rx_ctl_cnt,
 		    mwx_rx_bar_cnt);
+	if (verbose)
+		MWX_DEV_LOG(sc,
+		    "tx txwi_free=%u ring_free=%d full=%u oactive=%d tx_ba=%u amsdu=%d\n",
+		    sc->sc_txwi.mt_nfree, mwx_dma_free_slots(&sc->sc_txq),
+		    sc->sc_tx_full_cnt, ifq_is_oactive(&ic->ic_if.if_snd) ? 1 : 0,
+		    ic->ic_stats.is_ht_tx_ba_agreements, sc->sc_tx_amsdu);
 	if (verbose && mwx_rxr_total != 0) {
 		MWX_DEV_LOG(sc,
 		    "rxrate n=%u mode[cck=%u ofdm=%u ht=%u vht=%u he=%u] bw[20=%u 40=%u 80=%u 160=%u] nss[1=%u 2=%u] "

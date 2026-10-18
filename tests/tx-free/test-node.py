@@ -11,9 +11,14 @@ pre=r'''
 const int IFF_RUNNING=1,IFF_UP=2,IEEE80211_S_RUN=4,IEEE80211_F_TX_MGMT_ONLY=8;
 struct ieee80211_node{int refs=0;};
 struct mbuf{ieee80211_node*node;};struct queue{mbuf*m=nullptr;};
-struct ifnet {void*if_softc;int if_flags=3;queue if_snd;int if_oerrors=0,if_timer=0;};
+struct netstat{unsigned long long outputPackets=0,outputErrors=0;};
+struct ifnet {void*if_softc;int if_flags=3;queue if_snd;int if_oerrors=0,if_timer=0;netstat*netStat=nullptr;};
 struct ieee80211com {int ic_state=4,ic_xflags=0;queue ic_mgtq;};
-struct mwx_softc{ieee80211com sc_ic;};struct ether_header{char bytes[14];};
+struct mwx_softc{ieee80211com sc_ic;unsigned sc_tx_full_cnt=0;};
+int room=1;
+int mwx_tx_has_room(mwx_softc*,unsigned){return room;}
+int paused;
+void ifq_set_oactive(queue*){paused++;}struct ether_header{char bytes[14];};
 bool ifq_is_oactive(queue*){return false;}
 mbuf*mq_dequeue(queue*q){auto m=q->m;q->m=nullptr;return m;}
 mbuf*ifq_dequeue(queue*q){return mq_dequeue(q);}
@@ -32,7 +37,9 @@ int main(){
   if(mgmt){ni.refs++;sc.sc_ic.ic_mgtq.m=&m;}else ifp.if_snd.m=&m;
   mwx_start(&ifp);assert(ni.refs==0);assert(ifp.if_oerrors==error);
  }
- puts("PASS: extracted mwx_start balances enqueue node references for data/management, success/failure.");
+ {mwx_softc sc; ifnet ifp; ifp.if_softc=&sc;ieee80211_node ni;mbuf m{&ni};room=0;paused=0;ifp.if_snd.m=&m;
+  mwx_start(&ifp);assert(ifp.if_snd.m==&m&&paused==1&&sc.sc_tx_full_cnt==1&&ni.refs==0);room=1;}
+ puts("PASS: extracted mwx_start balances enqueue node references for data/management, success/failure; pauses without dropping when TX is full.");
 }
 '''
 tmp=tempfile.TemporaryDirectory(prefix='mtk-tx-test-');art=Path(tmp.name)

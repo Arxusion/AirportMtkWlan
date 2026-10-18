@@ -1328,6 +1328,15 @@ struct sta_rec_ra_info {
 #define	RA_LEGACY_CCK	0x000f
 
 #define	STA_REC_AMSDU			0x05
+#define	STA_REC_HW_AMSDU		0x0f
+struct sta_rec_amsdu {
+	uint16_t	tag;
+	uint16_t	len;
+	uint8_t		max_amsdu_num;
+	uint8_t		max_mpdu_size;
+	uint8_t		amsdu_en;
+	uint8_t		rsv;
+} __packed;
 
 #define	STA_REC_BA			0x06
 #define	MT_BA_TYPE_ORIGINATOR		1

@@ -3274,6 +3274,14 @@ ieee80211_recv_addba_resp(struct ieee80211com *ic, mbuf_t m,
         return;
     }
     
+    /*
+     * A-MSDU inside the A-MPDUs we send only if the recipient allows it
+     * (the bit in its ADDBA response); the driver reads it from ba_params.
+     */
+    ba->ba_params &= ~IEEE80211_ADDBA_AMSDU;
+    if (ic->ic_caps & IEEE80211_C_TX_AMSDU_IN_AMPDU)
+        ba->ba_params |= params & IEEE80211_ADDBA_AMSDU;
+
     /* notify drivers of this new Block Ack agreement */
     if (ic->ic_ampdu_tx_start != NULL)
         err = ic->ic_ampdu_tx_start(ic, ni, tid);

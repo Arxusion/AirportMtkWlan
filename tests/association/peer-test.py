@@ -42,7 +42,9 @@ struct sta_rec_phy{uint16_t tag,len,basic_rate;uint8_t phy_type,ampdu,rts_policy
 struct sta_rec_ra_info{uint16_t tag,len,legacy;uint8_t rx_mcs_bitmask[HT_MCS_MASK_NUM];};
 struct mwx_node{ieee80211_node ni;uint16_t wcid;};
 struct mwx_vif{uint8_t omac_idx;};
-struct mwx_softc{struct {ieee80211_node*ic_bss;uint8_t ic_sup_mcs[10];}sc_ic;mwx_vif sc_vif;struct{uint8_t num_streams;}sc_capa;};
+struct mwx_softc{struct {ieee80211_node*ic_bss;uint8_t ic_sup_mcs[10];}sc_ic;mwx_vif sc_vif;struct{uint8_t num_streams;}sc_capa;int8_t sc_tx_amsdu;};
+#define STA_REC_HW_AMSDU 0x0f
+struct sta_rec_amsdu{uint16_t tag,len;uint8_t max_amsdu_num,max_mpdu_size,amsdu_en,rsv;};
 void mwx_node_chan_width(ieee80211_node*,uint8_t*bw,uint8_t*center){*bw=0;*center=0;}
 uint8_t mt7921_get_phy_mode_v2(mwx_softc*,ieee80211_node*){return 0;}
 struct sta_req_hdr{uint8_t unused[8];};
