@@ -6373,6 +6373,22 @@ mt7921_mac_tx_rate_val(struct mwx_softc *sc)
 	return (rate & MT_TX_RATE_IDX_MASK) | (mode & MT_TX_RATE_MODE_MASK);
 }
 
+/* Is this 802.11 data frame an EAPOL frame (LLC/SNAP, ethertype 0x888e)? (luzility 110c92c) */
+static int
+mwx_is_eapol(struct mbuf *m, u_int hdrlen)
+{
+	static const uint8_t eapol_llc[8] = {
+		0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00, 0x88, 0x8e
+	};
+	uint8_t llc[sizeof(eapol_llc)];
+
+	if (mbuf_pkthdr_len(m) < hdrlen + sizeof(llc))
+		return 0;
+	if (mbuf_copydata(m, hdrlen, sizeof(llc), llc) != 0)
+		return 0;
+	return memcmp(llc, eapol_llc, sizeof(llc)) == 0;
+}
+
 void
 mt7921_mac_write_txwi_80211(struct mwx_softc *sc, struct mbuf *m,
     struct ieee80211_node *ni, struct mt76_txwi *txp)
@@ -6380,19 +6396,25 @@ mt7921_mac_write_txwi_80211(struct mwx_softc *sc, struct mbuf *m,
 	struct ieee80211com *ic = &sc->sc_ic;
 	struct ieee80211_frame *wh;
 	uint32_t val;
-	uint8_t type, subtype, tid = 0;
+	uint8_t fc_type, type, subtype, tid = 0;
 	u_int hdrlen;
 	int multicast;
 
 
 	wh = mtod(m, struct ieee80211_frame *);
-	type = wh->i_fc[0] & IEEE80211_FC0_TYPE_MASK;
-	type >>= IEEE80211_FC0_TYPE_SHIFT;
+	/*
+	 * fc_type keeps net80211's in-place encoding for comparisons with IEEE80211_FC0_TYPE_*; type/subtype are
+	 * shifted for the TXD fields. Comparing the shifted value with IEEE80211_FC0_TYPE_DATA (0x08) took every
+	 * data frame for management: fixed basic rate (1 Mbit/s CCK on 2.4 GHz, 6 Mbit/s OFDM on 5 GHz) and
+	 * BA_DISABLE on all TX (WIFI-7: upload 0.9 / 5.1 Mbit/s). Same fix as luzility/SimpleMtkWlan 110c92c.
+	 */
+	fc_type = wh->i_fc[0] & IEEE80211_FC0_TYPE_MASK;
+	type = fc_type >> IEEE80211_FC0_TYPE_SHIFT;
 	subtype = wh->i_fc[0] & IEEE80211_FC0_SUBTYPE_MASK;
 	subtype >>= IEEE80211_FC0_SUBTYPE_SHIFT;
 	multicast = IEEE80211_IS_MULTICAST(wh->i_addr1);
 
-	if (type == IEEE80211_FC0_TYPE_CTL)
+	if (fc_type == IEEE80211_FC0_TYPE_CTL)
 		hdrlen = sizeof(struct ieee80211_frame_min);
 	else
 		hdrlen = ieee80211_get_hdrlen(wh);
@@ -6466,7 +6488,9 @@ mt7921_mac_write_txwi_80211(struct mwx_softc *sc, struct mbuf *m,
 	}
 #endif
 
-	if (multicast || type != IEEE80211_FC0_TYPE_DATA) {
+	/* Like mt76 with IEEE80211_TX_CTL_USE_MINRATE, keep EAPOL at the basic rate. */
+	if (multicast || fc_type != IEEE80211_FC0_TYPE_DATA ||
+	    mwx_is_eapol(m, hdrlen)) {
 		/* Fixed rata is available just for 802.11 txd */
 		uint32_t rate, val6;
 
