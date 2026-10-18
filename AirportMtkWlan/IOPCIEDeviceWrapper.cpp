@@ -48,6 +48,10 @@ IOWorkLoop *IOPCIEDeviceWrapper::getWorkLoop() const
 IOService* IOPCIEDeviceWrapper::
 probe(IOService *provider, SInt32 *score)
 {
+    /* Safe boot: -nvoff (OpenCore "Start once without NVIDIA driver") or -mtkwlanoff leaves the card alone. */
+    int off = 0;
+    if (PE_parse_boot_argn("-nvoff", &off, sizeof(off)) || PE_parse_boot_argn("-mtkwlanoff", &off, sizeof(off)))
+        return NULL;
     mtk_dbg_set_nub(provider);
     XYLog("%s\n", __PRETTY_FUNCTION__);
     bool isMatch = false;
