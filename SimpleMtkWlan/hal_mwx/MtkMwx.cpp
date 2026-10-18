@@ -2345,7 +2345,8 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 	 * never transmits 80 MHz to it. 40 MHz is only actually used on 5 GHz
 	 * (2.4 GHz channels are not marked HT40, so net80211 masks the bit).
 	 */
-	ic->ic_htcaps = IEEE80211_HTCAP_SGI20 | IEEE80211_HTCAP_SGI40 |
+	ic->ic_htcaps = IEEE80211_HTCAP_LDPC |
+	    IEEE80211_HTCAP_SGI20 | IEEE80211_HTCAP_SGI40 |
 	    IEEE80211_HTCAP_CBW20_40 |
 	    (1U << IEEE80211_HTCAP_RXSTBC_SHIFT);	/* RX STBC, 1 stream */
 	ic->ic_htcaps |=
@@ -2359,9 +2360,18 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 	 * 802.11ac: 80 MHz, SGI80, RX LDPC, MCS 0-9 on 2 streams. MPDUs are
 	 * capped at 3895 bytes and A-MPDUs at 64K (RX buffers are 2 KB clusters).
 	 */
+	/*
+	 * SU/MU beamformee with 4 sounding dimensions (STS 3), like Linux
+	 * mt7921 and pengubow's MT7922 port: lets the AP beamform toward us,
+	 * worth a few dB (higher MCS) on a weak link. The firmware answers the
+	 * sounding (NDPA/NDP) by itself.
+	 */
 	ic->ic_vhtcaps = IEEE80211_VHTCAP_MAX_MPDU_LENGTH_3895 |
 	    IEEE80211_VHTCAP_RXLDPC | IEEE80211_VHTCAP_SHORT_GI_80 |
 	    IEEE80211_VHTCAP_RXSTBC_1 |
+	    IEEE80211_VHTCAP_SU_BEAMFORMEE_CAPABLE |
+	    IEEE80211_VHTCAP_MU_BEAMFORMEE_CAPABLE |
+	    (3U << IEEE80211_VHTCAP_BEAMFORMEE_STS_SHIFT) |
 	    (3U << IEEE80211_VHTCAP_MAX_A_MPDU_LENGTH_EXPONENT_SHIFT) |
 	    IEEE80211_VHTCAP_RX_ANTENNA_PATTERN |
 	    IEEE80211_VHTCAP_TX_ANTENNA_PATTERN;
