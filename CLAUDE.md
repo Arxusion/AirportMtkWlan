@@ -101,6 +101,17 @@ stubs (new fields, structs or helper calls) rather than weakening its asserts.
   line); reorder gaps rely on the 100 ms `IEEE80211_BA_GAP_TIMEOUT`.
 - A warm reboot keeps the M.2 card powered; attach recovers via WFSYS reset and
   PCIe FLR.
+- TX: data uses the LMAC queue of its AC (`mt7921_mac_write_txwi`), management
+  stays on VO. No `MT_TXD5_TX_STATUS_HOST`; TXWIs are released only by the TX
+  free event. `mwx_start` sets oactive when `mwx_tx_has_room` fails and
+  `mwx_tx_kick` (from `mwx_mac_tx_free`) restarts output and calls
+  `signalOutputThread()` — never drop packets for a full ring.
+- TX A-MSDU: `IEEE80211_C_TX_AMSDU_IN_AMPDU` makes net80211 offer it in ADDBA
+  and keep the AP's answer in `ba_params`; the HAL then sets
+  `MT_TXD7_HW_AMSDU` and STA_REC_BA `amsdu`, with `STA_REC_HW_AMSDU` in the
+  peer record. `-mtknoamsdu` disables it.
+- Host tests use ASan; on the hackintosh dev machine any ASan binary dies with
+  SIGILL, so run them there with `-fsanitize=undefined` only (CI runs ASan).
 
 ## Native Wi-Fi (AirportMtkWlan) notes
 

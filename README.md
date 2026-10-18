@@ -47,6 +47,7 @@ hardware layer:
 | 802.11n (HT20/HT40, MCS 0–15, SGI, RX STBC, WMM) | ✅ |
 | 802.11ac (VHT20/40/80, 2×2 MCS 0–9, RX STBC) | ✅ |
 | A-MPDU: RX Block Ack + TX aggregation | ✅ |
+| Hardware TX A-MSDU (inside A-MPDU), VHT beamformee | ✅ |
 | Auto-join at boot, 5 GHz preferred over 2.4 GHz of the same router | ✅ |
 | AUTH / ASSOC retransmission (lost frames no longer cost a full rescan) | ✅ |
 | Auto-recovery of a wedged chip (DMA stall watchdog, PCIe FLR at attach) | ✅ |
@@ -124,7 +125,7 @@ they match the same card.
 5. Install [SimpleMTK](https://github.com/laobamac/SimpleMTKClient), reboot and
    join a network from the menu bar.
 
-Optional boot-args: `-novht`, `-noht40`.
+Optional boot-args: `-novht`, `-noht40`, `-mtknoamsdu` (no TX A-MSDU).
 
 ## Troubleshooting
 
@@ -262,6 +263,11 @@ On top of upstream and [PR #5](https://github.com/laobamac/SimpleMtkWlan/pull/5)
   AUTH/ASSOC retransmit), no manual MSI enable, shared persistent log, link
   rate from the measured RX rate, and short scans macOS asks for allowed while
   connected (full sweeps stay throttled).
+* **TX path:** data frames go to the hardware queue of their access
+  category (everything was on VO), no per-frame TX status events, Block Ack
+  disabled for TIDs without an agreement, output pauses when the TX ring is
+  full instead of dropping packets, hardware A-MSDU inside A-MPDU when the AP
+  allows it. VHT SU/MU beamformee and HT LDPC are advertised (Linux defaults).
 * **Build:** builds from a clean clone (MacKernelSDK submodule, no absolute
   paths), host tests fixed, CI + releases.
 
