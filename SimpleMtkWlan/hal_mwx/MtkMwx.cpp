@@ -29,6 +29,7 @@
  */
 
 #include "MtkMwx.hpp"
+#include <IOKit/IODeviceTreeSupport.h>
 #ifdef AIRPORT_WCL
 #include "WCL/WCL.hpp"
 #endif
@@ -2156,7 +2157,22 @@ mwx_preinit(struct mwx_softc *sc)
 	    sc->sc_capa.has_6ghz, sc->sc_capa.num_streams,
 	    sc->sc_capa.antenna_mask);
 
-	if (sc->sc_capa.has_2ghz) {
+	/*
+	 * nmx knob: NVRAM nullmoth-wifi-band=5 leaves the 2.4 GHz channels out, so scans, macOS's network list and
+	 * joins are 5 GHz only (a dual-band SSID then joins on 5 GHz). Delete the variable to get 2.4 GHz back.
+	 */
+	bool only5 = false;
+	if (IORegistryEntry *opts = IORegistryEntry::fromPath("/options", gIODTPlane)) {
+		if (OSData *d = OSDynamicCast(OSData, opts->copyProperty("nullmoth-wifi-band"))) {
+			only5 = d->getLength() >= 1 && ((const char *)d->getBytesNoCopy())[0] == '5';
+			d->release();
+		}
+		opts->release();
+	}
+	if (only5 && sc->sc_capa.has_5ghz)
+		MWX_DEV_LOG(sc, "preinit nullmoth-wifi-band=5: 2.4 GHz channels left out\n");
+
+	if (sc->sc_capa.has_2ghz && !(only5 && sc->sc_capa.has_5ghz)) {
 		for (i = 0; i < MWX_NUM_2GHZ_CHANNELS; i++) {
 			chan = mwx_channels_2ghz[i];
 			ic->ic_channels[chan].ic_freq =
