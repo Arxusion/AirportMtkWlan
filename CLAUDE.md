@@ -110,6 +110,11 @@ stubs (new fields, structs or helper calls) rather than weakening its asserts.
   and keep the AP's answer in `ba_params`; the HAL then sets
   `MT_TXD7_HW_AMSDU` and STA_REC_BA `amsdu`, with `STA_REC_HW_AMSDU` in the
   peer record. `-mtknoamsdu` disables it.
+- Sleep/wake: the card loses power in S3. Front ends call
+  `MtkHalService::suspend()` / `resume()` from their power state handlers;
+  resume does driver own (WFSYS reset fallback — needed in practice) and
+  reloads the firmware through the hard reset task. While `sc_suspended`,
+  `mwx_intr` and `debugPoll` must not touch the hardware.
 - Host tests use ASan; on the hackintosh dev machine any ASan binary dies with
   SIGILL, so run them there with `-fsanitize=undefined` only (CI runs ASan).
 

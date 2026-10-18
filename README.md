@@ -55,7 +55,7 @@ hardware layer:
 | Native Wi-Fi menu, Sequoia 15.2+ | ⚠️ builds, not tested on hardware with this HAL |
 | 802.11ax (HE) | ❌ not yet |
 | WPA3-only (SAE) networks | ❌ |
-| Sleep / wake | ⚠️ untested |
+| Sleep / wake (firmware reloaded on wake, reconnects by itself) | ✅ |
 | AirDrop / Handoff / Continuity (AWDL) | ❌ |
 
 ### Tested hardware
@@ -268,6 +268,10 @@ On top of upstream and [PR #5](https://github.com/laobamac/SimpleMtkWlan/pull/5)
   disabled for TIDs without an agreement, output pauses when the TX ring is
   full instead of dropping packets, hardware A-MSDU inside A-MPDU when the AP
   allows it. VHT SU/MU beamformee and HT LDPC are advertised (Linux defaults).
+* **Sleep / wake:** the card is powered off in S3. On sleep the driver leaves
+  the network and masks interrupts; on wake it takes the chip back (WFSYS
+  reset / PCIe FLR if needed) and reloads the firmware. Before, the first
+  interrupt after wake read a stale DMA ring and panicked.
 * **Build:** builds from a clean clone (MacKernelSDK submodule, no absolute
   paths), host tests fixed, CI + releases.
 
