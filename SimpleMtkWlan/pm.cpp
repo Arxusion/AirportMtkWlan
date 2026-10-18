@@ -137,11 +137,13 @@ IOReturn SimpleMtkWlan::registerWithPolicyMaker(IOService *policyMaker)
 void SimpleMtkWlan::setPowerStateOff()
 {
     pmPowerState = kPowerStateOff;
+    fHalService->suspend();
     pmPolicyMaker->acknowledgeSetPowerState();
 }
 
 void SimpleMtkWlan::setPowerStateOn()
 {
     pmPowerState = kPowerStateOn;
+    fHalService->resume();
     pmPolicyMaker->acknowledgeSetPowerState();
 }

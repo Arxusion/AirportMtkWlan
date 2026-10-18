@@ -1428,6 +1428,7 @@ void AirportItlwm::setPowerStateOff()
     XYLog("%s\n", __FUNCTION__);
     pmPowerState = kPowerStateOff;
     disableAdapter(bsdInterface);
+    fHalService->suspend();
     pmPolicyMaker->acknowledgeSetPowerState();
 }
 
@@ -1435,5 +1436,7 @@ void AirportItlwm::setPowerStateOn()
 {
     XYLog("%s\n", __FUNCTION__);
     pmPowerState = kPowerStateOn;
+    /* The card was powered off: reload its firmware before it is enabled. */
+    fHalService->resume();
     pmPolicyMaker->acknowledgeSetPowerState();
 }

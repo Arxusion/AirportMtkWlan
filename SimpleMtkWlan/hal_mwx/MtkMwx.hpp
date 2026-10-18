@@ -50,6 +50,8 @@ public:
 
     void clearScanningFlags() override;
     void debugPoll() override;
+    void suspend() override;
+    void resume() override;
     IOReturn setMulticastList(IOEthernetAddress *addr, int count) override;
 
     static bool mwx_match(IOPCIDevice *device);

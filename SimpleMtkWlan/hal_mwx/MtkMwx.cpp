@@ -503,6 +503,7 @@ struct mwx_softc {
 	int8_t			sc_resetting;
 	int8_t			sc_hard_reset;	/* reload firmware on reset */
 	int8_t			sc_tx_amsdu;	/* hardware TX A-MSDU (-mtknoamsdu: off) */
+	volatile int8_t		sc_suspended;	/* system sleep: leave the hardware alone */
 	uint32_t		sc_tx_full_cnt;	/* output paused: no TXWI / ring slot */
 	int8_t			sc_sta_added;	/* peer STA record exists in fw */
 	bool sc_detaching, sc_net_attached;
@@ -2043,8 +2044,18 @@ mwx_intr(void *arg)
 
 	mwx_intr_calls++;
 
+	/*
+	 * Asleep, or the card is not powered yet after wake: its registers
+	 * read all ones and the DMA rings are stale. Touching them panicked
+	 * (NULL mbuf in mwx_dma_rx_dequeue) on wake.
+	 */
+	if (sc->sc_suspended)
+		return 0;
+
 	mwx_write(sc, MT_WFDMA0_HOST_INT_ENA, 0);
 	intr = mwx_read(sc, MT_WFDMA0_HOST_INT_STA);
+	if (intr == 0xffffffff)
+		return 0;
 	if (intr == 0) {
 		mwx_write(sc, MT_WFDMA0_HOST_INT_ENA, mask);
 		return 0;
@@ -3445,6 +3456,9 @@ mwx_dma_rx_dequeue(struct mwx_softc *sc, struct mwx_queue *q,
 
 	if (idx == last)
 		return;
+	/* card gone or not reinitialized (all-ones read, e.g. after wake) */
+	if (last < 0 || last >= q->mq_count)
+		return;
 
 	bus_dmamap_sync(sc->sc_dmat, q->mq_map, 0, q->mq_map->dm_mapsize,
 	     BUS_DMASYNC_PREREAD);
@@ -3461,6 +3475,15 @@ mwx_dma_rx_dequeue(struct mwx_softc *sc, struct mwx_queue *q,
 
 		/* dequeue mbuf */
 		m = md->md_mbuf;
+		if (m == NULL) {
+			/* ring out of sync with the hardware: let a reset fix it */
+			static uint32_t rx_empty_log;
+			if (rx_empty_log++ < 8)
+				MWX_DEV_LOG(sc, "rx slot %d without buffer (dma idx %d)\n",
+				    idx, last);
+			mwx_reset(sc);
+			break;
+		}
 		md->md_mbuf = NULL;
 
 		/* only buf0 is used on RX rings */
@@ -3489,10 +3512,18 @@ mwx_dma_rx_dequeue(struct mwx_softc *sc, struct mwx_queue *q,
 
 		/* check if more data made it in */
 		/* XXX should we actually do that? */
-		if (idx == last)
+		if (idx == last) {
 			last = mwx_read(sc, q->mq_regbase + MT_DMA_DMA_IDX);
+			if (last < 0 || last >= q->mq_count)
+				last = idx;
+		}
 	}
 
+	/* a chain cut short by the out-of-sync check above */
+	if (m0 != NULL) {
+		m_freem(m0);
+		m0 = NULL;
+	}
 	/* XXX make sure we don't have half processed data */
 	KASSERT(m0 == NULL);
 
@@ -7733,6 +7764,66 @@ mt7921_mcu_set_associated_bss(struct mwx_softc *sc, int associated)
 	return rv;
 }
 
+/*
+ * System sleep. The M.2 card is powered off in S3, so the firmware, the
+ * DMA ring registers and the MSI state are gone on wake. Leave the network
+ * (deauth while the radio still works), mask interrupts and ignore the
+ * hardware until resume().
+ */
+void
+MtkMwx::suspend()
+{
+	struct mwx_softc *sc = com;
+	struct ifnet *ifp;
+
+	if (sc == NULL || sc->sc_suspended)
+		return;
+	ifp = &sc->sc_ic.ic_if;
+	MWX_DEV_LOG(sc, "suspend flags=0x%x fw_loaded=%d\n", ifp->if_flags,
+	    sc->sc_fw_loaded);
+	if (ifp->if_flags & IFF_RUNNING)
+		mwx_stop(ifp);
+	mwx_write(sc, MT_WFDMA0_HOST_INT_ENA, 0);
+	sc->sc_suspended = 1;
+}
+
+/*
+ * System wake: take the chip back from the firmware (with the same WFSYS
+ * reset / PCIe FLR fallback as attach), then reload the firmware through
+ * the hard reset task (the DMA stall recovery path). An interface that was
+ * up is brought up again by that task; one the front end took down (the
+ * native Wi-Fi interface) is initialized when it is enabled again.
+ */
+void
+MtkMwx::resume()
+{
+	struct mwx_softc *sc = com;
+
+	if (sc == NULL || !sc->sc_suspended)
+		return;
+	MWX_DEV_LOG(sc, "resume lpctl=0x%08x\n", mwx_read(sc, MT_CONN_ON_LPCTL));
+	if (mwx_mcu_fw_pmctrl(sc) != 0 || mwx_mcu_drv_pmctrl(sc) != 0) {
+		MWX_DEV_LOG(sc, "resume: driver own failed, trying WFSYS reset\n");
+		mwx_wfsys_reset(sc);
+		if ((mwx_mcu_fw_pmctrl(sc) != 0 || mwx_mcu_drv_pmctrl(sc) != 0) &&
+		    pci != NULL && pci->pa_tag != NULL) {
+			MWX_DEV_LOG(sc, "resume: trying PCIe FLR\n");
+			if (mwx_pci_flr(sc, pci->pa_tag) == 0) {
+				mwx_mcu_fw_pmctrl(sc);
+				mwx_mcu_drv_pmctrl(sc);
+			}
+		}
+	}
+	mwx_set(sc, MT_MCU2HOST_SW_INT_ENA, MT_MCU_CMD_WAKE_RX_PCIE);
+	mwx_write(sc, MT_WFDMA0_HOST_INT_ENA, 0);
+	mwx_write(sc, MT_PCIE_MAC_INT_ENABLE, 0xff);
+	sc->sc_fw_loaded = 0;
+	sc->sc_suspended = 0;
+	sc->sc_hard_reset = 1;
+	mwx_reset(sc);
+	MWX_DEV_LOG(sc, "resume: firmware reload scheduled\n");
+}
+
 void
 MtkMwx::debugPoll()
 {
@@ -7746,7 +7837,8 @@ MtkMwx::debugPoll()
 	uint32_t tq_cpu, tq_dma, mq_cpu, mq_dma;
 	int verbose;
 
-	if (sc == NULL || !sc->sc_fw_loaded || sc->sc_resetting)
+	if (sc == NULL || !sc->sc_fw_loaded || sc->sc_resetting ||
+	    sc->sc_suspended)
 		return;
 	ic = &sc->sc_ic;
 	polls++;
