@@ -40,6 +40,7 @@ struct mbuf {unsigned char bytes[sizeof(mt76_connac_hw_scan_req)];};
 #define IEEE80211_IS_CHAN_2GHZ(c) ((c)->ic_freq<100)
 static unsigned ieee80211_mhz2ieee(unsigned freq,int){return freq;}
 static unsigned char poison;
+static char nmx_wifi_band;
 static bool alloc_fail;
 static int send_error;
 static mt76_connac_hw_scan_req captured;
@@ -53,8 +54,8 @@ static void check(bool ok,const char*reason){if(!ok){fprintf(stderr,"FAIL: %s\n"
 static void zeros(const void*p,size_t n,const char*reason){auto b=static_cast<const unsigned char*>(p);for(size_t i=0;i<n;i++)check(b[i]==0,reason);}
 int main(){
  unsigned cases=0;
- for(unsigned seed: {0x00,0xbd,0xfb,0xff}) for(unsigned n: {0,1,14,32,33,41,64,65}) for(int bg: {0,1}) {
-  poison=seed; mwx_softc sc={}; sc.sc_scan_seq_num=127;
+ for(char band: {'2','\0'}) for(unsigned seed: {0x00,0xbd,0xfb,0xff}) for(unsigned n: {0,1,14,32,33,41,64,65}) for(int bg: {0,1}) {
+  nmx_wifi_band=band; poison=seed; mwx_softc sc={}; sc.sc_scan_seq_num=127;
   for(unsigned i=1;i<=n;i++){sc.sc_ic.ic_channels[i].ic_flags=1;sc.sc_ic.ic_channels[i].ic_freq=i<=14?i:100+i;}
   check(mt7921_mcu_hw_scan(&sc,bg)==0,"scan return");
   check(captured.scan_func==SCAN_FUNC_SPLIT_SCAN,"scan_func contains stale allocation bits");
@@ -75,7 +76,11 @@ int main(){
   zeros(captured.ext_ssids,sizeof(captured.ext_ssids),"unused extra SSIDs");
   zeros(captured.random_mac,sizeof(captured.random_mac),"disabled random MAC");
   for(auto v:captured.bssid)check(v==0xff,"wildcard BSSID");
-  for(unsigned i=0;i<std::min(n,64u);i++) {auto c=i<32?captured.channels[i]:captured.ext_channels[i-32];check(c.band==(i<14?1:2),"band");check(c.channel_num==(i<14?i+1:101+i),"channel");}
+  // nullmoth-wifi-band=2: channel table order; unset (prefer 5 GHz): the 5 GHz channels first, then 2.4 GHz
+  unsigned exp_band[128],exp_num[128],e=0;
+  if(band=='2') for(unsigned i=1;i<=n;i++){exp_band[e]=i<=14?1:2;exp_num[e++]=i<=14?i:100+i;}
+  else {for(unsigned i=15;i<=n;i++){exp_band[e]=2;exp_num[e++]=100+i;} for(unsigned i=1;i<=n&&i<=14;i++){exp_band[e]=1;exp_num[e++]=i;}}
+  for(unsigned i=0;i<std::min(n,64u);i++) {auto c=i<32?captured.channels[i]:captured.ext_channels[i-32];check(c.band==exp_band[i],"band");check(c.channel_num==exp_num[i],"channel");}
   cases++;
  }
  mwx_softc sc={};sc.sc_scan_seq_num=42;alloc_fail=true;

@@ -30,6 +30,28 @@
 
 #include "MtkMwx.hpp"
 #include <IOKit/IODeviceTreeSupport.h>
+
+char nmx_wifi_band;	/* NVRAM nullmoth-wifi-band, read at preinit: '5', '2' or 0 (prefer 5 GHz) */
+
+/* Prefer-5 GHz mode: a 2.4 GHz node is a twin to hide when the same SSID is on 5 GHz within 15 RSSI points. */
+bool
+nmx_hide_24ghz_twin(struct ieee80211com *ic, const struct ieee80211_node *node)
+{
+	struct ieee80211_node *o;
+
+	if (nmx_wifi_band == '2' || nmx_wifi_band == '5' || node->ni_esslen == 0 ||
+	    node->ni_chan == NULL || node->ni_chan == IEEE80211_CHAN_ANYC || !IEEE80211_IS_CHAN_2GHZ(node->ni_chan))
+		return false;
+	RB_FOREACH(o, ieee80211_tree, &ic->ic_tree) {
+		if (o == node || o->ni_chan == NULL || o->ni_chan == IEEE80211_CHAN_ANYC ||
+		    !IEEE80211_IS_CHAN_5GHZ(o->ni_chan) || o->ni_esslen != node->ni_esslen ||
+		    memcmp(o->ni_essid, node->ni_essid, node->ni_esslen) != 0)
+			continue;
+		if (o->ni_rssi + 15 >= node->ni_rssi)
+			return true;
+	}
+	return false;
+}
 #ifdef AIRPORT_WCL
 #include "WCL/WCL.hpp"
 #endif
@@ -2158,19 +2180,22 @@ mwx_preinit(struct mwx_softc *sc)
 	    sc->sc_capa.antenna_mask);
 
 	/*
-	 * nmx knob: NVRAM nullmoth-wifi-band=5 leaves the 2.4 GHz channels out, so scans, macOS's network list and
-	 * joins are 5 GHz only (a dual-band SSID then joins on 5 GHz). Delete the variable to get 2.4 GHz back.
+	 * nmx knob, NVRAM nullmoth-wifi-band: 5 = the 2.4 GHz channels are left out (scans, macOS's network list and
+	 * joins are 5 GHz only); 2 = upstream behaviour; unset = prefer 5 GHz: scans visit 5 GHz first and a 2.4 GHz
+	 * network whose SSID is also on 5 GHz within 15 RSSI points is not shown to macOS (nmx_hide_24ghz_twin).
 	 */
-	bool only5 = false;
+	nmx_wifi_band = 0;
 	if (IORegistryEntry *opts = IORegistryEntry::fromPath("/options", gIODTPlane)) {
 		if (OSData *d = OSDynamicCast(OSData, opts->copyProperty("nullmoth-wifi-band"))) {
-			only5 = d->getLength() >= 1 && ((const char *)d->getBytesNoCopy())[0] == '5';
+			if (d->getLength() >= 1)
+				nmx_wifi_band = ((const char *)d->getBytesNoCopy())[0];
 			d->release();
 		}
 		opts->release();
 	}
-	if (only5 && sc->sc_capa.has_5ghz)
-		MWX_DEV_LOG(sc, "preinit nullmoth-wifi-band=5: 2.4 GHz channels left out\n");
+	bool only5 = nmx_wifi_band == '5';
+	MWX_DEV_LOG(sc, "preinit nullmoth-wifi-band=%c: %s\n", nmx_wifi_band ? nmx_wifi_band : '-',
+	    only5 ? "5 GHz only" : nmx_wifi_band == '2' ? "no band preference" : "prefer 5 GHz");
 
 	if (sc->sc_capa.has_2ghz && !(only5 && sc->sc_capa.has_5ghz)) {
 		for (i = 0; i < MWX_NUM_2GHZ_CHANNELS; i++) {
@@ -5007,13 +5032,20 @@ mt7921_mcu_hw_scan(struct mwx_softc *sc, int bgscan)
 	req->ssid_type_ext = n_ssids ? 1 : 0;
 	req->ssids_num = n_ssids;
 
-	for (nchan = 0, c = &ic->ic_channels[1];
+	/* Prefer-5 GHz mode visits 5 GHz first, so a dual-band SSID's 5 GHz node is known before its 2.4 GHz beacon. */
+	bool from5 = nmx_wifi_band != '2' && nmx_wifi_band != '5';
+	nchan = 0;
+	for (int pass = 0; pass < (from5 ? 2 : 1); pass++)
+	for (c = &ic->ic_channels[1];
 	    c <= &ic->ic_channels[IEEE80211_CHAN_MAX] &&
 	    nchan < 64; c++) {
 		struct mt76_connac_mcu_scan_channel *chan;
 		uint8_t channel_num;
 
 		if (c->ic_flags == 0)
+			continue;
+		/* prefer-5 GHz: pass 0 takes the 5 GHz channels, pass 1 the 2.4 GHz ones */
+		if (from5 && (pass == 0) == IEEE80211_IS_CHAN_2GHZ(c))
 			continue;
 #ifdef AIRPORT_WCL
 		if (!AirportWCL::scanChannelSelected(ic->ic_wcl_scan_channels,

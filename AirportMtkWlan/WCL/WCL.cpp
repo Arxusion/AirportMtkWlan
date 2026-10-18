@@ -310,6 +310,8 @@ void AirportItlwmSkywalkInterface::completeWCLScan()
         finishWCLScan(scanCompleted ? kIOReturnSuccess : kIOReturnTimeout);
 }
 
+bool nmx_hide_24ghz_twin(struct ieee80211com *ic, const struct ieee80211_node *node);
+
 void AirportItlwmSkywalkInterface::publishWCLBeacon(const ieee80211_node *node, const uint8_t *ies, size_t length)
 {
     if (!node || node->ni_esslen > 32 || !AirportWCL::validIEs(ies, length))
@@ -319,6 +321,9 @@ void AirportItlwmSkywalkInterface::publishWCLBeacon(const ieee80211_node *node, 
         return;
     unsigned channel = ieee80211_chan2ieee(ic, node->ni_chan);
     if (!channel || channel > 196)
+        return;
+    /* nmx prefer-5 GHz: keep the joined BSS's info current, hide other 2.4 GHz twins of 5 GHz SSIDs */
+    if (!(assocNotified && IEEE80211_ADDR_EQ(node->ni_bssid, joinBSSID)) && nmx_hide_24ghz_twin(ic, node))
         return;
     size_t size = sizeof(AirportWCL::BeaconMetadata) + length;
     auto metadata = static_cast<AirportWCL::BeaconMetadata *>(IOMalloc(size));
