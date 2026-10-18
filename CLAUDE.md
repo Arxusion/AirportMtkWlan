@@ -19,6 +19,10 @@ xcodebuild -project SimpleMtkWlan.xcodeproj -scheme SimpleMtkWlan \
 - Check the result links against the running kernel:
   `kmutil libraries -p build/Build/Products/Debug/SimpleMtkWlan.kext --undef-symbols`
   must report no unresolved symbols.
+- AirportMtkWlan (native Wi-Fi) is built by `./build-macos.sh <Debug|Release>
+  AirportMtkWlan` (`AIRPORT_OS=tahoe` default, or `sequoia`) into
+  `build/<Conf>/<os>/`; the script always rebuilds every object. The Xcode
+  project only builds SimpleMtkWlan. Check both kexts with `kmutil libraries`.
 - `MODULE_VERSION` must stay purely numeric (`1.2.3`); a suffix makes the kernel
   reject the kext. CI derives it from `vX.Y.Z` tags.
 
@@ -32,7 +36,18 @@ stubs (new fields, structs or helper calls) rather than weakening its asserts.
 ## Layout
 
 - `SimpleMtkWlan/SimpleMtkWlan.cpp`: `IOEthernetController` front end, work loop,
-  watchdog, persistent debug log (`mtk_dbg_log` → `MtkDebugLog` property).
+  watchdog (SimpleMtkWlan.kext only).
+- `SimpleMtkWlan/MtkLog.cpp`: persistent debug log (`mtk_dbg_log` →
+  `MtkDebugLog` property on the PCI device), used by both kexts.
+- `AirportMtkWlan/`: IO80211/Skywalk front end (AirportItlwm WCL from
+  laobamac/itlwm via pengubow). `IOPCIEDeviceWrapper` matches the card and
+  creates `MtkMwx`; `AirportItlwmV2.cpp` is the `IO80211Controller`;
+  `AirportItlwmSkywalkInterface.cpp` + `WCL/WCL.cpp` answer airportd's
+  requests (scan, join, link state). Everything for it is under `AIRPORT` /
+  `AIRPORT_WCL`; SimpleMtkWlan.kext must stay unaffected.
+- `include/Airport/macOS15|macOS26`: per-OS IO80211 vtable layouts, chosen by
+  `__IO80211_TARGET`. A wrong layout panics at boot, so a kext built for one
+  macOS must never load on the other (OpenCore Min/MaxKernel).
 - `SimpleMtkWlan/MtkWlanUserClient.cpp`: ioctl-style user client for SimpleMTK.
 - `SimpleMtkWlan/hal_mwx/MtkMwx.cpp`: the hardware layer (OpenBSD `mwx` port):
   DMA rings, MCU commands, firmware load, RX/TX, STA/BSS records, keys, BA.
@@ -87,10 +102,31 @@ stubs (new fields, structs or helper calls) rather than weakening its asserts.
 - A warm reboot keeps the M.2 card powered; attach recovers via WFSYS reset and
   PCIe FLR.
 
+## Native Wi-Fi (AirportMtkWlan) notes
+
+- macOS joins by itself: `WCL.cpp` writes the PMK (or a passphrase, derived
+  with PBKDF2) into `ic_psk` and net80211 still runs the 4-way handshake.
+  Our key, BA and HT/VHT code paths are shared with SimpleMtkWlan.
+- airportd asks for short scans of a few channels; `mt7921_mcu_hw_scan`
+  honours `ic_wcl_scan_*` (channels, SSID, active). In RUN such restricted
+  scans are allowed every 10 s, full sweeps every 120 s (`mwx_bgscan`).
+  Outside RUN net80211 does not sweep on its own (`ic_wcl_scan_idle`).
+- `mwx_init` adopts the MAC address macOS sets (private Wi-Fi address) and
+  registers the firmware vif with it, otherwise DHCP replies are filtered.
+- `IO80211InterfaceRole` must read `Infrastructure` or airportd ignores the
+  interface; the front end puts it back after start.
+- The front end's watchdog calls `MtkMwx::debugPoll()` through the gate,
+  like SimpleMtkWlan. Do not set the MSI enable bit in `IOPCIEDeviceWrapper`.
+- HAL sleeps (`tsleep_nsec`) go through `IOCommandGate::commandSleep` in the
+  AIRPORT build: `enable()` runs with the gate held, and the interrupt that
+  completes an MCU command needs that gate.
+- No AppleVTD support (needs `DisableIoMapper`), no WPA3-SAE, no AWDL.
+
 ## Testing on hardware
 
 The kext is injected by OpenCore (`EFI/OC/Kexts` + `Kernel → Add`), so every
 test needs a reboot. On the development machine the EFI partition's disk
 number changes between boots: find the 1.2 GB `EFI` partition with
 `diskutil list` and verify `EFI/OC/OpenCore.efi` exists before writing to it.
-Keep a known-good kext around for rollback.
+Keep a known-good kext around for rollback. Only one of SimpleMtkWlan.kext /
+AirportMtkWlan.kext may be enabled.

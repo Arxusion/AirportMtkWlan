@@ -9,7 +9,7 @@ set -euo pipefail
 config="${1:-Release}"
 product="${2:-all}"
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-version="${MODULE_VERSION:-1.0.20}"
+version="${MODULE_VERSION:-$(sed -n 's/.*MODULE_VERSION = \([0-9.]*\);.*/\1/p' "$here/SimpleMtkWlan.xcodeproj/project.pbxproj" | head -1)}"
 commit="$(git -C "$here" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 kernelsdk="${MACKERNELSDK:-$here/MacKernelSDK}"
 sdkhdr="$kernelsdk/Headers"

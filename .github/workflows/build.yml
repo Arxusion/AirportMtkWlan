@@ -52,6 +52,15 @@ jobs:
               CODE_SIGNING_ALLOWED=NO build
           done
 
+      - name: Build AirportMtkWlan (native Wi-Fi menu, Tahoe + Sequoia)
+        run: |
+          for CONF in Debug Release; do
+            for OS in tahoe sequoia; do
+              AIRPORT_OS=$OS MODULE_VERSION="${{ steps.ver.outputs.version }}" \
+                ./build-macos.sh "$CONF" AirportMtkWlan
+            done
+          done
+
       - name: Package
         run: |
           V="${{ steps.ver.outputs.version }}"
@@ -61,6 +70,15 @@ jobs:
             ditto -c -k --sequesterRsrc --keepParent \
               "build/Build/Products/$CONF/SimpleMtkWlan.kext" \
               "dist/SimpleMtkWlan-$V-$UP.zip"
+          done
+          for CONF in Debug Release; do
+            UP="$(echo "$CONF" | tr '[:lower:]' '[:upper:]')"
+            for OS in tahoe sequoia; do
+              OSN="$(echo "${OS:0:1}" | tr '[:lower:]' '[:upper:]')${OS:1}"
+              ditto -c -k --sequesterRsrc --keepParent \
+                "build/$CONF/$OS/AirportMtkWlan.kext" \
+                "dist/AirportMtkWlan-$OSN-$V-$UP.zip"
+            done
           done
           ditto -c -k --sequesterRsrc --keepParent \
             build/Build/Products/Release/SimpleMtkWlan.kext.dSYM \
@@ -84,11 +102,15 @@ jobs:
           body: |
             **SimpleMtkWlan ${{ steps.ver.outputs.version }}** — MediaTek MT7921 / MT7921K (RZ608) / MT7922 Wi-Fi for macOS.
 
-            - `SimpleMtkWlan-*-RELEASE.zip` — optimized build.
-            - `SimpleMtkWlan-*-DEBUG.zip` — debug build (same features; this is the configuration the hardware tests were run with).
+            Pick **one** kext (both match the card):
+
+            - `AirportMtkWlan-Tahoe-*.zip` — **native macOS Wi-Fi menu** on macOS 26 Tahoe (no root patch, no client app). Needs `DisableIoMapper`.
+            - `AirportMtkWlan-Sequoia-*.zip` — the same for macOS 15.2+ Sequoia (not tested on hardware with this HAL yet).
+            - `SimpleMtkWlan-*.zip` — Ethernet-style interface for any macOS version, controlled by the [SimpleMTK](https://github.com/laobamac/SimpleMTKClient) app.
+            - `*-DEBUG.zip` — debug builds (same features; this is the configuration the hardware tests were run with).
             - `mtklog.sh` — prints the driver's persistent debug log (`./mtklog.sh > mtk.txt`).
 
             Bluetooth for the same card: [SimpleMtkBtFw](https://github.com/flxxxxddd/SimpleMtkBtFw).
 
-            A client app is required to scan/join networks: [SimpleMTKClient](https://github.com/laobamac/SimpleMTKClient).
+            Native Wi-Fi front end: AirportItlwm (OpenIntelWireless, [laobamac/itlwm](https://github.com/laobamac/itlwm)) as adapted to MediaTek by [pengubow](https://github.com/pengubow/SimpleMtkWlan).
             See the README for installation (OpenCore `Kernel → Add`) and troubleshooting.
