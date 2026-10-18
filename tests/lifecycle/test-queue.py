@@ -22,16 +22,19 @@ void IORecursiveLockLock(IORecursiveLock*p){p->lock();}
 void IORecursiveLockUnlock(IORecursiveLock*p){p->unlock();}
 void* IOMalloc(size_t n){return malloc(n);}void IOFree(void*p,size_t){free(p);}
 using thread_call_param_t=void*;
-struct Call{void(*fn)(void*,void*);void*arg;std::mutex m;std::condition_variable cv;bool pending=false,running=false,stop=false;std::thread worker;};
+struct Call{void(*fn)(void*,void*);void*arg;std::mutex m;std::condition_variable cv;bool pending=false,running=false,resched=false,stop=false;std::thread worker;};
 using thread_call_t=Call*;
 #define THREAD_CALL_PRIORITY_KERNEL 1
 #define THREAD_CALL_OPTIONS_ONCE 1
 Call*thread_call_allocate_with_options(void(*fn)(void*,void*),void*arg,int,int){
  auto*c=new Call;c->fn=fn;c->arg=arg;
- c->worker=std::thread([c]{std::unique_lock<std::mutex> l(c->m);for(;;){c->cv.wait(l,[c]{return c->pending||c->stop;});if(c->stop)return;c->pending=false;c->running=true;l.unlock();c->fn(c->arg,nullptr);l.lock();c->running=false;c->cv.notify_all();}});return c;
+ c->worker=std::thread([c]{std::unique_lock<std::mutex> l(c->m);for(;;){c->cv.wait(l,[c]{return c->pending||c->stop;});if(c->stop)return;c->pending=false;c->running=true;l.unlock();c->fn(c->arg,nullptr);l.lock();c->running=false;if(c->resched){c->resched=false;c->pending=true;}c->cv.notify_all();}});return c;
 }
-void thread_call_enter(Call*c){std::lock_guard<std::mutex> l(c->m);c->pending=true;c->cv.notify_all();}
-void thread_call_cancel_wait(Call*c){std::unique_lock<std::mutex> l(c->m);c->pending=false;c->cv.wait(l,[c]{return !c->running;});}
+// xnu THREAD_CALL_ONCE: entering a running call reschedules it once; enter returns TRUE if nothing new was scheduled
+bool thread_call_enter(Call*c){std::lock_guard<std::mutex> l(c->m);bool r;if(c->running){r=c->resched;c->resched=true;}else{r=c->pending;c->pending=true;}c->cv.notify_all();return r;}
+bool thread_call_cancel(Call*c){std::lock_guard<std::mutex> l(c->m);if(c->pending){c->pending=false;return true;}if(c->resched){c->resched=false;return true;}return false;}
+void IOSleep(unsigned ms){std::this_thread::sleep_for(std::chrono::milliseconds(ms));}
+int IOLog(const char*,...){return 0;}
 bool thread_call_free(Call*c){{std::lock_guard<std::mutex> l(c->m);c->stop=true;c->cv.notify_all();}c->worker.join();delete c;return true;}
 struct task{TAILQ_ENTRY(task)t_entry;void(*t_func)(void*);void*t_arg;unsigned t_flags;char name[256];};
 TAILQ_HEAD(task_list,task);

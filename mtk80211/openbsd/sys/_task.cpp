@@ -40,6 +40,7 @@ struct taskq {
     thread_call_t call;
     struct task_list work;
     bool stopping;
+    int inflight;   /* invocations scheduled and not yet returned, under lock (replaces thread_call_cancel_wait) */
 };
 static struct taskq system_queue;
 struct taskq *const systq = &system_queue;
@@ -51,6 +52,7 @@ static void taskq_run(thread_call_param_t arg, thread_call_param_t)
         IORecursiveLockLock(q->lock);
         struct task *item = TAILQ_FIRST(&q->work);
         if (q->stopping || item == NULL) {
+            q->inflight--;
             IORecursiveLockUnlock(q->lock);
             return;
         }
@@ -68,6 +70,7 @@ static bool taskq_setup(struct taskq *q)
     if (!q->lock) return false;
     TAILQ_INIT(&q->work);
     q->stopping = false;
+    q->inflight = 0;
     q->call = thread_call_allocate_with_options(taskq_run, q,
         THREAD_CALL_PRIORITY_KERNEL, THREAD_CALL_OPTIONS_ONCE);
     if (!q->call) {
@@ -107,7 +110,22 @@ void taskq_quiesce(struct taskq *q)
     }
     IORecursiveLockUnlock(q->lock);
     /* task_add and resubmission are now rejected under the same lock. */
-    thread_call_cancel_wait(q->call);
+    /* thread_call_cancel_wait is private KPI (kmutil refuses to link it). thread_call_cancel returns TRUE when it
+       removed a scheduled invocation (also a running ONCE call's reschedule); then wait until every invocation that
+       did start has returned (each one sees `stopping` and takes no work). Bounded like the ring log's stop. */
+    if (thread_call_cancel(q->call)) {
+        IORecursiveLockLock(q->lock);
+        q->inflight--;
+        IORecursiveLockUnlock(q->lock);
+    }
+    for (int i = 0; i < 5000; i++) {
+        IORecursiveLockLock(q->lock);
+        int n = q->inflight;
+        IORecursiveLockUnlock(q->lock);
+        if (n <= 0) return;
+        IOSleep(1);
+    }
+    IOLog("SimpleMtkWlan: taskq_quiesce: callback still running after 5 s\n");
 }
 
 void taskq_destroy(struct taskq *q)
@@ -139,8 +157,10 @@ int task_add(struct taskq *q, struct task *t)
     }
     t->t_flags |= TASK_ONQUEUE;
     TAILQ_INSERT_TAIL(&q->work, t, t_entry);
-    /* Submit while locked, so shutdown cannot miss a late submission. */
-    thread_call_enter(q->call);
+    /* Submit while locked, so shutdown cannot miss a late submission. FALSE = a new invocation was scheduled
+       (TRUE: one is already pending and will see this task). */
+    if (!thread_call_enter(q->call))
+        q->inflight++;
     IORecursiveLockUnlock(q->lock);
     return 1;
 }
