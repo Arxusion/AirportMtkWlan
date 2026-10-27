@@ -1546,19 +1546,11 @@ mwx_newstate_task(void *ptr)
 		 * a new peer on top of it breaks hardware decryption.
 		 */
 		/*
-		 * Starting a new connection: send a deauth first so the AP drops
-		 * any session it kept from before (e.g. across a reboot); it
-		 * otherwise ignored our first association request. An AP that
-		 * has no session for us just ignores the frame.
+		 * Starting a new connection: clean up local firmware peer state.
+		 * Do not send over-the-air deauth to the AP before authenticating;
+		 * mobile hotspots (e.g. Android hostapd) treat pre-auth deauth as an
+		 * immediate client teardown and reject subsequent association with Reason 9.
 		 */
-		if (ostate == IEEE80211_S_SCAN && ic->ic_bss != NULL) {
-			IEEE80211_SEND_MGMT(ic, ic->ic_bss,
-			    IEEE80211_FC0_SUBTYPE_DEAUTH,
-			    IEEE80211_REASON_AUTH_LEAVE);
-			mwx_start(&ic->ic_if);
-			MWX_DEV_LOG(sc, "AUTH: pre-auth deauth sent to %s\n",
-			    ether_sprintf(ic->ic_bss->ni_macaddr));
-		}
 		if (sc->sc_sta_added) {
 			int srv = mt7921_mac_sta_update(sc, sc->sc_ic.ic_bss, 0, 0);
 			MWX_DEV_LOG(sc, "AUTH: removed stale peer record rv=%d\n", srv);
@@ -1568,7 +1560,7 @@ mwx_newstate_task(void *ptr)
 			sc->sc_sta_added = 1;
 		break;
 	case IEEE80211_S_ASSOC:
-		mwx_mcu_set_deep_sleep(sc, 1);
+		mwx_mcu_set_deep_sleep(sc, 0);
 		break;
 	case IEEE80211_S_RUN:
 		if (ic->ic_opmode == IEEE80211_M_MONITOR)
@@ -2430,6 +2422,7 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 	    IEEE80211_C_SHPREAMBLE |	/* short preamble supported */
 	    IEEE80211_C_QOS |		/* WMM, required for 11n */
 	    IEEE80211_C_TX_AMPDU;	/* TX A-MPDU, BA set up in firmware */
+	    /* IEEE80211_C_MFP; disabled: enables clean WPA2-PSK fallback without PMF mismatch */
 
 	/*
 	 * Hardware TX A-MSDU (MT_TXD7_HW_AMSDU), like Linux mt7921 and
@@ -5048,8 +5041,11 @@ mt7921_mcu_hw_scan(struct mwx_softc *sc, int bgscan)
 		if (from5 && (pass == 0) == IEEE80211_IS_CHAN_2GHZ(c))
 			continue;
 #ifdef AIRPORT_WCL
-		if (!AirportWCL::scanChannelSelected(ic->ic_wcl_scan_channels,
-		    ic->ic_wcl_scan_requested && ic->ic_wcl_scan_restricted,
+		bool restrict_chan = ic->ic_wcl_scan_requested && ic->ic_wcl_scan_restricted;
+		if (restrict_chan && ic->ic_wcl_scan_ssid_length == 0 && !IEEE80211_IS_CHAN_2GHZ(c)) {
+			// Allow full 5 GHz discovery during broadcast network scans
+		} else if (!AirportWCL::scanChannelSelected(ic->ic_wcl_scan_channels,
+		    restrict_chan,
 		    ieee80211_mhz2ieee(c->ic_freq, 0)))
 			continue;
 #endif
@@ -7514,8 +7510,8 @@ MtkMwx::supportedFeatures()
 const char *
 MtkMwx::getFirmwareCountryCode()
 {
-	static char alpha2[3] = "00";
-	if (com != NULL) {
+	static char alpha2[3] = "IN";
+	if (com != NULL && com->sc_alpha2[0] && com->sc_alpha2[0] != '0') {
 		alpha2[0] = com->sc_alpha2[0];
 		alpha2[1] = com->sc_alpha2[1];
 		alpha2[2] = '\0';
@@ -7923,13 +7919,17 @@ MtkMwx::debugPoll()
 	 * poll, up to three times.
 	 */
 	{
-		static int retry_state = -1, retries;
+		static int retry_state = -1, retries = 0;
+		static uint8_t last_peer[IEEE80211_ADDR_LEN] = {0};
 
 		if (ic->ic_opmode == IEEE80211_M_STA && ic->ic_mgt_timer != 0 &&
 		    (ic->ic_state == IEEE80211_S_AUTH ||
 		    ic->ic_state == IEEE80211_S_ASSOC)) {
-			if (retry_state != ic->ic_state) {
+			if (retry_state != ic->ic_state ||
+			    (ic->ic_bss && memcmp(last_peer, ic->ic_bss->ni_macaddr, IEEE80211_ADDR_LEN) != 0)) {
 				retry_state = ic->ic_state;
+				if (ic->ic_bss)
+					memcpy(last_peer, ic->ic_bss->ni_macaddr, IEEE80211_ADDR_LEN);
 				retries = 0;
 			} else if (retries < 3) {
 				retries++;
@@ -7943,9 +7943,19 @@ MtkMwx::debugPoll()
 				else
 					IEEE80211_SEND_MGMT(ic, ic->ic_bss,
 					    IEEE80211_FC0_SUBTYPE_ASSOC_REQ, 0);
+			} else {
+				MWX_DEV_LOG(sc, "retries exhausted for %s in state %d, resetting to S_INIT\n",
+				    ic->ic_bss ? ether_sprintf(ic->ic_bss->ni_macaddr) : "none", ic->ic_state);
+				ieee80211_new_state(ic, IEEE80211_S_INIT, -1);
+				retries = 0;
+				retry_state = -1;
+				memset(last_peer, 0, sizeof(last_peer));
 			}
-		} else
+		} else {
+			retries = 0;
 			retry_state = -1;
+			memset(last_peer, 0, sizeof(last_peer));
+		}
 	}
 
 	sta = mwx_read(sc, MT_WFDMA0_HOST_INT_STA);

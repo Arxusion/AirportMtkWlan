@@ -1087,7 +1087,7 @@ ieee80211_add_rsn_body(u_int8_t *frm, struct ieee80211com *ic,
     /* write RSN Capabilities field */
     rsncaps = (ni->ni_rsncaps & (IEEE80211_RSNCAP_PTKSA_RCNT_MASK |
         IEEE80211_RSNCAP_GTKSA_RCNT_MASK));
-    if (ic->ic_caps & IEEE80211_C_MFP) {
+    if ((ic->ic_caps & IEEE80211_C_MFP) && (ni->ni_flags & IEEE80211_NODE_MFP)) {
         rsncaps |= IEEE80211_RSNCAP_MFPC;
         if (ic->ic_flags & IEEE80211_F_MFPR)
             rsncaps |= IEEE80211_RSNCAP_MFPR;
@@ -1104,7 +1104,7 @@ ieee80211_add_rsn_body(u_int8_t *frm, struct ieee80211com *ic,
         frm += IEEE80211_PMKID_LEN;
     }
 
-    if (!(ic->ic_caps & IEEE80211_C_MFP))
+    if (!((ic->ic_caps & IEEE80211_C_MFP) && (ni->ni_flags & IEEE80211_NODE_MFP)))
         return frm;
 
     if ((ni->ni_flags & IEEE80211_NODE_PMKID) == 0) {
@@ -1407,7 +1407,7 @@ ieee80211_get_probe_req(struct ieee80211com *ic, struct ieee80211_node *ni)
 		frm = ieee80211_add_htcaps(frm, ic);
 		frm = ieee80211_add_wme_info(frm, ic);
 	}
-    if (ic->ic_flags & IEEE80211_F_VHTON)
+    if ((ic->ic_flags & IEEE80211_F_VHTON) && !IEEE80211_IS_CHAN_2GHZ(ni->ni_chan))
         frm = ieee80211_add_vhtcaps(frm, ic);
     size_t l = frm - mtod(m, u_int8_t *);
     mbuf_pkthdr_setlen(m, l);
@@ -1582,14 +1582,15 @@ ieee80211_get_assoc_req(struct ieee80211com *ic, struct ieee80211_node *ni,
 	      (ni->ni_rsnprotos & IEEE80211_PROTO_WPA)) ?
 		2 + IEEE80211_WPAIE_MAXLEN : 0) +
 	    ((ic->ic_flags & IEEE80211_F_HTON) ? sizeof(struct ieee80211_ie_htcap) + sizeof(struct ieee80211_wme_info) : 0) +
-        ((ic->ic_flags & IEEE80211_F_VHTON) ? sizeof(struct ieee80211_ie_vhtcap) + 2 : 0) +
+        (((ic->ic_flags & IEEE80211_F_VHTON) && !IEEE80211_IS_CHAN_2GHZ(ni->ni_chan)) ? sizeof(struct ieee80211_ie_vhtcap) + 2 : 0) +
         ((ic->ic_flags & IEEE80211_F_HEON) ? (sizeof(struct ieee80211_he_cap_elem) + 2 + 1 + sizeof(struct ieee80211_he_mcs_nss_supp) + IEEE80211_HE_PPE_THRES_MAX_LEN) : 0));
 	if (m == NULL)
 		return NULL;
 
 	frm = mtod(m, u_int8_t *);
 	capinfo = IEEE80211_CAPINFO_ESS;
-	if (ic->ic_flags & IEEE80211_F_WEPON)
+	if ((ic->ic_flags & (IEEE80211_F_WEPON | IEEE80211_F_RSNON)) ||
+	    (ni->ni_capinfo & IEEE80211_CAPINFO_PRIVACY))
 		capinfo |= IEEE80211_CAPINFO_PRIVACY;
 	if ((ic->ic_flags & IEEE80211_F_SHPREAMBLE) &&
 	    IEEE80211_IS_CHAN_2GHZ(ni->ni_chan))
@@ -1635,7 +1636,7 @@ ieee80211_get_assoc_req(struct ieee80211com *ic, struct ieee80211_node *ni,
 		frm = ieee80211_add_wme_info(frm, ic);
 	}
     
-    if (ic->ic_flags & IEEE80211_F_VHTON)
+    if ((ic->ic_flags & IEEE80211_F_VHTON) && !IEEE80211_IS_CHAN_2GHZ(ni->ni_chan))
         frm = ieee80211_add_vhtcaps(frm, ic);
     
     if (ic->ic_flags & IEEE80211_F_HEON)

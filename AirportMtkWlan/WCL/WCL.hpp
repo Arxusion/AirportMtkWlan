@@ -362,24 +362,22 @@ inline size_t selectWPA2TransitionMode(uint8_t *ies, size_t length) {
             continue;
         }
         size_t tailOffset = suitesOffset + 4 * count;
-        // PSK/SAE transition mode advertises PMF capable, but not required.
-        if (size - tailOffset < 2 || (read16(ie + tailOffset) & 0xc0) != 0x80) {
+        // PSK/SAE transition mode allows WPA2 clients as long as PMF is not mandatory (MFPR bit 6 is 0).
+        if (size - tailOffset >= 2 && (read16(ie + tailOffset) & 0x40) != 0) {
             offset += size;
             continue;
         }
-        bool psk = false, sae = false, other = false;
+        bool psk = false, sae = false;
         for (size_t i = 0; i < count; ++i) {
             const uint8_t *suite = ie + suitesOffset + 4 * i;
-            if (suite[0] != 0 || suite[1] != 0x0f || suite[2] != 0xac)
-                other = true;
-            else if (suite[3] == 2)
-                psk = true;
-            else if (suite[3] == 8)
-                sae = true;
-            else
-                other = true;
+            if (suite[0] == 0 && suite[1] == 0x0f && suite[2] == 0xac) {
+                if (suite[3] == 2 || suite[3] == 6)
+                    psk = true;
+                else if (suite[3] == 8)
+                    sae = true;
+            }
         }
-        if (!psk || !sae || other) {
+        if (!psk || !sae) {
             offset += size;
             continue;
         }
@@ -392,6 +390,11 @@ inline size_t selectWPA2TransitionMode(uint8_t *ies, size_t length) {
         // following information elements byte-for-byte intact.
         memmove(ie + suitesOffset + 4, ie + tailOffset,
                 length - offset - tailOffset);
+        // Clear MFPC (bit 7) and MFPR (bit 6) in RSN capabilities so CoreWiFi treats this as pure WPA2-PSK
+        uint8_t *newTail = ie + suitesOffset + 4;
+        if (size - tailOffset >= 2) {
+            newTail[0] &= ~0xc0;
+        }
         ie[1] -= removed;
         length -= removed;
         offset += size - removed;
@@ -505,7 +508,13 @@ inline LegacyAuth classifyLegacyAuth(const JoinRequest &j) {
     // Values from apple80211_authtype/cipher_type, used by the WCL association request.
     if (!validRSNOverride(j.rsn, j.rsnLength)) return LegacyAuth::Invalid;
     if (j.lowerAuth != 1) return LegacyAuth::Invalid;
-    if (!j.upperAuth) {
+    uint32_t upper = j.upperAuth;
+    // Map WPA3-SAE / WPA3-FT-SAE to WPA2-PSK for transition networks and mobile hotspots
+    if (upper & ((1u << 12) | (1u << 13))) {
+        upper &= ~((1u << 12) | (1u << 13));
+        upper |= (1u << 3); // APPLE80211_AUTHTYPE_WPA2_PSK
+    }
+    if (!upper) {
         if (!j.keyLength) return LegacyAuth::Open;
         if (j.keyIndex < 4 && ((j.keyLength == 5 && j.keyCipher == 1) ||
                               (j.keyLength == 13 && j.keyCipher == 2)))
@@ -514,12 +523,12 @@ inline LegacyAuth classifyLegacyAuth(const JoinRequest &j) {
     }
     const uint32_t personal = (1u << 1) | (1u << 3) | (1u << 10);
     const uint32_t enterprise = (1u << 0) | (1u << 2) | (1u << 11);
-    if (j.upperAuth & ~(personal | enterprise)) return LegacyAuth::Invalid;
-    if ((j.upperAuth & personal) && (j.upperAuth & enterprise)) return LegacyAuth::Invalid;
-    if (j.upperAuth & personal)
+    if (upper & ~(personal | enterprise)) return LegacyAuth::Invalid;
+    if ((upper & personal) && (upper & enterprise)) return LegacyAuth::Invalid;
+    if (upper & personal)
         return (j.keyLength == 32 && (j.keyCipher == 6 || j.keyCipher == 7)) || isPassphrase(j) ?
             LegacyAuth::Personal : LegacyAuth::Invalid;
-    if (j.upperAuth & enterprise)
+    if (upper & enterprise)
         return (!j.keyLength || (j.keyLength == 32 && (j.keyCipher == 6 || j.keyCipher == 7))) ?
             LegacyAuth::Enterprise : LegacyAuth::Invalid;
     return LegacyAuth::Invalid;

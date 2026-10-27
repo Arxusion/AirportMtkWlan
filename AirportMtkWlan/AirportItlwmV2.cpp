@@ -1128,8 +1128,31 @@ getCOUNTRY_CODE(OSObject *object,
     cd->version = APPLE80211_VERSION;
     memset(user_override_cc, 0, sizeof(user_override_cc));
     PE_parse_boot_argn("itlwm_cc", user_override_cc, 3);
-    /* user_override_cc > firmware_cc > geo_location_cc */
-    strncpy((char*)cd->cc, user_override_cc[0] ? user_override_cc : ((cc_fw[0] == 'Z' && cc_fw[1] == 'Z' && geo_location_cc[0]) ? geo_location_cc : cc_fw), sizeof(cd->cc));
+    if (!user_override_cc[0]) {
+        if (const IORegistryPlane *dt = IORegistryEntry::getPlane("IODeviceTree")) {
+            if (IORegistryEntry *opts = IORegistryEntry::fromPath("/options", dt)) {
+                if (OSData *d = OSDynamicCast(OSData, opts->copyProperty("nullmoth-wifi-cc"))) {
+                    if (d->getLength() >= 2) {
+                        memcpy(user_override_cc, d->getBytesNoCopy(), 2);
+                        user_override_cc[2] = '\0';
+                    }
+                    d->release();
+                }
+                opts->release();
+            }
+        }
+    }
+    const char *chosen = NULL;
+    if (user_override_cc[0]) {
+        chosen = user_override_cc;
+    } else if (geo_location_cc[0] && geo_location_cc[0] != 'X' && geo_location_cc[0] != 'x' && geo_location_cc[0] != '0') {
+        chosen = geo_location_cc;
+    } else if (cc_fw && cc_fw[0] && cc_fw[0] != '0' && cc_fw[0] != 'Z') {
+        chosen = cc_fw;
+    } else {
+        chosen = "IN"; // Default to India regulatory domain (IST +05:30) to unlock full 5GHz channels
+    }
+    strncpy((char*)cd->cc, chosen, sizeof(cd->cc));
     return kIOReturnSuccess;
 }
 

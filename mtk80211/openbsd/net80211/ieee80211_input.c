@@ -2939,9 +2939,13 @@ ieee80211_recv_deauth(struct ieee80211com *ic, mbuf_t m,
                         (ic->ic_flags & IEEE80211_F_DISABLE_BG_AUTO_CONNECT) == 0;
             int stay_auth = ((ic->ic_userflags & IEEE80211_F_STAYAUTH) &&
                              ic->ic_state >= IEEE80211_S_AUTH);
-            if (!(roamscan || stay_auth))
-                ieee80211_new_state(ic, IEEE80211_S_AUTH,
-                                    IEEE80211_FC0_SUBTYPE_DEAUTH);
+            if (!(roamscan || stay_auth)) {
+                if (ic->ic_state == IEEE80211_S_RUN)
+                    ieee80211_new_state(ic, IEEE80211_S_AUTH,
+                                        IEEE80211_FC0_SUBTYPE_DEAUTH);
+                else
+                    ieee80211_new_state(ic, IEEE80211_S_INIT, -1);
+            }
         }
             break;
 #ifndef IEEE80211_STA_ONLY

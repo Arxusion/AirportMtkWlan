@@ -433,6 +433,13 @@ IOReturn AirportItlwmSkywalkInterface::beginWCLJoin(apple80211AssocCandidates *r
 
 IOReturn AirportItlwmSkywalkInterface::startWCLJoin(AirportWCL::JoinRequest &join)
 {
+    if (join.upperAuth & ((1u << 12) | (1u << 13))) {
+        join.upperAuth &= ~((1u << 12) | (1u << 13));
+        join.upperAuth |= (1u << 3); // Map WPA3-SAE to WPA2-PSK
+    }
+    if (join.rsnLength) {
+        join.rsnLength = AirportWCL::selectWPA2TransitionMode(join.rsn, join.rsnLength);
+    }
     auto auth = AirportWCL::classifyLegacyAuth(join);
     XYLog("WCL join ssid_len=%u bssid=%s chanspec=0x%x auth lower=%u upper=0x%x -> %s, key len=%u type=%u%s, rsn_ie len=%u\n",
           join.ssidLength, ether_sprintf(join.bssid), join.channelSpec, join.lowerAuth, join.upperAuth,
