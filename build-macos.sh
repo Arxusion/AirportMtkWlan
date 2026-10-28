@@ -102,10 +102,12 @@ PY
 if [[ "$product" == all || "$product" == SimpleMtkWlan ]]; then
 	build SimpleMtkWlan com.laobamac.SimpleMtkWlan SimpleMtkWlan/Info.plist -- "${common_sources[@]}" \
 		SimpleMtkWlan/MtkWlanUserClient.cpp SimpleMtkWlan/pm.cpp SimpleMtkWlan/SimpleMtkWlan.cpp
-	sdk="$(xcrun --show-sdk-path)"
-	"$clang" -target x86_64-apple-macos11 -isysroot "$sdk" -O2 -Wall -framework IOKit -framework CoreFoundation \
-		-o "$out/mtkwifi" "$here/mtkwifi/mtkwifi.c"
-	echo "built $out/mtkwifi"
+	if [[ -f "$here/mtkwifi/mtkwifi.c" ]]; then
+		sdk="$(xcrun --show-sdk-path)"
+		"$clang" -target x86_64-apple-macos11 -isysroot "$sdk" -O2 -Wall -framework IOKit -framework CoreFoundation \
+			-o "$out/mtkwifi" "$here/mtkwifi/mtkwifi.c"
+		echo "built $out/mtkwifi"
+	fi
 fi
 if [[ "$product" == all || "$product" == AirportMtkWlan ]] && [[ -d "$here/AirportMtkWlan" ]]; then
 	case "${AIRPORT_OS:-tahoe}" in

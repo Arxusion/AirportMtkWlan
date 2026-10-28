@@ -37,6 +37,9 @@ files.
 - MT7921/RZ608 bring-up, 802.11n/ac, Tahoe build of AirportMtkWlan and
   integration with this hardware layer: flxxxxddd
   (https://github.com/flxxxxddd/SimpleMtkWlan).
+- Aswini Soni (Arxusion): WPA2/WPA3 transition mode association fixes, selective
+  PMF/MFP negotiation for mixed APs, WCL authentication mapping, country code
+  configuration improvements, release packaging, and stability optimizations.
 
 ## Current Project Work
 

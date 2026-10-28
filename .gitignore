@@ -18,6 +18,7 @@ build/
 
 # Build output
 build/
+dist/
 DerivedData/
 *.zip
 tests/scan/scan.cpp

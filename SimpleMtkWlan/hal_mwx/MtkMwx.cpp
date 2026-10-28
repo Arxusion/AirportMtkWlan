@@ -2172,13 +2172,17 @@ mwx_preinit(struct mwx_softc *sc)
 	    sc->sc_capa.antenna_mask);
 
 	/*
-	 * nmx knob, NVRAM nullmoth-wifi-band: 5 = the 2.4 GHz channels are left out (scans, macOS's network list and
-	 * joins are 5 GHz only); 2 = upstream behaviour; unset = prefer 5 GHz: scans visit 5 GHz first and a 2.4 GHz
-	 * network whose SSID is also on 5 GHz within 15 RSSI points is not shown to macOS (nmx_hide_24ghz_twin).
+	 * Wi-Fi band selection knob (NVRAM mtk-wifi-band / nullmoth-wifi-band):
+	 *   '5'   = 5 GHz only (2.4 GHz channels are omitted from scans and associations)
+	 *   '2'   = neutral band handling (no 5 GHz preference)
+	 *   unset = prefer 5 GHz (scans 5 GHz channels first, hides 2.4 GHz twins of 5 GHz SSIDs)
 	 */
 	nmx_wifi_band = 0;
 	if (IORegistryEntry *opts = IORegistryEntry::fromPath("/options", gIODTPlane)) {
-		if (OSData *d = OSDynamicCast(OSData, opts->copyProperty("nullmoth-wifi-band"))) {
+		OSData *d = OSDynamicCast(OSData, opts->copyProperty("mtk-wifi-band"));
+		if (!d)
+			d = OSDynamicCast(OSData, opts->copyProperty("nullmoth-wifi-band"));
+		if (d) {
 			if (d->getLength() >= 1)
 				nmx_wifi_band = ((const char *)d->getBytesNoCopy())[0];
 			d->release();
@@ -2186,7 +2190,7 @@ mwx_preinit(struct mwx_softc *sc)
 		opts->release();
 	}
 	bool only5 = nmx_wifi_band == '5';
-	MWX_DEV_LOG(sc, "preinit nullmoth-wifi-band=%c: %s\n", nmx_wifi_band ? nmx_wifi_band : '-',
+	MWX_DEV_LOG(sc, "preinit wifi-band=%c: %s\n", nmx_wifi_band ? nmx_wifi_band : '-',
 	    only5 ? "5 GHz only" : nmx_wifi_band == '2' ? "no band preference" : "prefer 5 GHz");
 
 	if (sc->sc_capa.has_2ghz && !(only5 && sc->sc_capa.has_5ghz)) {

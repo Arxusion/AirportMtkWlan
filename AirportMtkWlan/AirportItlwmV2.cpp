@@ -1129,9 +1129,16 @@ getCOUNTRY_CODE(OSObject *object,
     memset(user_override_cc, 0, sizeof(user_override_cc));
     PE_parse_boot_argn("itlwm_cc", user_override_cc, 3);
     if (!user_override_cc[0]) {
+        PE_parse_boot_argn("mtk_cc", user_override_cc, 3);
+    }
+    if (!user_override_cc[0]) {
         if (const IORegistryPlane *dt = IORegistryEntry::getPlane("IODeviceTree")) {
             if (IORegistryEntry *opts = IORegistryEntry::fromPath("/options", dt)) {
-                if (OSData *d = OSDynamicCast(OSData, opts->copyProperty("nullmoth-wifi-cc"))) {
+                OSData *d = OSDynamicCast(OSData, opts->copyProperty("mtk-wifi-cc"));
+                if (!d) {
+                    d = OSDynamicCast(OSData, opts->copyProperty("nullmoth-wifi-cc"));
+                }
+                if (d) {
                     if (d->getLength() >= 2) {
                         memcpy(user_override_cc, d->getBytesNoCopy(), 2);
                         user_override_cc[2] = '\0';
@@ -1150,7 +1157,7 @@ getCOUNTRY_CODE(OSObject *object,
     } else if (cc_fw && cc_fw[0] && cc_fw[0] != '0' && cc_fw[0] != 'Z') {
         chosen = cc_fw;
     } else {
-        chosen = "IN"; // Default to India regulatory domain (IST +05:30) to unlock full 5GHz channels
+        chosen = "00"; /* Worldwide regulatory domain fallback */
     }
     strncpy((char*)cd->cc, chosen, sizeof(cd->cc));
     return kIOReturnSuccess;
