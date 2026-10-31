@@ -148,7 +148,7 @@ IOReturn AirportItlwmSkywalkInterface::updateWCLLinkQualityGated(
         ic && ic->ic_state == IEEE80211_S_RUN && ic->ic_bss &&
         IEEE80211_ADDR_EQ(ic->ic_bss->ni_bssid, self->joinBSSID)) {
         int rssi = IWM_MIN_DBM + ic->ic_bss->ni_rssi;
-        quality = rssi >= -70 ? 100 : (rssi >= -85 ? 50 : 20);
+        quality = rssi >= -75 ? 100 : (rssi >= -85 ? 70 : 30);
     }
     if (arg1 || quality != self->wclReportedLinkQuality ||
         interface != self->wclLinkQualityInterface) {

@@ -672,15 +672,23 @@ getBSSID(struct apple80211_bssid_data *bd)
 IOReturn AirportItlwmSkywalkInterface::
 getRSSI(struct apple80211_rssi_data *rd)
 {
+    if (!rd)
+        return kIOReturnBadArgument;
     struct ieee80211com *ic = fHalService->get80211Controller();
-    if (ic->ic_state == IEEE80211_S_RUN) {
+    if (ic->ic_state == IEEE80211_S_RUN && ic->ic_bss != NULL) {
         memset(rd, 0, sizeof(*rd));
+        rd->version = APPLE80211_VERSION;
         rd->num_radios = 1;
         rd->rssi_unit = APPLE80211_UNIT_DBM;
+        int rssi = -(0 - IWM_MIN_DBM - ic->ic_bss->ni_rssi);
+        if (rssi > 0)
+            rssi = -30;
+        if (rssi < -100)
+            rssi = -100;
         rd->rssi[0] = rd->aggregate_rssi
         = rd->rssi_ext[0]
         = rd->aggregate_rssi_ext
-        = -(0 - IWM_MIN_DBM - ic->ic_bss->ni_rssi);
+        = rssi;
         return kIOReturnSuccess;
     }
     return 6;

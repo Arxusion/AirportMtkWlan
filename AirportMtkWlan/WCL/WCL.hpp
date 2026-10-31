@@ -99,7 +99,9 @@ inline bool makeBeaconUpdate(uint32_t receivedDelta, LqmBeaconUpdate &out)
     if (!receivedDelta)
         return false;
     out.receivedDelta = receivedDelta;
-    out.beaconValid = out.snapshotValid = out.countersValid = 1;
+    out.beaconValid = 1;
+    out.snapshotValid = 0;
+    out.countersValid = 0;
     return true;
 }
 
