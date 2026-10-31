@@ -34,11 +34,15 @@
 #define	MT7925_MDP_DCR1			0x820cc804
 
 /* TMAC: band 0 (0x21000), band 1 (0xa1000) */
-#define	MT_BAND_BASE0		0x820f0000
-#define	MT_BAND_BASE1		0x820e0000
-#define	MT_BAND_OFF		(MT_BAND_BASE0 - MT_BAND_BASE1)
+/*
+ * MT7921/MT7922: band 0 LMAC = 0x820e0000, band 1 = 0x820f0000
+ * (Linux mt7921 regs.h, WF_MIB BN0 0x820ed000).
+ */
+#define	MT_BAND_BASE0		0x820e0000
+#define	MT_BAND_BASE1		0x820f0000
+#define	MT_BAND_OFF		(MT_BAND_BASE1 - MT_BAND_BASE0)
 #define	MT_BAND_ADDR(_band, ofs)		\
-	(MT_BAND_BASE0 - (_band) * MT_BAND_OFF + (ofs))
+	(MT_BAND_BASE0 + (_band) * MT_BAND_OFF + (ofs))
 
 #define	MT_TMAC_TCR0(_band)		MT_BAND_ADDR(_band, 0x4000)
 #define	MT_TMAC_TCR0_TBTT_STOP_CTRL	(1U << 25)
@@ -433,7 +437,9 @@ enum mt76_rxq_id {
 #define	MT_MAX_SCATTER		4	/* limit of MT_HW_TXP_MAX_BUF_NUM */
 #define	MT_MAX_SIZE		MT_DMA_CTL_SD_LEN_MASK
 
-#define	MWX_TXWI_MAX		512	/* HW limit is 8192 */
+#define	MWX_TXWI_MAX		4096	/* HW limit is 8192 (Linux MT7921_TOKEN_SIZE); was 512 */
+#define	MWX_TX_RING_COUNT	2048	/* Linux MT7921_TX_RING_SIZE (was 256) */
+#define	MWX_RX_RING_COUNT	1536	/* Linux MT7921_RX_RING_SIZE (was 256; HE A-MPDUs carry up to 256 MPDUs) */
 
 #define	MT_PACKET_ID_MASK		0x7f
 #define	MT_PACKET_ID_NO_ACK		0
@@ -922,6 +928,8 @@ struct mt76_txwi {
 #define	MT_RXD4_FIRST_AMSDU_FRAME		0x3
 #define	MT_RXD4_MID_AMSDU_FRAME			0x2
 #define	MT_RXD4_LAST_AMSDU_FRAME		0x1
+#define	MWX_RXI_AMSDU_SHIFT			28	/* driver-private rxi_flags bits 28-29: RXD4 payload format */
+#define	MWX_RXI_AMSDU_MASK			(3U << MWX_RXI_AMSDU_SHIFT)
 #define	MT_RXD4_NORMAL_PATTERN_DROP		(1U << 9)
 #define	MT_RXD4_NORMAL_CLS			(1U << 10)
 #define	MT_RXD4_NORMAL_OFLD			GENMASK(12, 11)
@@ -1361,6 +1369,82 @@ struct sta_rec_vht_v1 {
 	uint16_t	vht_tx_mcs_map;
 	uint8_t		rts_bw_sig;
 	uint8_t		rsv[3];
+} __packed;
+
+/* HE (802.11ax), layouts from Linux mt76_connac_mcu.h */
+#define	CMD_HE_MCS_BW80			0
+#define	CMD_HE_MCS_BW160		1
+#define	CMD_HE_MCS_BW8080		2
+#define	CMD_HE_MCS_BW_NUM		3
+
+#define	STA_REC_HE			0x0e
+#define	STA_REC_HE_CAP_HTC			(1U << 0)
+#define	STA_REC_HE_CAP_BQR			(1U << 1)
+#define	STA_REC_HE_CAP_BSR			(1U << 2)
+#define	STA_REC_HE_CAP_OM			(1U << 3)
+#define	STA_REC_HE_CAP_AMSDU_IN_AMPDU		(1U << 4)
+#define	STA_REC_HE_CAP_DUAL_BAND		(1U << 5)
+#define	STA_REC_HE_CAP_LDPC			(1U << 6)
+#define	STA_REC_HE_CAP_TRIG_CQI_FK		(1U << 7)
+#define	STA_REC_HE_CAP_PARTIAL_BW_EXT_RANGE	(1U << 8)
+#define	STA_REC_HE_CAP_LE_EQ_80M_TX_STBC	(1U << 9)
+#define	STA_REC_HE_CAP_LE_EQ_80M_RX_STBC	(1U << 10)
+#define	STA_REC_HE_CAP_GT_80M_TX_STBC		(1U << 11)
+#define	STA_REC_HE_CAP_GT_80M_RX_STBC		(1U << 12)
+#define	STA_REC_HE_CAP_SU_PPDU_1LTF_8US_GI	(1U << 13)
+#define	STA_REC_HE_CAP_SU_MU_PPDU_4LTF_8US_GI	(1U << 14)
+#define	STA_REC_HE_CAP_ER_SU_PPDU_1LTF_8US_GI	(1U << 15)
+#define	STA_REC_HE_CAP_ER_SU_PPDU_4LTF_8US_GI	(1U << 16)
+#define	STA_REC_HE_CAP_NDP_4LTF_3DOT2MS_GI	(1U << 17)
+#define	STA_REC_HE_CAP_BW20_RU242_SUPPORT	(1U << 18)
+#define	STA_REC_HE_CAP_TX_1024QAM_UNDER_RU242	(1U << 19)
+#define	STA_REC_HE_CAP_RX_1024QAM_UNDER_RU242	(1U << 20)
+struct sta_rec_he {
+	uint16_t	tag;
+	uint16_t	len;
+	uint32_t	he_cap;
+	uint8_t		t_frame_dur;
+	uint8_t		max_ampdu_exp;
+	uint8_t		bw_set;
+	uint8_t		device_class;
+	uint8_t		dcm_tx_mode;
+	uint8_t		dcm_tx_max_nss;
+	uint8_t		dcm_rx_mode;
+	uint8_t		dcm_rx_max_nss;
+	uint8_t		dcm_max_ru;
+	uint8_t		punc_pream_rx;
+	uint8_t		pkt_ext;
+	uint8_t		rsv1;
+	uint16_t	max_nss_mcs[CMD_HE_MCS_BW_NUM];
+	uint8_t		rsv2[2];
+} __packed;
+
+#define	STA_REC_HE_V2			0x19
+struct sta_rec_he_v2 {
+	uint16_t	tag;
+	uint16_t	len;
+	uint8_t		he_mac_cap[6];
+	uint8_t		he_phy_cap[11];
+	uint8_t		pkt_ext;
+	uint16_t	max_nss_mcs[CMD_HE_MCS_BW_NUM];	/* 0: BW80, 1: BW160, 2: BW8080 */
+} __packed;
+
+struct bss_info_uni_bss_color {	/* UNI_BSS_INFO_BSS_COLOR */
+	uint16_t	tag;
+	uint16_t	len;
+	uint8_t		enable;
+	uint8_t		bss_color;
+	uint8_t		rsv[2];
+} __packed;
+
+struct bss_info_uni_he {		/* UNI_BSS_INFO_HE_BASIC */
+	uint16_t	tag;
+	uint16_t	len;
+	uint16_t	he_rts_thres;
+	uint8_t		he_pe_duration;
+	uint8_t		su_disable;
+	uint16_t	max_nss_mcs[CMD_HE_MCS_BW_NUM];
+	uint8_t		rsv[2];
 } __packed;
 
 #define	STA_REC_HT			0x09

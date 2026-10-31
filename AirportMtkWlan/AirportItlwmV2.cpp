@@ -1046,6 +1046,10 @@ getCARD_CAPABILITIES(OSObject *object,
     // WCL uses this capability together with the BSS HE IE for PHY reporting.
     if (caps & IEEE80211_C_HE)
         cd->capabilities[17] |= 0x80;
+    // Capability 75 (byte 9, bit 3): WPA3-SAE support for airportd
+    cd->capabilities[9] |= (1 << 3);
+    // Gate 3: PMF / MFP capability (byte 6, bit 0 + bit 4 for _getMFPCaps in Apple80211)
+    cd->capabilities[6] |= (1 << 0) | (1 << 4);
 #else
     cd->capabilities[2] = 0xFF; // BURST, WME, SHORT_GI_40MHZ, SHORT_GI_20MHZ, WOW, TSN, ?, ?
     cd->capabilities[3] = 0x2B;
