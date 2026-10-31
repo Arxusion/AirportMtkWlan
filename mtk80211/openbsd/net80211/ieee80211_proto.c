@@ -1172,7 +1172,7 @@ ieee80211_delba_request(struct ieee80211com *ic, struct ieee80211_node *ni,
 
 		if (ba->ba_buf != NULL) {
 			/* free all MSDUs stored in reordering buffer */
-			for (i = 0; i < IEEE80211_BA_MAX_WINSZ; i++)
+			for (i = 0; i < IEEE80211_BA_MAX_RX_WINSZ; i++)
 				mbuf_freem(ba->ba_buf[i].m);
 			/* free reordering buffer */
 			free(ba->ba_buf);

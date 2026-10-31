@@ -3226,7 +3226,7 @@ ieee80211_node_leave_ht(struct ieee80211com *ic, struct ieee80211_node *ni)
     for (tid = 0; tid < IEEE80211_NUM_TID; tid++) {
         ba = &ni->ni_rx_ba[tid];
         if (ba->ba_buf != NULL) {
-            for (i = 0; i < IEEE80211_BA_MAX_WINSZ; i++)
+            for (i = 0; i < IEEE80211_BA_MAX_RX_WINSZ; i++)
                 mbuf_freem(ba->ba_buf[i].m);
             free(ba->ba_buf);
             ba->ba_buf = NULL;

@@ -924,7 +924,7 @@ ieee80211_input_ba(struct ieee80211com *ic, mbuf_t m,
     ba->ba_winmiss = 0;
     ba->ba_missedsn = 0;
     idx = (sn - ba->ba_winstart) & 0xfff;
-    idx = (ba->ba_head + idx) % IEEE80211_BA_MAX_WINSZ;
+    idx = (ba->ba_head + idx) % IEEE80211_BA_MAX_RX_WINSZ;
     /* store the received MPDU in the buffer */
     if (ba->ba_buf[idx].m != NULL) {
         ifp->netStat->inputErrors++;
@@ -974,7 +974,7 @@ ieee80211_input_ba_seq(struct ieee80211com *ic, struct ieee80211_node *ni,
             ba->ba_gapwait--;
         } else
             ic->ic_stats.is_ht_rx_ba_frame_lost++;
-        ba->ba_head = (ba->ba_head + 1) % IEEE80211_BA_MAX_WINSZ;
+        ba->ba_head = (ba->ba_head + 1) % IEEE80211_BA_MAX_RX_WINSZ;
         /* move window forward */
         ba->ba_winstart = (ba->ba_winstart + 1) & 0xfff;
     }
@@ -1000,7 +1000,7 @@ ieee80211_input_ba_flush(struct ieee80211com *ic, struct ieee80211_node *ni,
         ba->ba_buf[ba->ba_head].m = NULL;
         ba->ba_gapwait--;
         
-        ba->ba_head = (ba->ba_head + 1) % IEEE80211_BA_MAX_WINSZ;
+        ba->ba_head = (ba->ba_head + 1) % IEEE80211_BA_MAX_RX_WINSZ;
         /* move window forward */
         ba->ba_winstart = (ba->ba_winstart + 1) & 0xfff;
     }
@@ -1025,7 +1025,7 @@ ieee80211_input_ba_gap_skip(struct ieee80211_rx_ba *ba)
 
     while (skipped < ba->ba_winsize && ba->ba_buf[ba->ba_head].m == NULL) {
         /* move window forward */
-        ba->ba_head = (ba->ba_head + 1) % IEEE80211_BA_MAX_WINSZ;
+        ba->ba_head = (ba->ba_head + 1) % IEEE80211_BA_MAX_RX_WINSZ;
         ba->ba_winstart = (ba->ba_winstart + 1) & 0xfff;
         skipped++;
     }
@@ -1085,7 +1085,7 @@ ieee80211_ba_move_window(struct ieee80211com *ic, struct ieee80211_node *ni,
             ba->ba_gapwait--;
         } else
             ic->ic_stats.is_ht_rx_ba_frame_lost++;
-        ba->ba_head = (ba->ba_head + 1) % IEEE80211_BA_MAX_WINSZ;
+        ba->ba_head = (ba->ba_head + 1) % IEEE80211_BA_MAX_RX_WINSZ;
     }
     /* move window forward */
     ba->ba_winstart = ssn;
@@ -3136,8 +3136,8 @@ ieee80211_recv_addba_req(struct ieee80211com *ic, mbuf_t m,
     timeout_set(&ba->ba_gap_to, ieee80211_input_ba_gap_timeout, ba);
     ba->ba_gapwait = 0;
     ba->ba_winsize = bufsz;
-    if (ba->ba_winsize == 0 || ba->ba_winsize > IEEE80211_BA_MAX_WINSZ)
-        ba->ba_winsize = IEEE80211_BA_MAX_WINSZ;
+    if (ba->ba_winsize == 0 || ba->ba_winsize > IEEE80211_BA_MAX_RX_WINSZ)
+        ba->ba_winsize = IEEE80211_BA_MAX_RX_WINSZ;
     ba->ba_params = (params & IEEE80211_ADDBA_BA_POLICY);
     ba->ba_params |= ((ba->ba_winsize << IEEE80211_ADDBA_BUFSZ_SHIFT) |
                       (tid << IEEE80211_ADDBA_TID_SHIFT));
@@ -3147,7 +3147,7 @@ ieee80211_recv_addba_req(struct ieee80211com *ic, mbuf_t m,
     ba->ba_winstart = ssn;
     ba->ba_winend = (ba->ba_winstart + ba->ba_winsize - 1) & 0xfff;
     /* allocate and setup our reordering buffer */
-    ba->ba_buf = (struct ieee80211_ba_buf*)malloc(IEEE80211_BA_MAX_WINSZ * sizeof(struct ieee80211_ba_buf), 0, 0);
+    ba->ba_buf = (struct ieee80211_ba_buf*)malloc(IEEE80211_BA_MAX_RX_WINSZ * sizeof(struct ieee80211_ba_buf), 0, 0);
     if (ba->ba_buf == NULL)
         goto refuse;
     
@@ -3382,7 +3382,7 @@ ieee80211_recv_delba(struct ieee80211com *ic, mbuf_t m,
         
         if (ba->ba_buf != NULL) {
             /* free all MSDUs stored in reordering buffer */
-            for (i = 0; i < IEEE80211_BA_MAX_WINSZ; i++)
+            for (i = 0; i < IEEE80211_BA_MAX_RX_WINSZ; i++)
                 mbuf_freem(ba->ba_buf[i].m);
             /* free reordering buffer */
             free(ba->ba_buf);
