@@ -2363,8 +2363,12 @@ mwx_preinit(struct mwx_softc *sc)
 
 	/* Configure channel information obtained from firmware. */
 	ieee80211_channel_init(ifp);
-	/* VHT channels make net80211 claim 11ax too; HE is not supported. */
-	ic->ic_modecaps &= ~(1 << IEEE80211_MODE_11AX);
+	/* Retain IEEE80211_MODE_11AX for Wi-Fi 6 (HE) unless -nohe is specified. */
+	{
+		int no_he = 0;
+		if (PE_parse_boot_argn("-nohe", &no_he, sizeof(no_he)))
+			ic->ic_modecaps &= ~(1 << IEEE80211_MODE_11AX);
+	}
 	MWX_DEV_LOG(sc, "preinit channel table ready\n");
 
 	if (IEEE80211_ADDR_EQ(etheranyaddr, sc->sc_ic.ic_myaddr))
@@ -2409,6 +2413,14 @@ mwx_attach_hook(struct device *self)
 	MWX_DEV_LOG(sc, "attach hook start\n");
 	mwx_preinit(sc);
 	MWX_DEV_LOG(sc, "attach hook done fw_loaded=%d\n", sc->sc_fw_loaded);
+}
+
+static void
+mwx_updateslot(struct ieee80211com *ic)
+{
+	struct mwx_softc *sc = (struct mwx_softc *)ic->ic_softc;
+	if (sc != NULL && sc->sc_fw_loaded && !sc->sc_suspended)
+		mt7921_mac_set_timing(sc);
 }
 
 bool
@@ -2657,6 +2669,7 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 	ic->ic_ampdu_tx_start = mwx_ampdu_tx_start;
 	ic->ic_ampdu_tx_stop = mwx_ampdu_tx_stop;
 	ic->ic_delete_key = mwx_delete_key;
+	ic->ic_updateslot = mwx_updateslot;
 
 	/* Override 802.11 state transition machine. */
 	sc->sc_newstate = ic->ic_newstate;
@@ -4954,8 +4967,7 @@ mt7921_mcu_get_nic_capability(struct mwx_softc *sc)
 			break;
 		switch (type) {
 		case MT_NIC_CAP_6G:
-			/* TODO 6GHZ SUPPORT */
-			sc->sc_capa.has_6ghz = /* XXX 1 */ 0;
+			sc->sc_capa.has_6ghz = 1;
 			break;
 		case MT_NIC_CAP_MAC_ADDR:
 			if (len < ETHER_ADDR_LEN)
@@ -5713,9 +5725,16 @@ mt7921_mac_set_timing(struct mwx_softc *sc)
 	uint32_t cck = MT_TIMEOUT_CCK_DEF_VAL;
 	uint32_t ofdm = MT_TIMEOUT_OFDM_DEF_VAL;
 	uint32_t offset;
-	int is_2ghz = 1; /* XXX get from ic_bss node */
+	struct ieee80211_channel *chan = NULL;
+	if (sc->sc_ic.ic_opmode == IEEE80211_M_STA && sc->sc_ic.ic_bss != NULL)
+		chan = sc->sc_ic.ic_bss->ni_chan;
+	else
+		chan = sc->sc_ic.ic_ibss_chan;
+
+	int is_2ghz = (chan && IEEE80211_IS_CHAN_2GHZ(chan)) ? 1 : (chan ? 0 : 1);
 	uint32_t sifs = is_2ghz ? 10 : 16;
-	uint32_t slottime = IEEE80211_DUR_DS_SHSLOT;	/* XXX get from stack */
+	uint32_t slottime = (!is_2ghz || (sc->sc_ic.ic_flags & IEEE80211_F_SHSLOT)) ?
+	    IEEE80211_DUR_DS_SHSLOT : 20;
 
 #ifdef NOTYET
 	if (!test_bit(MT76_STATE_RUNNING, &phy->mt76->state))
@@ -7139,8 +7158,14 @@ mt7921_mcu_add_sta_tlv(struct mbuf *m, uint16_t *tlvnum, struct mwx_softc *sc,
 	    FIELD_PREP(IEEE80211_HT_AMPDU_PARM_DENSITY,
 	    sta->deflink.ht_cap.ampdu_density);
 #endif
-	// XXX phy->rcpi = rssi_to_rcpi(-ewma_rssi_read(&sc->sc_vif.rssi));
-	phy->rcpi = 0xdc;	/* XXX STOLEN FROM LINUX DUMP */
+	if (ni != NULL && ni->ni_rssi > 0) {
+		int dbm = (int)ni->ni_rssi - 100;
+		if (dbm > 0) dbm = 0;
+		if (dbm < -110) dbm = -110;
+		phy->rcpi = (uint8_t)rssi_to_rcpi(dbm);
+	} else {
+		phy->rcpi = 0xdc;
+	}
 
 #ifdef HACK
 	supp_rates = sta->deflink.supp_rates[band];
@@ -7890,7 +7915,14 @@ int mt7921_mcu_set_associated_peer(struct mwx_softc *sc)
         phy->basic_rate = htole16(0x0150);
         phy->phy_type = mt7921_get_phy_mode_v2(sc, ni);
         phy->ampdu = ni->ni_ampdu_param & 0x1f;
-        phy->rcpi = 0xdc;
+        if (ni->ni_rssi > 0) {
+            int dbm = (int)ni->ni_rssi - 100;
+            if (dbm > 0) dbm = 0;
+            if (dbm < -110) dbm = -110;
+            phy->rcpi = (uint8_t)rssi_to_rcpi(dbm);
+        } else {
+            phy->rcpi = 0xdc;
+        }
         struct sta_rec_ra_info *ra = (struct sta_rec_ra_info *)mwx_append_tlv(m,
             &tlvnum, STA_REC_RA, sizeof(*ra));
         ra->legacy = htole16(RA_LEGACY_OFDM);
