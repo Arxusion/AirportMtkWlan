@@ -18,7 +18,8 @@ build/
 
 # Build output
 build/
-dist/
+dist/*
+!dist/*.md
 DerivedData/
 *.zip
 tests/scan/scan.cpp

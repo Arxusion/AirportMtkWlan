@@ -29,7 +29,7 @@ The repository builds two front-ends:
 | **DMA Watchdog & Recovery** | ✅ | Automatic WFDMA stall detection, PCIe FLR reset, and firmware re-initialization |
 | **Power Management (S3)** | ✅ | Clean hardware quiescing on sleep; full re-attach and firmware restore on wake |
 | **Network Roaming** | ✅ | Band steering preferring 5 GHz when within 15 dBm RSSI of 2.4 GHz |
-| **802.11ax (HE)** | ⏳ | Under active development |
+| **802.11ax (HE)** | ✅ | Wi-Fi 6 HE association, 256 BlockAck window, and A-MSDU reassembly enabled |
 | **Apple Continuity / AWDL** | ❌ | Requires proprietary Apple wireless driver extensions |
 
 ---
@@ -51,8 +51,8 @@ The repository builds two front-ends:
 ## Installation Guide (OpenCore)
 
 1. Download the latest release package for your macOS version from [Releases](https://github.com/Arxusion/AirportMtkWlan/releases):
-   * `AirportMtkWlan-Tahoe-v1.5.1-RELEASE.zip` for **macOS 26 Tahoe**
-   * `AirportMtkWlan-Sequoia-v1.5.1-RELEASE.zip` for **macOS 15 Sequoia**
+   * `AirportMtkWlan-Tahoe-v1.5.2-RELEASE.zip` for **macOS 26 Tahoe**
+   * `AirportMtkWlan-Sequoia-v1.5.2-RELEASE.zip` for **macOS 15 Sequoia**
 2. Extract and place `AirportMtkWlan.kext` into your EFI directory: `EFI/OC/Kexts/`.
 3. Add the kernel extension entry to your `config.plist` under `Kernel -> Add`:
 
