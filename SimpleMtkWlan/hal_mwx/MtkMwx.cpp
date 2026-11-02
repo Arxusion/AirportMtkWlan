@@ -1596,7 +1596,7 @@ mwx_newstate_task(void *ptr)
 				int crv = mt7921_mcu_set_chan_info(sc,
 				    MCU_EXT_CMD_CHANNEL_SWITCH);
 				MWX_DEV_LOG(sc, "RUN switch to %s MHz center=%u rv=%d\n",
-				    rbw == CMD_CBW_80MHZ ? "80" : "40", rcenter, crv);
+				    rbw == CMD_CBW_160MHZ ? "160" : rbw == CMD_CBW_80MHZ ? "80" : "40", rcenter, crv);
 			}
 		}
 		rv = mt7921_mcu_set_associated_bss(sc, 1);
@@ -2344,6 +2344,8 @@ mwx_preinit(struct mwx_softc *sc)
 			    IEEE80211_CHAN_HT20 | IEEE80211_CHAN_HT40 |
 			    IEEE80211_CHAN_VHT20 |
 			    IEEE80211_CHAN_VHT40 | IEEE80211_CHAN_VHT80;
+			if ((chan >= 36 && chan <= 64) || (chan >= 100 && chan <= 128))
+				ic->ic_channels[chan].ic_flags |= IEEE80211_CHAN_VHT160;
 		}
 	}
 #ifdef NOTYET
@@ -2608,6 +2610,8 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 	 */
 	ic->ic_vhtcaps = IEEE80211_VHTCAP_MAX_MPDU_LENGTH_3895 |
 	    IEEE80211_VHTCAP_RXLDPC | IEEE80211_VHTCAP_SHORT_GI_80 |
+	    IEEE80211_VHTCAP_SHORT_GI_160 |
+	    IEEE80211_VHTCAP_SUPP_CHAN_WIDTH_160MHZ |
 	    IEEE80211_VHTCAP_RXSTBC_1 |
 	    IEEE80211_VHTCAP_SU_BEAMFORMEE_CAPABLE |
 	    IEEE80211_VHTCAP_MU_BEAMFORMEE_CAPABLE |
@@ -2620,6 +2624,14 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 	ic->ic_vht_tx_mcs_map = 0xfffa;
 	ic->ic_vht_rx_highest = 0;
 	ic->ic_vht_tx_highest = 0;
+
+	/* 802.11ax Wi-Fi 6 HE 160 MHz capabilities & MCS rates */
+	ic->ic_he_cap_elem.phy_cap_info[0] |=
+	    IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_160MHZ_IN_5G;
+	ic->ic_he_mcs_nss_supp.rx_mcs_80 = htole16(0xfffa);
+	ic->ic_he_mcs_nss_supp.tx_mcs_80 = htole16(0xfffa);
+	ic->ic_he_mcs_nss_supp.rx_mcs_160 = htole16(0xfffa);
+	ic->ic_he_mcs_nss_supp.tx_mcs_160 = htole16(0xfffa);
 
 #if NOTYET
 	ic->ic_vhtcaps = IEEE80211_VHTCAP_MAX_MPDU_LENGTH_11454 |
@@ -5475,6 +5487,11 @@ mwx_node_chan_width(struct ieee80211_node *ni, uint8_t *bw, uint8_t *center)
 	if (ni->ni_chan->ic_center_freq1 == 0)
 		return;
 	if (((ni->ni_flags & IEEE80211_NODE_VHT) || (ni->ni_flags & IEEE80211_NODE_HE)) &&
+	    ni->ni_chw == IEEE80211_CHAN_WIDTH_160) {
+		*bw = CMD_CBW_160MHZ;
+		*center = ieee80211_mhz2ieee(ni->ni_chan->ic_center_freq1,
+		    ni->ni_chan->ic_flags);
+	} else if (((ni->ni_flags & IEEE80211_NODE_VHT) || (ni->ni_flags & IEEE80211_NODE_HE)) &&
 	    ni->ni_chw == IEEE80211_CHAN_WIDTH_80) {
 		*bw = CMD_CBW_80MHZ;
 		*center = ieee80211_mhz2ieee(ni->ni_chan->ic_center_freq1,
@@ -5527,6 +5544,9 @@ mt7921_mcu_set_chan_info(struct mwx_softc *sc, int cmd)
 	if (sc->sc_ic.ic_opmode == IEEE80211_M_STA && sc->sc_ic.ic_bss != NULL &&
 	    channel == sc->sc_ic.ic_bss->ni_chan)
 		mwx_node_chan_width(sc->sc_ic.ic_bss, &req.bw, &req.center_ch);
+
+	req.ap_bw = req.bw;
+	req.ap_center_ch = req.center_ch;
 
 #ifdef NOTYET
 	if (channel->ic_flags & IEEE80211_CHAN_6GHZ)
@@ -7944,9 +7964,12 @@ int mt7921_mcu_set_associated_peer(struct mwx_softc *sc)
     if (ni->ni_flags & IEEE80211_NODE_VHT) {
         struct sta_rec_vht_v1 *vht = (struct sta_rec_vht_v1 *)mwx_append_tlv(m,
             &tlvnum, STA_REC_VHT, sizeof(*vht));
-        /* peer capabilities without 160/80+80 (we only do 80 MHz) */
-        vht->vht_cap = htole32(ni->ni_vhtcaps &
-            ~IEEE80211_VHTCAP_SUPP_CHAN_WIDTH_MASK);
+        /* peer VHT capabilities */
+        uint32_t vhtcap = ni->ni_vhtcaps;
+        if (ni->ni_chw != IEEE80211_CHAN_WIDTH_160 &&
+            !(vhtcap & IEEE80211_VHTCAP_SUPP_CHAN_WIDTH_160MHZ))
+            vhtcap &= ~IEEE80211_VHTCAP_SUPP_CHAN_WIDTH_MASK;
+        vht->vht_cap = htole32(vhtcap);
         vht->vht_rx_mcs_map = htole16(ni->ni_vht_mcsinfo.rx_mcs_map);
         vht->vht_tx_mcs_map = htole16(ni->ni_vht_mcsinfo.tx_mcs_map);
     }
@@ -7956,10 +7979,11 @@ int mt7921_mcu_set_associated_peer(struct mwx_softc *sc)
     struct sta_rec_state *state = (struct sta_rec_state *)mwx_append_tlv(m, &tlvnum, STA_REC_STATE, sizeof(*state));
     state->state = 2; /* MT76_STA_INFO_STATE_ASSOC: NONE=0, AUTH=1, ASSOC=2. */
     if (ni->ni_flags & (IEEE80211_NODE_VHT | IEEE80211_NODE_HE)) {
-        /* bandwidth (0=20, 2=80) | (rx nss - 1) << 4 */
+        /* bandwidth (0=20, 1=40, 2=80, 3=160) | (rx nss - 1) << 4 */
         uint8_t bw, center;
         mwx_node_chan_width(ni, &bw, &center);
-        state->vht_opmode = (bw == CMD_CBW_80MHZ ? 2 :
+        state->vht_opmode = (bw == CMD_CBW_160MHZ ? 3 :
+            bw == CMD_CBW_80MHZ ? 2 :
             bw == CMD_CBW_40MHZ ? 1 : 0) |
             ((sc->sc_capa.num_streams > 1 ? 1 : 0) << 4);
         MWX_DEV_LOG(sc, "assoc_peer %s caps=0x%08x rxmcs=0x%04x txmcs=0x%04x chw=%d center=%u opmode=0x%02x\n",
