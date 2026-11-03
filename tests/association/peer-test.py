@@ -18,12 +18,18 @@ pre=r'''
 struct ieee80211_node{uint16_t ni_associd;uint32_t ni_flags=0;uint16_t ni_htcaps=0;uint8_t ni_ampdu_param=0;uint8_t ni_rxmcs[10]={};uint32_t ni_vhtcaps=0;struct{uint16_t rx_mcs_map,rx_highest,tx_mcs_map,tx_highest;} ni_vht_mcsinfo={};int ni_chw=0;};
 #define IEEE80211_NODE_HT 0x0400
 #define IEEE80211_NODE_VHT 0x2000
+#define IEEE80211_NODE_HE 0x4000
+#define IEEE80211_CHAN_WIDTH_160 3
+#define IEEE80211_VHTCAP_SUPP_CHAN_WIDTH_160MHZ 0x00000004
 #define IEEE80211_VHTCAP_SUPP_CHAN_WIDTH_MASK 0x0000000C
 #define STA_REC_VHT 0x0a
+#define CMD_CBW_160MHZ 3
 #define CMD_CBW_80MHZ 2
 #define CMD_CBW_40MHZ 1
 struct ieee80211_vht_mcs_info{uint16_t rx_mcs_map,rx_highest,tx_mcs_map,tx_highest;};
 struct sta_rec_vht_v1{uint16_t tag,len;uint32_t vht_cap;uint16_t vht_rx_mcs_map,vht_tx_mcs_map;uint8_t rts_bw_sig,rsv[3];};
+struct mbuf;
+inline void mwx_yy_sta_he_tlv(mbuf*,uint16_t*,void*,ieee80211_node*){}
 #ifndef htole16
 #define htole16(x) (x)
 #endif

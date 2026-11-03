@@ -1599,6 +1599,7 @@ mwx_newstate_task(void *ptr)
 				    rbw == CMD_CBW_160MHZ ? "160" : rbw == CMD_CBW_80MHZ ? "80" : "40", rcenter, crv);
 			}
 		}
+		mt7921_mac_set_timing(sc);
 		rv = mt7921_mcu_set_associated_bss(sc, 1);
 		if (!rv)
 			rv = mt7921_mcu_set_associated_peer(sc);
@@ -2417,14 +2418,6 @@ mwx_attach_hook(struct device *self)
 	MWX_DEV_LOG(sc, "attach hook done fw_loaded=%d\n", sc->sc_fw_loaded);
 }
 
-static void
-mwx_updateslot(struct ieee80211com *ic)
-{
-	struct mwx_softc *sc = (struct mwx_softc *)ic->ic_softc;
-	if (sc != NULL && sc->sc_fw_loaded && !sc->sc_suspended)
-		mt7921_mac_set_timing(sc);
-}
-
 bool
 mwx_attach(struct device *parent, struct device *self, void *aux)
 {
@@ -2681,7 +2674,6 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 	ic->ic_ampdu_tx_start = mwx_ampdu_tx_start;
 	ic->ic_ampdu_tx_stop = mwx_ampdu_tx_stop;
 	ic->ic_delete_key = mwx_delete_key;
-	ic->ic_updateslot = mwx_updateslot;
 
 	/* Override 802.11 state transition machine. */
 	sc->sc_newstate = ic->ic_newstate;
@@ -7178,14 +7170,13 @@ mt7921_mcu_add_sta_tlv(struct mbuf *m, uint16_t *tlvnum, struct mwx_softc *sc,
 	    FIELD_PREP(IEEE80211_HT_AMPDU_PARM_DENSITY,
 	    sta->deflink.ht_cap.ampdu_density);
 #endif
-	if (ni != NULL && ni->ni_rssi > 0) {
-		int dbm = (int)ni->ni_rssi - 100;
-		if (dbm > 0) dbm = 0;
-		if (dbm < -110) dbm = -110;
-		phy->rcpi = (uint8_t)rssi_to_rcpi(dbm);
-	} else {
-		phy->rcpi = 0xdc;
-	}
+	/*
+	 * Keep phy->rcpi at 0xdc (matching Linux mt76). The MT7921 MCU firmware
+	 * autonomously tracks RCPI from received frames in its WTBL hardware table.
+	 * Overriding RCPI with low dynamic values during peer setup causes firmware
+	 * rate collapse, tx starvation, and link drops at weak signal levels.
+	 */
+	phy->rcpi = 0xdc;
 
 #ifdef HACK
 	supp_rates = sta->deflink.supp_rates[band];
@@ -7935,14 +7926,12 @@ int mt7921_mcu_set_associated_peer(struct mwx_softc *sc)
         phy->basic_rate = htole16(0x0150);
         phy->phy_type = mt7921_get_phy_mode_v2(sc, ni);
         phy->ampdu = ni->ni_ampdu_param & 0x1f;
-        if (ni->ni_rssi > 0) {
-            int dbm = (int)ni->ni_rssi - 100;
-            if (dbm > 0) dbm = 0;
-            if (dbm < -110) dbm = -110;
-            phy->rcpi = (uint8_t)rssi_to_rcpi(dbm);
-        } else {
-            phy->rcpi = 0xdc;
-        }
+        /*
+         * Keep phy->rcpi at 0xdc (matching Linux mt76). The MT7921 MCU firmware
+         * tracks RCPI autonomously in hardware. Clamping to 0xdc gives the firmware
+         * full rate margin even when operating far from the AP.
+         */
+        phy->rcpi = 0xdc;
         struct sta_rec_ra_info *ra = (struct sta_rec_ra_info *)mwx_append_tlv(m,
             &tlvnum, STA_REC_RA, sizeof(*ra));
         ra->legacy = htole16(RA_LEGACY_OFDM);
