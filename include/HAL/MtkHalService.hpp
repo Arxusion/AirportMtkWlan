@@ -60,6 +60,8 @@ public:
     
     virtual MtkDriverController *getDriverController() = 0;
     
+    virtual bool isMT7922() { return false; }
+    
     /* Periodic hardware state dump / interrupt poll, called on the main work loop. */
     virtual void debugPoll() {}
 

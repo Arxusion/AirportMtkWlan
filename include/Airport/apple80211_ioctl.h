@@ -1049,6 +1049,16 @@ struct apple80211_awdl_sync_params {
     uint32_t    synchronization_frame_period;
 } __attribute__((packed));
 
+struct apple80211_rsdb_capability {
+    uint32_t    version;
+    uint8_t     rsdb;
+    uint8_t     cores;
+    uint16_t    flags;
+    uint8_t     chains[32];
+} __attribute__((packed));
+
+static_assert(sizeof(struct apple80211_rsdb_capability) == 40, "apple80211_rsdb_capability size mismatch");
+
 struct apple80211_awdl_cap {
     uint32_t    version;
     uint8_t     cap;

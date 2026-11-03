@@ -20,6 +20,7 @@
 #include "IOSkywalkPacketBufferPool.h"
 #include "IOSkywalkLegacyEthernetInterface.h"
 #include "IO80211SkywalkInterface.h"
+#include "IO80211VirtualInterface.h"
 #else
 #include "IO80211Controller.h"
 #include "IO80211Interface.h"

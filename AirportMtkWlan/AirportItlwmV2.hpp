@@ -208,6 +208,12 @@ public:
 //        XYLog("%s\n", __FUNCTION__);
         return getCOUNTRY_CODE((OSObject *)interface, data);
     }
+    
+    virtual IO80211VirtualInterface* createVirtualInterface(ether_addr *ea, UInt role) override;
+    virtual SInt32 enableVirtualInterface(IO80211VirtualInterface *vif) override;
+    virtual SInt32 disableVirtualInterface(IO80211VirtualInterface *vif) override;
+    bool isMT7922();
+    IO80211VirtualInterface *getAwdlInterface() const { return fAwdlIf; }
     virtual IOReturn setCOUNTRY_CODE(IO80211SkywalkInterface *interface,apple80211_country_code_data *data) override {
 //        XYLog("%s\n", __FUNCTION__);
         return setCOUNTRY_CODE((OSObject *)interface, data);
@@ -289,6 +295,9 @@ public:
     uint32_t btcMode;
     uint32_t btcOptions;
     bool awdlSyncEnable;
+    IO80211VirtualInterface *fAwdlIf = nullptr;
+    uint8_t fAwdlMac[6] = {0};
+    bool fAwdlEnabled = false;
     
     CCPipe *driverLogPipe;
     CCPipe *driverDataPathPipe;

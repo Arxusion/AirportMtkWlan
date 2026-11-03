@@ -1,7 +1,11 @@
 #ifndef IO80211VirtualInterface_h
 #define IO80211VirtualInterface_h
 
+#ifndef IO80211FAMILY_V2
 #include "IO80211Interface.h"
+#else
+#include "IO80211SkywalkInterface.h"
+#endif
 #include "apple_private_spi.h"
 
 typedef UInt64 IO80211FlowQueueHash;
@@ -17,6 +21,8 @@ struct apple80211_awdl_statistics;
 struct apple80211_lowlatency_peer_statistics_evevt;
 struct apple80211_p2p_airplay_statistics;
 struct apple80211_awdl_sidecar_statistics;
+struct apple80211_pmk_cache_data;
+struct packet_info_tx;
 
 class IO80211VirtualInterface : public IOService {
     OSDeclareDefaultStructors(IO80211VirtualInterface)

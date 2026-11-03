@@ -7738,6 +7738,12 @@ MtkMwx::is5GBandSupport()
 	return com != NULL && com->sc_capa.has_5ghz;
 }
 
+bool
+MtkMwx::isMT7922()
+{
+	return com != NULL && com->sc_hwtype == MWX_HW_MT7922;
+}
+
 int
 MtkMwx::getTxNSS()
 {

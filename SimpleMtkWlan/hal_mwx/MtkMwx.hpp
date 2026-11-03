@@ -40,6 +40,7 @@ public:
     const char *getFirmwareVersion() override;
     int16_t getBSSNoise() override;
     bool is5GBandSupport() override;
+    bool isMT7922() override;
     int getTxNSS() override;
     const char *getFirmwareName() override;
     UInt32 supportedFeatures() override;
