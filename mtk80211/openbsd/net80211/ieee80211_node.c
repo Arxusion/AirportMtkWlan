@@ -317,6 +317,12 @@ ieee80211_ess_setwpaparms(struct ieee80211_ess *ess,
         ess->rsnakms |= IEEE80211_AKM_SHA256_8021X;
     if (wpa->i_akms & IEEE80211_WPA_AKM_SAE)
         ess->rsnakms |= IEEE80211_AKM_SAE;
+    if (wpa->i_akms & IEEE80211_WPA_AKM_FT_8021X)
+        ess->rsnakms |= IEEE80211_AKM_FT_8021X;
+    if (wpa->i_akms & IEEE80211_WPA_AKM_FT_PSK)
+        ess->rsnakms |= IEEE80211_AKM_FT_PSK;
+    if (wpa->i_akms & IEEE80211_WPA_AKM_FT_SAE)
+        ess->rsnakms |= IEEE80211_AKM_FT_SAE;
     if (ess->rsnakms == 0)	/* set to default (PSK) */
         ess->rsnakms = IEEE80211_AKM_PSK;
     
@@ -512,6 +518,13 @@ ieee80211_ess_calculate_score(struct ieee80211com *ic,
     /* Boost this AP if it had no auth/assoc failures in the past. */
     if (ni->ni_fails == 0)
         score += 21;
+
+    /* Fast BSS Transition (802.11r) and Mobility Domain roaming preference */
+    if (ni->ni_has_mde)
+        score += 4;
+    if (ic->ic_bss != NULL && ic->ic_bss->ni_has_mde &&
+        ni->ni_has_mde && ni->ni_mdid == ic->ic_bss->ni_mdid)
+        score += 8;
     
     return score;
 }
@@ -1628,27 +1641,52 @@ ieee80211_choose_rsnparams(struct ieee80211com *ic)
     
     /* filter out unsupported AKMPs */
     ni->ni_rsnakms &= ic->ic_rsnakms;
-    /* prefer SAE, then SHA-256 based AKMPs */
-    if (ni->ni_rsnakms & IEEE80211_AKM_SAE) {
+    /* prefer SAE / FT-SAE, then PSK / FT-PSK, then 802.1X / FT-802.1X */
+    if (ni->ni_rsnakms & IEEE80211_AKM_FT_SAE) {
+        ni->ni_rsnakms = IEEE80211_AKM_FT_SAE;
+    } else if (ni->ni_rsnakms & IEEE80211_AKM_SAE) {
         ni->ni_rsnakms = IEEE80211_AKM_SAE;
     } else if ((ic->ic_flags & IEEE80211_F_PSK) && (ni->ni_rsnakms &
-                                             (IEEE80211_AKM_PSK | IEEE80211_AKM_SHA256_PSK))) {
+                                             (IEEE80211_AKM_PSK | IEEE80211_AKM_SHA256_PSK | IEEE80211_AKM_FT_PSK))) {
         /* AP supports PSK AKMP and a PSK is configured */
-        if (ni->ni_rsnakms & IEEE80211_AKM_SHA256_PSK)
+        if (ni->ni_rsnakms & IEEE80211_AKM_FT_PSK)
+            ni->ni_rsnakms = IEEE80211_AKM_FT_PSK;
+        else if (ni->ni_rsnakms & IEEE80211_AKM_SHA256_PSK)
             ni->ni_rsnakms = IEEE80211_AKM_SHA256_PSK;
         else
             ni->ni_rsnakms = IEEE80211_AKM_PSK;
     } else {
-        if (ni->ni_rsnakms & IEEE80211_AKM_SHA256_8021X)
+        if (ni->ni_rsnakms & IEEE80211_AKM_FT_8021X)
+            ni->ni_rsnakms = IEEE80211_AKM_FT_8021X;
+        else if (ni->ni_rsnakms & IEEE80211_AKM_SHA256_8021X)
             ni->ni_rsnakms = IEEE80211_AKM_SHA256_8021X;
         else
             ni->ni_rsnakms = IEEE80211_AKM_8021X;
-        /* check if we have a cached PMK for this AP */
-        if (ni->ni_rsnprotos == IEEE80211_PROTO_RSN &&
-            (pmk = ieee80211_pmksa_find(ic, ni, NULL)) != NULL) {
-            memcpy(ni->ni_pmkid, pmk->pmk_pmkid,
-                   IEEE80211_PMKID_LEN);
-            ni->ni_flags |= IEEE80211_NODE_PMKID;
+    }
+
+    /* check if we have a cached PMK or can perform Opportunistic Key Caching (OKC) */
+    if (ni->ni_rsnprotos == IEEE80211_PROTO_RSN) {
+        pmk = ieee80211_pmksa_find(ic, ni, NULL);
+        if (pmk != NULL) {
+            memcpy(ni->ni_pmkid, pmk->pmk_pmkid, IEEE80211_PMKID_LEN);
+            memcpy(ni->ni_pmk, pmk->pmk_key, IEEE80211_PMK_LEN);
+            ni->ni_flags |= (IEEE80211_NODE_PMK | IEEE80211_NODE_PMKID);
+        } else if (ni->ni_has_mde || (ic->ic_flags & IEEE80211_F_PSK) ||
+                   (ni->ni_rsnakms & (IEEE80211_AKM_SAE | IEEE80211_AKM_FT_SAE))) {
+            struct ieee80211_pmk *cand;
+            TAILQ_FOREACH(cand, &ic->ic_pmksa, pmk_next) {
+                if (cand->pmk_akm == ni->ni_rsnakms ||
+                    (ieee80211_is_psk_akm(cand->pmk_akm) && ieee80211_is_psk_akm((enum ieee80211_akm)ni->ni_rsnakms)) ||
+                    (ieee80211_is_sae_akm(cand->pmk_akm) && ieee80211_is_sae_akm((enum ieee80211_akm)ni->ni_rsnakms))) {
+                    ieee80211_derive_pmkid((enum ieee80211_akm)ni->ni_rsnakms, cand->pmk_key,
+                        ni->ni_bssid, ic->ic_myaddr, ni->ni_pmkid);
+                    memcpy(ni->ni_pmk, cand->pmk_key, IEEE80211_PMK_LEN);
+                    ni->ni_flags |= (IEEE80211_NODE_PMK | IEEE80211_NODE_PMKID);
+                    ieee80211_pmksa_add(ic, (enum ieee80211_akm)ni->ni_rsnakms, ni->ni_bssid,
+                        cand->pmk_key, IEEE80211_PMK_INFINITE);
+                    break;
+                }
+            }
         }
     }
     
@@ -1661,8 +1699,8 @@ ieee80211_choose_rsnparams(struct ieee80211com *ic)
         ni->ni_rsnciphers = IEEE80211_CIPHER_TKIP;
     ni->ni_rsncipher = (enum ieee80211_cipher)ni->ni_rsnciphers;
     
-    /* use MFP if we both support it, or mandatory for SAE */
-    if ((ni->ni_rsnakms & IEEE80211_AKM_SAE) ||
+    /* use MFP if we both support it, or mandatory for SAE / FT-SAE */
+    if ((ni->ni_rsnakms & (IEEE80211_AKM_SAE | IEEE80211_AKM_FT_SAE)) ||
         ((ic->ic_caps & IEEE80211_C_MFP) &&
          (ni->ni_rsncaps & IEEE80211_RSNCAP_MFPC))) {
         ni->ni_flags |= IEEE80211_NODE_MFP;

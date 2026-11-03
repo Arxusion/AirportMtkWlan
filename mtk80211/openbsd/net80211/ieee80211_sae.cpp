@@ -684,6 +684,8 @@ void ieee80211_sae_rx_auth(struct ieee80211com *ic, mbuf_t m, struct ieee80211_n
         ni->ni_flags |= IEEE80211_NODE_PMK | IEEE80211_NODE_PMKID | IEEE80211_NODE_MFP;
         ni->ni_rsngroupmgmtcipher = IEEE80211_CIPHER_BIP;
         ic->ic_rsngroupmgmtcipher = IEEE80211_CIPHER_BIP;
+        ieee80211_pmksa_add(ic, (enum ieee80211_akm)ni->ni_rsnakms,
+            ni->ni_bssid, sae->pmk, IEEE80211_PMK_INFINITE);
 
         sae->state = SAE_STATE_ACCEPTED;
         XYLog("%s: SAE Handshake 100%% VERIFIED! PMK and PMKID installed. Transitioning to ASSOC.\n",

@@ -1069,6 +1069,16 @@ ieee80211_add_rsn_body(u_int8_t *frm, struct ieee80211com *ic,
         *frm++ = 2;
         count++;
     }
+    if (!wpa && (ni->ni_rsnakms & IEEE80211_AKM_FT_8021X)) {
+        memcpy(frm, oui, 3); frm += 3;
+        *frm++ = 3;
+        count++;
+    }
+    if (!wpa && (ni->ni_rsnakms & IEEE80211_AKM_FT_PSK)) {
+        memcpy(frm, oui, 3); frm += 3;
+        *frm++ = 4;
+        count++;
+    }
     if (!wpa && (ni->ni_rsnakms & IEEE80211_AKM_SHA256_8021X)) {
         memcpy(frm, oui, 3); frm += 3;
         *frm++ = 5;
@@ -1084,6 +1094,11 @@ ieee80211_add_rsn_body(u_int8_t *frm, struct ieee80211com *ic,
         *frm++ = 8;
         count++;
     }
+    if (!wpa && (ni->ni_rsnakms & IEEE80211_AKM_FT_SAE)) {
+        memcpy(frm, oui, 3); frm += 3;
+        *frm++ = 9;
+        count++;
+    }
     /* write AKM Suite List Count field */
     LE_WRITE_2(pcount, count);
 
@@ -1093,10 +1108,10 @@ ieee80211_add_rsn_body(u_int8_t *frm, struct ieee80211com *ic,
     /* write RSN Capabilities field */
     rsncaps = (ni->ni_rsncaps & (IEEE80211_RSNCAP_PTKSA_RCNT_MASK |
         IEEE80211_RSNCAP_GTKSA_RCNT_MASK));
-    if ((ni->ni_rsnakms & IEEE80211_AKM_SAE) ||
+    if ((ni->ni_rsnakms & (IEEE80211_AKM_SAE | IEEE80211_AKM_FT_SAE)) ||
         ((ic->ic_caps & IEEE80211_C_MFP) && (ni->ni_flags & IEEE80211_NODE_MFP))) {
         rsncaps |= IEEE80211_RSNCAP_MFPC;
-        if ((ni->ni_rsnakms & IEEE80211_AKM_SAE) || (ic->ic_flags & IEEE80211_F_MFPR))
+        if ((ni->ni_rsnakms & (IEEE80211_AKM_SAE | IEEE80211_AKM_FT_SAE)) || (ic->ic_flags & IEEE80211_F_MFPR))
             rsncaps |= IEEE80211_RSNCAP_MFPR;
     }
     if (ic->ic_flags & IEEE80211_F_PBAR)
@@ -1599,7 +1614,8 @@ ieee80211_get_assoc_req(struct ieee80211com *ic, struct ieee80211_node *ni,
 		2 + IEEE80211_WPAIE_MAXLEN : 0) +
 	    ((ic->ic_flags & IEEE80211_F_HTON) ? sizeof(struct ieee80211_ie_htcap) + sizeof(struct ieee80211_wme_info) : 0) +
         (((ic->ic_flags & IEEE80211_F_VHTON) && !IEEE80211_IS_CHAN_2GHZ(ni->ni_chan)) ? sizeof(struct ieee80211_ie_vhtcap) + 2 : 0) +
-        ((ic->ic_flags & IEEE80211_F_HEON) ? (sizeof(struct ieee80211_he_cap_elem) + 2 + 1 + sizeof(struct ieee80211_he_mcs_nss_supp) + IEEE80211_HE_PPE_THRES_MAX_LEN) : 0));
+        ((ic->ic_flags & IEEE80211_F_HEON) ? (sizeof(struct ieee80211_he_cap_elem) + 2 + 1 + sizeof(struct ieee80211_he_mcs_nss_supp) + IEEE80211_HE_PPE_THRES_MAX_LEN) : 0) +
+        (ni->ni_has_mde ? 5 : 0));
 	if (m == NULL)
 		return NULL;
 
@@ -1657,6 +1673,14 @@ ieee80211_get_assoc_req(struct ieee80211com *ic, struct ieee80211_node *ni,
     
     if (ic->ic_flags & IEEE80211_F_HEON)
         frm = ieee80211_add_hecaps(frm, ic);
+
+    if (ni->ni_has_mde) {
+        *frm++ = IEEE80211_ELEMID_MDE;
+        *frm++ = 3;
+        LE_WRITE_2(frm, ni->ni_mdid);
+        frm += 2;
+        *frm++ = ni->ni_ft_cap_policy;
+    }
 
     size_t l = frm - mtod(m, u_int8_t *);
     mbuf_pkthdr_setlen(m, l);

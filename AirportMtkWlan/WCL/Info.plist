@@ -50,6 +50,8 @@
 			<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 			<key>IOClass</key>
 			<string>IOPCIEDeviceWrapper</string>
+			<key>IOPCIMatch</key>
+			<string>0x796114c3 0x060814c3 0x792214c3 0x061614c3</string>
 			<key>IOPCIPrimaryMatch</key>
 			<string>0x796114c3 0x060814c3 0x792214c3 0x061614c3</string>
 			<key>IOProbeScore</key>

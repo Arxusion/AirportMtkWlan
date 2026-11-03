@@ -1500,12 +1500,18 @@ ieee80211_parse_rsn_akm(const u_int8_t selector[4])
                 return IEEE80211_AKM_8021X;
             case 2:    /* PSK */
                 return IEEE80211_AKM_PSK;
+            case 3:    /* FT using IEEE 802.1X */
+                return IEEE80211_AKM_FT_8021X;
+            case 4:    /* FT using PSK */
+                return IEEE80211_AKM_FT_PSK;
             case 5:    /* IEEE 802.1X with SHA256 KDF */
                 return IEEE80211_AKM_SHA256_8021X;
             case 6:    /* PSK with SHA256 KDF */
                 return IEEE80211_AKM_SHA256_PSK;
             case 8:    /* SAE (WPA3-Personal) with SHA256 */
                 return IEEE80211_AKM_SAE;
+            case 9:    /* FT using SAE */
+                return IEEE80211_AKM_FT_SAE;
         }
     }
     return IEEE80211_AKM_NONE;    /* ignore unknown AKMs */
@@ -1711,6 +1717,7 @@ ieee80211_recv_probe_resp(struct ieee80211com *ic, mbuf_t m,
     const uint8_t *vhtopmode;
     const uint8_t *hecap;
     const uint8_t *heopmode;
+    const uint8_t *mde;
     u_int16_t capinfo, bintval;
     u_int8_t chan, bchan, erp, dtim_count, dtim_period;
     int is_new;
@@ -1750,7 +1757,7 @@ ieee80211_recv_probe_resp(struct ieee80211com *ic, mbuf_t m,
     bintval = LE_READ_2(frm); frm += 2;
     capinfo = LE_READ_2(frm); frm += 2;
     
-    ssid = rates = xrates = edcaie = wmmie = rsnie = wpaie = csa = vhtcap = vhtopmode = hecap = heopmode = NULL;
+    ssid = rates = xrates = edcaie = wmmie = rsnie = wpaie = csa = vhtcap = vhtopmode = hecap = heopmode = mde = NULL;
     htcaps = htop = NULL;
     if (rxi->rxi_chan)
          bchan = rxi->rxi_chan;
@@ -1799,6 +1806,9 @@ ieee80211_recv_probe_resp(struct ieee80211com *ic, mbuf_t m,
                 break;
             case IEEE80211_ELEMID_RSN:
                 rsnie = frm;
+                break;
+            case IEEE80211_ELEMID_MDE:
+                mde = frm;
                 break;
             case IEEE80211_ELEMID_EDCAPARMS:
                 edcaie = frm;
@@ -2131,6 +2141,18 @@ ieee80211_recv_probe_resp(struct ieee80211com *ic, mbuf_t m,
             }
         }
     }
+
+    if (mde != NULL && mde[1] >= 3) {
+        ni->ni_has_mde = 1;
+        ni->ni_mdid = mde[2] | (mde[3] << 8);
+        ni->ni_ft_cap_policy = mde[4];
+        ni->ni_flags |= IEEE80211_NODE_MDE;
+    } else {
+        ni->ni_has_mde = 0;
+        ni->ni_mdid = 0;
+        ni->ni_ft_cap_policy = 0;
+        ni->ni_flags &= ~IEEE80211_NODE_MDE;
+    }
     
     /*
      * Set our SSID if we do not know it yet.
@@ -2415,6 +2437,9 @@ ieee80211_recv_assoc_req(struct ieee80211com *ic, mbuf_t m,
                 break;
             case IEEE80211_ELEMID_RSN:
                 rsnie = frm;
+                break;
+            case IEEE80211_ELEMID_MDE:
+                mde = frm;
                 break;
             case IEEE80211_ELEMID_QOS_CAP:
                 break;
@@ -2705,6 +2730,7 @@ ieee80211_recv_assoc_resp(struct ieee80211com *ic, mbuf_t m,
     const uint8_t *vhtopmode;
     const uint8_t *hecap;
     const uint8_t *heopmode;
+    const uint8_t *mde;
     u_int16_t capinfo, status, associd;
     u_int8_t rate;
     
@@ -2746,7 +2772,7 @@ ieee80211_recv_assoc_resp(struct ieee80211com *ic, mbuf_t m,
     }
     associd = LE_READ_2(frm); frm += 2;
     
-    rates = xrates = edcaie = wmmie = htcaps = htop = vhtcap = vhtopmode = hecap = heopmode = NULL;
+    rates = xrates = edcaie = wmmie = htcaps = htop = vhtcap = vhtopmode = hecap = heopmode = mde = NULL;
     while (frm + 2 <= efrm) {
         if (frm + 2 + frm[1] > efrm) {
             ic->ic_stats.is_rx_elem_toosmall++;
@@ -2773,6 +2799,9 @@ ieee80211_recv_assoc_resp(struct ieee80211com *ic, mbuf_t m,
                 break;
             case IEEE80211_ELEMID_VHT_OPMODE:
                 vhtopmode = frm;
+                break;
+            case IEEE80211_ELEMID_MDE:
+                mde = frm;
                 break;
             case IEEE80211_ELEMID_VENDOR:
                 if (frm[1] < 4) {
@@ -2854,6 +2883,13 @@ ieee80211_recv_assoc_resp(struct ieee80211com *ic, mbuf_t m,
     ieee80211_vht_negotiate(ic, ni);
     if (hecap != NULL && heopmode != NULL) {
         ieee80211_he_negotiate(ic, ni);
+    }
+
+    if (mde != NULL && mde[1] >= 3) {
+        ni->ni_has_mde = 1;
+        ni->ni_mdid = mde[2] | (mde[3] << 8);
+        ni->ni_ft_cap_policy = mde[4];
+        ni->ni_flags |= IEEE80211_NODE_MDE;
     }
     
     /* Hop into 11n/11ac/11ax mode after associating to an HT AP in a legacy mode. */

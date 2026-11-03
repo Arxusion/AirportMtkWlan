@@ -712,6 +712,10 @@ ieee80211_recv_4way_msg3(struct ieee80211com *ic,
                 ni->ni_port_valid = 1;
                 ieee80211_set_link_state(ic, LINK_STATE_UP);
             }
+            if (ni->ni_flags & IEEE80211_NODE_PMK) {
+                ieee80211_pmksa_add(ic, (enum ieee80211_akm)ni->ni_rsnakms,
+                    ni->ni_bssid, ni->ni_pmk, IEEE80211_PMK_INFINITE);
+            }
             ni->ni_assoc_fail = 0;
             if (ic->ic_opmode == IEEE80211_M_STA)
                 ic->ic_rsngroupcipher = ni->ni_rsngroupcipher;

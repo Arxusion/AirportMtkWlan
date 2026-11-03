@@ -50,12 +50,14 @@ The repository builds two front-ends:
 
 ## Installation Guide (OpenCore)
 
-1. Download the latest release package for your macOS version from [Releases](https://github.com/Arxusion/AirportMtkWlan/releases):
-   * `AirportMtkWlan-Tahoe-v1.5.2-RELEASE.zip` for **macOS 26 Tahoe**
-   * `AirportMtkWlan-Sequoia-v1.5.2-RELEASE.zip` for **macOS 15 Sequoia**
+1. Download the latest release package matching your macOS version from [Releases](https://github.com/Arxusion/AirportMtkWlan/releases):
+   * `AirportMtkWlan-Sequoia-v1.7.0-RELEASE.zip` for **macOS 15 Sequoia (15.2+)**
+   * `AirportMtkWlan-Tahoe-v1.7.0-RELEASE.zip` for **macOS 26 Tahoe**
+   * *For macOS 14 Sonoma, 13 Ventura, or earlier*: Native AirPort Skywalk is not compatible; download `SimpleMtkWlan.kext` and use [SimpleMTK](https://github.com/laobamac/SimpleMTKClient) (HeliPort).
 2. Extract and place `AirportMtkWlan.kext` into your EFI directory: `EFI/OC/Kexts/`.
 3. Add the kernel extension entry to your `config.plist` under `Kernel -> Add`:
 
+#### For macOS 15 Sequoia:
 ```xml
 <dict>
     <key>Arch</key>
@@ -63,22 +65,45 @@ The repository builds two front-ends:
     <key>BundlePath</key>
     <string>AirportMtkWlan.kext</string>
     <key>Comment</key>
-    <string>MediaTek MT7921 / MT7922 Native Wi-Fi Driver</string>
+    <string>MediaTek MT7921 / MT7922 Native Wi-Fi Driver (Sequoia)</string>
     <key>Enabled</key>
     <true/>
     <key>ExecutablePath</key>
     <string>Contents/MacOS/AirportMtkWlan</string>
+    <key>MinKernel</key>
+    <string>24.0.0</string>
     <key>MaxKernel</key>
-    <string>25.99.99</string>
+    <string>24.99.99</string>
+    <key>PlistPath</key>
+    <string>Contents/Info.plist</string>
+</dict>
+```
+
+#### For macOS 26 Tahoe:
+```xml
+<dict>
+    <key>Arch</key>
+    <string>x86_64</string>
+    <key>BundlePath</key>
+    <string>AirportMtkWlan.kext</string>
+    <key>Comment</key>
+    <string>MediaTek MT7921 / MT7922 Native Wi-Fi Driver (Tahoe)</string>
+    <key>Enabled</key>
+    <true/>
+    <key>ExecutablePath</key>
+    <string>Contents/MacOS/AirportMtkWlan</string>
     <key>MinKernel</key>
     <string>25.0.0</string>
+    <key>MaxKernel</key>
+    <string>25.99.99</string>
     <key>PlistPath</key>
     <string>Contents/Info.plist</string>
 </dict>
 ```
 
 > [!IMPORTANT]
-> - Set `MinKernel` and `MaxKernel` appropriately: `25.0.0` / `25.99.99` for **Tahoe**, or `24.2.0` / `24.99.99` for **Sequoia**. The IO80211 internal vtable layouts differ across major OS releases.
+> - **Match your macOS kernel version**: Setting `MinKernel` to `25.0.0` on Sequoia (kernel 24.x) will prevent OpenCore from injecting the driver entirely! If your card shows up in Hackintool as `pci14c3,608` with no driver attached, check that your `MinKernel` / `MaxKernel` match your installed macOS version.
+> - **Pick the matching release build**: The internal `IO80211SkywalkInterface` vtables differ between Sequoia and Tahoe. Always use the build matching your operating system.
 > - Enable `Kernel -> Quirks -> DisableIoMapper` = `true` in OpenCore. The driver interacts directly with physical DMA and does not currently support AppleVTD remapping.
 > - **Do NOT** load `AirportMtkWlan.kext` and `SimpleMtkWlan.kext` simultaneously.
 

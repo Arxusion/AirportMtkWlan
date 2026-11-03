@@ -68,7 +68,10 @@ enum ieee80211_akm {
 	IEEE80211_AKM_PSK		= 0x00000002,
 	IEEE80211_AKM_SHA256_8021X	= 0x00000004,	/* 11w */
 	IEEE80211_AKM_SHA256_PSK	= 0x00000008,	/* 11w */
-	IEEE80211_AKM_SAE		= 0x00000010	/* WPA3 SAE */
+	IEEE80211_AKM_SAE		= 0x00000010,	/* WPA3 SAE */
+	IEEE80211_AKM_FT_8021X		= 0x00000020,	/* 802.11r FT 802.1X */
+	IEEE80211_AKM_FT_PSK		= 0x00000040,	/* 802.11r FT PSK */
+	IEEE80211_AKM_FT_SAE		= 0x00000080	/* 802.11r FT SAE */
 };
 
 #define IEEE80211_TKIP_HDRLEN	8
@@ -115,7 +118,8 @@ static __inline int
 ieee80211_is_8021x_akm(enum ieee80211_akm akm)
 {
 	return akm == IEEE80211_AKM_8021X ||
-	    akm == IEEE80211_AKM_SHA256_8021X;
+	    akm == IEEE80211_AKM_SHA256_8021X ||
+	    akm == IEEE80211_AKM_FT_8021X;
 }
 
 static __inline int
@@ -123,7 +127,33 @@ ieee80211_is_sha256_akm(enum ieee80211_akm akm)
 {
 	return akm == IEEE80211_AKM_SHA256_8021X ||
 	    akm == IEEE80211_AKM_SHA256_PSK ||
-	    akm == IEEE80211_AKM_SAE;
+	    akm == IEEE80211_AKM_SAE ||
+	    akm == IEEE80211_AKM_FT_8021X ||
+	    akm == IEEE80211_AKM_FT_PSK ||
+	    akm == IEEE80211_AKM_FT_SAE;
+}
+
+static __inline int
+ieee80211_is_ft_akm(enum ieee80211_akm akm)
+{
+	return akm == IEEE80211_AKM_FT_8021X ||
+	    akm == IEEE80211_AKM_FT_PSK ||
+	    akm == IEEE80211_AKM_FT_SAE;
+}
+
+static __inline int
+ieee80211_is_psk_akm(enum ieee80211_akm akm)
+{
+	return akm == IEEE80211_AKM_PSK ||
+	    akm == IEEE80211_AKM_SHA256_PSK ||
+	    akm == IEEE80211_AKM_FT_PSK;
+}
+
+static __inline int
+ieee80211_is_sae_akm(enum ieee80211_akm akm)
+{
+	return akm == IEEE80211_AKM_SAE ||
+	    akm == IEEE80211_AKM_FT_SAE;
 }
 
 struct ieee80211_key {
@@ -197,6 +227,8 @@ struct	ieee80211_pmk *ieee80211_pmksa_add(struct ieee80211com *,
 	    enum ieee80211_akm, const u_int8_t *, const u_int8_t *, u_int32_t);
 struct	ieee80211_pmk *ieee80211_pmksa_find(struct ieee80211com *,
 	    struct ieee80211_node *, const u_int8_t *);
+void	ieee80211_derive_pmkid(enum ieee80211_akm, const u_int8_t *,
+	    const u_int8_t *, const u_int8_t *, u_int8_t *);
 void	ieee80211_derive_ptk(enum ieee80211_akm, const u_int8_t *,
 	    const u_int8_t *, const u_int8_t *, const u_int8_t *,
 	    const u_int8_t *, struct ieee80211_ptk *);

@@ -495,15 +495,18 @@ IOReturn AirportItlwmSkywalkInterface::startWCLJoin(AirportWCL::JoinRequest &joi
                               APPLE80211_AUTHTYPE_WPA3_SAE | APPLE80211_AUTHTYPE_WPA3_FT_SAE))
             wpa.i_protos |= IEEE80211_WPA_PROTO_WPA2;
         if (join.upperAuth & (APPLE80211_AUTHTYPE_WPA_PSK | APPLE80211_AUTHTYPE_WPA2_PSK))
-            wpa.i_akms |= IEEE80211_WPA_AKM_PSK;
+            wpa.i_akms |= IEEE80211_WPA_AKM_PSK | IEEE80211_WPA_AKM_FT_PSK;
         if (join.upperAuth & (APPLE80211_AUTHTYPE_WPA | APPLE80211_AUTHTYPE_WPA2))
-            wpa.i_akms |= IEEE80211_WPA_AKM_8021X;
+            wpa.i_akms |= IEEE80211_WPA_AKM_8021X | IEEE80211_WPA_AKM_FT_8021X;
         if (join.upperAuth & APPLE80211_AUTHTYPE_SHA256_PSK)
             wpa.i_akms |= IEEE80211_WPA_AKM_SHA256_PSK;
         if (join.upperAuth & APPLE80211_AUTHTYPE_SHA256_8021X)
             wpa.i_akms |= IEEE80211_WPA_AKM_SHA256_8021X;
-        if (join.upperAuth & (APPLE80211_AUTHTYPE_WPA3_SAE | APPLE80211_AUTHTYPE_WPA3_FT_SAE))
+        if (join.upperAuth & (APPLE80211_AUTHTYPE_WPA3_SAE | APPLE80211_AUTHTYPE_WPA3_FT_SAE)) {
             wpa.i_akms |= IEEE80211_WPA_AKM_SAE;
+            if (join.upperAuth & APPLE80211_AUTHTYPE_WPA3_FT_SAE)
+                wpa.i_akms |= IEEE80211_WPA_AKM_FT_SAE;
+        }
         wpa.i_ciphers = IEEE80211_WPA_CIPHER_CCMP | IEEE80211_WPA_CIPHER_TKIP;
         if (join.rsnLength >= 8 && join.rsn[0] == IEEE80211_ELEMID_RSN &&
             join.rsn[4] == 0 && join.rsn[5] == 0x0f && join.rsn[6] == 0xac) {

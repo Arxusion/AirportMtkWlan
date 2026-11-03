@@ -452,6 +452,11 @@ struct ieee80211_node {
     uint32_t        ni_he_oper_params;
     uint16_t        ni_he_oper_nss_set;
     uint8_t         ni_he_optional[8];
+
+    /* 802.11r Fast BSS Transition (FT) state */
+    uint8_t         ni_has_mde;
+    uint16_t        ni_mdid;
+    uint8_t         ni_ft_cap_policy;
     
 	/* Timeout handlers which trigger Tx Block Ack negotiation. */
 	CTimeout*		ni_addba_req_to[IEEE80211_NUM_TID];
@@ -513,6 +518,7 @@ struct ieee80211_node {
 #define IEEE80211_NODE_VHT_SGI80    0x80000    /* SGI on 80 MHz negotiated */
 #define IEEE80211_NODE_VHT_SGI160   0x100000    /* SGI on 160 MHz negotiated */
 #define IEEE80211_NODE_HE       0x200000    /* HE negotiated */
+#define IEEE80211_NODE_MDE      0x400000    /* Mobility Domain Element present */
 
 	/* If not NULL, this function gets called when ni_refcnt hits zero. */
 	void			(*ni_unref_cb)(struct ieee80211com *,
