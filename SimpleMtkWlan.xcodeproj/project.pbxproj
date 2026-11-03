@@ -82,7 +82,9 @@
 		F8C2EC582408031A007A9422 /* ieee80211_regdomain.h in Headers */ = {isa = PBXBuildFile; fileRef = F8C2EC3824080319007A9422 /* ieee80211_regdomain.h */; };
 		F8C2EC592408031A007A9422 /* ieee80211_mira.c in Sources */ = {isa = PBXBuildFile; fileRef = F8C2EC3924080319007A9422 /* ieee80211_mira.c */; };
 		F8C2EC5A2408031A007A9422 /* ieee80211_crypto.h in Headers */ = {isa = PBXBuildFile; fileRef = F8C2EC3A24080319007A9422 /* ieee80211_crypto.h */; };
+		F8C2EC712408031A007A9422 /* ieee80211_sae.h in Headers */ = {isa = PBXBuildFile; fileRef = F8C2EC4824080319007A9422 /* ieee80211_sae.h */; };
 		F8C2EC5B2408031A007A9422 /* ieee80211_crypto_bip.c in Sources */ = {isa = PBXBuildFile; fileRef = F8C2EC3B24080319007A9422 /* ieee80211_crypto_bip.c */; };
+		F8C2EC702408031A007A9422 /* ieee80211_sae.cpp in Sources */ = {isa = PBXBuildFile; fileRef = F8C2EC4724080319007A9422 /* ieee80211_sae.cpp */; };
 		F8C2EC5C2408031A007A9422 /* ieee80211_crypto_tkip.c in Sources */ = {isa = PBXBuildFile; fileRef = F8C2EC3C24080319007A9422 /* ieee80211_crypto_tkip.c */; };
 		F8C2EC5D2408031A007A9422 /* ieee80211_crypto_ccmp.c in Sources */ = {isa = PBXBuildFile; fileRef = F8C2EC3D24080319007A9422 /* ieee80211_crypto_ccmp.c */; };
 		F8C2EC5E2408031A007A9422 /* ieee80211_pae_input.c in Sources */ = {isa = PBXBuildFile; fileRef = F8C2EC3E24080319007A9422 /* ieee80211_pae_input.c */; };
@@ -208,7 +210,9 @@
 		F8C2EC3824080319007A9422 /* ieee80211_regdomain.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = ieee80211_regdomain.h; sourceTree = "<group>"; };
 		F8C2EC3924080319007A9422 /* ieee80211_mira.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = ieee80211_mira.c; sourceTree = "<group>"; };
 		F8C2EC3A24080319007A9422 /* ieee80211_crypto.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = ieee80211_crypto.h; sourceTree = "<group>"; };
+		F8C2EC4824080319007A9422 /* ieee80211_sae.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = ieee80211_sae.h; sourceTree = "<group>"; };
 		F8C2EC3B24080319007A9422 /* ieee80211_crypto_bip.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = ieee80211_crypto_bip.c; sourceTree = "<group>"; };
+		F8C2EC4724080319007A9422 /* ieee80211_sae.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = ieee80211_sae.cpp; sourceTree = "<group>"; };
 		F8C2EC3C24080319007A9422 /* ieee80211_crypto_tkip.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = ieee80211_crypto_tkip.c; sourceTree = "<group>"; };
 		F8C2EC3D24080319007A9422 /* ieee80211_crypto_ccmp.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = ieee80211_crypto_ccmp.c; sourceTree = "<group>"; };
 		F8C2EC3E24080319007A9422 /* ieee80211_pae_input.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = ieee80211_pae_input.c; sourceTree = "<group>"; };
@@ -427,7 +431,9 @@
 				F8C2EC3824080319007A9422 /* ieee80211_regdomain.h */,
 				F8C2EC3924080319007A9422 /* ieee80211_mira.c */,
 				F8C2EC3A24080319007A9422 /* ieee80211_crypto.h */,
+				F8C2EC4824080319007A9422 /* ieee80211_sae.h */,
 				F8C2EC3B24080319007A9422 /* ieee80211_crypto_bip.c */,
+				F8C2EC4724080319007A9422 /* ieee80211_sae.cpp */,
 				F8C2EC3C24080319007A9422 /* ieee80211_crypto_tkip.c */,
 				F8C2EC3D24080319007A9422 /* ieee80211_crypto_ccmp.c */,
 				F8C2EC462408031A007A9422 /* ieee80211_crypto_wep.c */,
@@ -582,6 +588,7 @@
 				F8C2EC642408031A007A9422 /* ieee80211_priv.h in Headers */,
 				024A07B023FCBC3C009FBA6C /* SimpleMtkWlan.hpp in Headers */,
 				F8C2EC5A2408031A007A9422 /* ieee80211_crypto.h in Headers */,
+				F8C2EC712408031A007A9422 /* ieee80211_sae.h in Headers */,
 				F8C2EC582408031A007A9422 /* ieee80211_regdomain.h in Headers */,
 				024A085323FCBC6C009FBA6C /* spr.h in Headers */,
 			);
@@ -672,6 +679,7 @@
 				F8C2EC602408031A007A9422 /* ieee80211_amrr.c in Sources */,
 				F8C2EC6B2408031A007A9422 /* ieee80211_regdomain.c in Sources */,
 				F8C2EC5B2408031A007A9422 /* ieee80211_crypto_bip.c in Sources */,
+				F8C2EC702408031A007A9422 /* ieee80211_sae.cpp in Sources */,
 				F8C2EC572408031A007A9422 /* timeout.c in Sources */,
 				F88D2B3D2414E64000BBE700 /* sha1-pbkdf2.c in Sources */,
 				A5FA2AE428A797B200847103 /* _ifq.cpp in Sources */,
@@ -777,7 +785,7 @@
 				KERNEL_EXTENSION_HEADER_SEARCH_PATHS = "$(PROJECT_DIR)/MacKernelSDK/Headers";
 				KERNEL_FRAMEWORK_HEADERS = "$(PROJECT_DIR)/MacKernelSDK/Headers";
 				MACOSX_DEPLOYMENT_TARGET = 10.12;
-				MODULE_VERSION = 1.5.3;
+				MODULE_VERSION = 1.6.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				OTHER_CPLUSPLUSFLAGS = (
@@ -845,7 +853,7 @@
 				KERNEL_EXTENSION_HEADER_SEARCH_PATHS = "$(PROJECT_DIR)/MacKernelSDK/Headers";
 				KERNEL_FRAMEWORK_HEADERS = "$(PROJECT_DIR)/MacKernelSDK/Headers";
 				MACOSX_DEPLOYMENT_TARGET = 10.12;
-				MODULE_VERSION = 1.5.3;
+				MODULE_VERSION = 1.6.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				OTHER_CPLUSPLUSFLAGS = (

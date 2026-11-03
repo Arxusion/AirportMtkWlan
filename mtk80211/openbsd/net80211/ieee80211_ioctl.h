@@ -265,6 +265,7 @@ struct ieee80211_wpapsk {
 #define IEEE80211_WPA_AKM_8021X		0x02
 #define IEEE80211_WPA_AKM_SHA256_PSK	0x04
 #define IEEE80211_WPA_AKM_SHA256_8021X	0x08
+#define IEEE80211_WPA_AKM_SAE		0x10
 
 struct ieee80211_wpaparams {
 	char	i_name[IFNAMSIZ];		/* if_name, e.g. "wi0" */

@@ -433,12 +433,23 @@ IOReturn AirportItlwmSkywalkInterface::beginWCLJoin(apple80211AssocCandidates *r
 
 IOReturn AirportItlwmSkywalkInterface::startWCLJoin(AirportWCL::JoinRequest &join)
 {
-    if (join.upperAuth & ((1u << 12) | (1u << 13))) {
-        join.upperAuth &= ~((1u << 12) | (1u << 13));
-        join.upperAuth |= (1u << 3); // Map WPA3-SAE to WPA2-PSK
-    }
+    bool was_sae = (join.upperAuth & (APPLE80211_AUTHTYPE_WPA3_SAE | APPLE80211_AUTHTYPE_WPA3_FT_SAE)) != 0;
     if (join.rsnLength) {
         join.rsnLength = AirportWCL::selectWPA2TransitionMode(join.rsn, join.rsnLength);
+    }
+    if (was_sae) {
+        // If selectWPA2TransitionMode downgraded transition network to WPA2-PSK, map to PSK
+        bool still_sae = false;
+        for (size_t i = 0; i + 4 <= join.rsnLength; i++) {
+            if (join.rsn[i] == 0 && join.rsn[i+1] == 0x0f && join.rsn[i+2] == 0xac && join.rsn[i+3] == 8) {
+                still_sae = true;
+                break;
+            }
+        }
+        if (!still_sae) {
+            join.upperAuth &= ~(APPLE80211_AUTHTYPE_WPA3_SAE | APPLE80211_AUTHTYPE_WPA3_FT_SAE);
+            join.upperAuth |= APPLE80211_AUTHTYPE_WPA2_PSK;
+        }
     }
     auto auth = AirportWCL::classifyLegacyAuth(join);
     XYLog("WCL join ssid_len=%u bssid=%s chanspec=0x%x auth lower=%u upper=0x%x -> %s, key len=%u type=%u%s, rsn_ie len=%u\n",
@@ -480,7 +491,8 @@ IOReturn AirportItlwmSkywalkInterface::startWCLJoin(AirportWCL::JoinRequest &joi
         if (join.upperAuth & (APPLE80211_AUTHTYPE_WPA | APPLE80211_AUTHTYPE_WPA_PSK))
             wpa.i_protos |= IEEE80211_WPA_PROTO_WPA1;
         if (join.upperAuth & (APPLE80211_AUTHTYPE_WPA2 | APPLE80211_AUTHTYPE_WPA2_PSK |
-                              APPLE80211_AUTHTYPE_SHA256_PSK | APPLE80211_AUTHTYPE_SHA256_8021X))
+                              APPLE80211_AUTHTYPE_SHA256_PSK | APPLE80211_AUTHTYPE_SHA256_8021X |
+                              APPLE80211_AUTHTYPE_WPA3_SAE | APPLE80211_AUTHTYPE_WPA3_FT_SAE))
             wpa.i_protos |= IEEE80211_WPA_PROTO_WPA2;
         if (join.upperAuth & (APPLE80211_AUTHTYPE_WPA_PSK | APPLE80211_AUTHTYPE_WPA2_PSK))
             wpa.i_akms |= IEEE80211_WPA_AKM_PSK;
@@ -490,6 +502,8 @@ IOReturn AirportItlwmSkywalkInterface::startWCLJoin(AirportWCL::JoinRequest &joi
             wpa.i_akms |= IEEE80211_WPA_AKM_SHA256_PSK;
         if (join.upperAuth & APPLE80211_AUTHTYPE_SHA256_8021X)
             wpa.i_akms |= IEEE80211_WPA_AKM_SHA256_8021X;
+        if (join.upperAuth & (APPLE80211_AUTHTYPE_WPA3_SAE | APPLE80211_AUTHTYPE_WPA3_FT_SAE))
+            wpa.i_akms |= IEEE80211_WPA_AKM_SAE;
         wpa.i_ciphers = IEEE80211_WPA_CIPHER_CCMP | IEEE80211_WPA_CIPHER_TKIP;
         if (join.rsnLength >= 8 && join.rsn[0] == IEEE80211_ELEMID_RSN &&
             join.rsn[4] == 0 && join.rsn[5] == 0x0f && join.rsn[6] == 0xac) {
@@ -503,16 +517,26 @@ IOReturn AirportItlwmSkywalkInterface::startWCLJoin(AirportWCL::JoinRequest &joi
         }
         if (personal) {
             if (AirportWCL::isPassphrase(join)) {
-                char passphrase[33] = {};
-                memcpy(passphrase, join.key, join.keyLength);
+                char passphrase[64] = {};
+                size_t passlen = join.keyLength < sizeof(passphrase) ? join.keyLength : sizeof(passphrase) - 1;
+                memcpy(passphrase, join.key, passlen);
+                passphrase[passlen] = '\0';
+
+                // Save passphrase for SAE Dragonfly Hunting-and-Pecking
+                memcpy(ic->ic_sae_password, passphrase, passlen + 1);
+                ic->ic_sae_password_len = (uint8_t)passlen;
+
+                // Also derive PSK for WPA2-PSK fallback
                 pbkdf2_sha1(passphrase, join.ssid, join.ssidLength, 4096,
                             ic->ic_psk, sizeof(ic->ic_psk));
                 explicit_bzero(passphrase, sizeof(passphrase));
-            } else
+            } else {
                 memcpy(ic->ic_psk, join.key, sizeof(ic->ic_psk));
+            }
             ic->ic_flags |= IEEE80211_F_PSK;
-            XYLog("WCL join PSK key check %02x\n",
-                  ieee80211_key_check(ic->ic_psk, sizeof(ic->ic_psk)));
+            XYLog("WCL join PSK key check %02x (SAE=%d)\n",
+                  ieee80211_key_check(ic->ic_psk, sizeof(ic->ic_psk)),
+                  (join.upperAuth & (APPLE80211_AUTHTYPE_WPA3_SAE | APPLE80211_AUTHTYPE_WPA3_FT_SAE)) != 0);
         } else if (join.keyLength == IEEE80211_PMK_LEN) {
             bool cached = true;
             if (join.upperAuth & (APPLE80211_AUTHTYPE_WPA | APPLE80211_AUTHTYPE_WPA2))

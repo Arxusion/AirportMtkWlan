@@ -81,6 +81,7 @@
 
 #include <net80211/ieee80211_var.h>
 #include <net80211/ieee80211_priv.h>
+#include <net80211/ieee80211_sae.h>
 
 int	ieee80211_mgmt_output(struct _ifnet *, struct ieee80211_node *,
 	    mbuf_t, int);
@@ -1078,6 +1079,11 @@ ieee80211_add_rsn_body(u_int8_t *frm, struct ieee80211com *ic,
         *frm++ = 6;
         count++;
     }
+    if (!wpa && (ni->ni_rsnakms & IEEE80211_AKM_SAE)) {
+        memcpy(frm, oui, 3); frm += 3;
+        *frm++ = 8;
+        count++;
+    }
     /* write AKM Suite List Count field */
     LE_WRITE_2(pcount, count);
 
@@ -1087,9 +1093,10 @@ ieee80211_add_rsn_body(u_int8_t *frm, struct ieee80211com *ic,
     /* write RSN Capabilities field */
     rsncaps = (ni->ni_rsncaps & (IEEE80211_RSNCAP_PTKSA_RCNT_MASK |
         IEEE80211_RSNCAP_GTKSA_RCNT_MASK));
-    if ((ic->ic_caps & IEEE80211_C_MFP) && (ni->ni_flags & IEEE80211_NODE_MFP)) {
+    if ((ni->ni_rsnakms & IEEE80211_AKM_SAE) ||
+        ((ic->ic_caps & IEEE80211_C_MFP) && (ni->ni_flags & IEEE80211_NODE_MFP))) {
         rsncaps |= IEEE80211_RSNCAP_MFPC;
-        if (ic->ic_flags & IEEE80211_F_MFPR)
+        if ((ni->ni_rsnakms & IEEE80211_AKM_SAE) || (ic->ic_flags & IEEE80211_F_MFPR))
             rsncaps |= IEEE80211_RSNCAP_MFPR;
     }
     if (ic->ic_flags & IEEE80211_F_PBAR)
@@ -1104,7 +1111,8 @@ ieee80211_add_rsn_body(u_int8_t *frm, struct ieee80211com *ic,
         frm += IEEE80211_PMKID_LEN;
     }
 
-    if (!((ic->ic_caps & IEEE80211_C_MFP) && (ni->ni_flags & IEEE80211_NODE_MFP)))
+    if (!((ni->ni_rsnakms & IEEE80211_AKM_SAE) ||
+          ((ic->ic_caps & IEEE80211_C_MFP) && (ni->ni_flags & IEEE80211_NODE_MFP))))
         return frm;
 
     if ((ni->ni_flags & IEEE80211_NODE_PMKID) == 0) {
@@ -1505,6 +1513,14 @@ mbuf_t
 ieee80211_get_auth(struct ieee80211com *ic, struct ieee80211_node *ni,
     u_int16_t status, u_int16_t seq)
 {
+    if (ni != NULL && (ni->ni_rsnakms & IEEE80211_AKM_SAE)) {
+        if (seq == 1) {
+            return ieee80211_sae_build_commit(ic, ni);
+        } else if (seq == 2) {
+            return ieee80211_sae_build_confirm(ic, ni);
+        }
+    }
+
 	mbuf_t m;
     u_int8_t *frm;
     

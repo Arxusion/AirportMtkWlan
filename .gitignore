@@ -24,3 +24,4 @@ DerivedData/
 *.zip
 tests/scan/scan.cpp
 tests/scan/scan-test
+tests/sae/test-sae

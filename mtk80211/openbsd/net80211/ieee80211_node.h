@@ -406,6 +406,9 @@ struct ieee80211_node {
 	u_int8_t		ni_key_count;
 	int			ni_port_valid;
 
+	/* WPA3 SAE */
+	struct ieee80211_sae	*ni_sae;
+
 	/* SA Query */
 	u_int16_t		ni_sa_query_trid;
 	CTimeout*		ni_sa_query_to;

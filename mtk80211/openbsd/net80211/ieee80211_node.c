@@ -76,6 +76,7 @@
 
 #include <net80211/ieee80211_var.h>
 #include <net80211/ieee80211_priv.h>
+#include <net80211/ieee80211_sae.h>
 
 struct ieee80211_node *ieee80211_node_alloc(struct ieee80211com *);
 void ieee80211_node_free(struct ieee80211com *, struct ieee80211_node *);
@@ -314,6 +315,8 @@ ieee80211_ess_setwpaparms(struct ieee80211_ess *ess,
         ess->rsnakms |= IEEE80211_AKM_8021X;
     if (wpa->i_akms & IEEE80211_WPA_AKM_SHA256_8021X)
         ess->rsnakms |= IEEE80211_AKM_SHA256_8021X;
+    if (wpa->i_akms & IEEE80211_WPA_AKM_SAE)
+        ess->rsnakms |= IEEE80211_AKM_SAE;
     if (ess->rsnakms == 0)	/* set to default (PSK) */
         ess->rsnakms = IEEE80211_AKM_PSK;
     
@@ -1625,8 +1628,10 @@ ieee80211_choose_rsnparams(struct ieee80211com *ic)
     
     /* filter out unsupported AKMPs */
     ni->ni_rsnakms &= ic->ic_rsnakms;
-    /* prefer SHA-256 based AKMPs */
-    if ((ic->ic_flags & IEEE80211_F_PSK) && (ni->ni_rsnakms &
+    /* prefer SAE, then SHA-256 based AKMPs */
+    if (ni->ni_rsnakms & IEEE80211_AKM_SAE) {
+        ni->ni_rsnakms = IEEE80211_AKM_SAE;
+    } else if ((ic->ic_flags & IEEE80211_F_PSK) && (ni->ni_rsnakms &
                                              (IEEE80211_AKM_PSK | IEEE80211_AKM_SHA256_PSK))) {
         /* AP supports PSK AKMP and a PSK is configured */
         if (ni->ni_rsnakms & IEEE80211_AKM_SHA256_PSK)
@@ -1656,10 +1661,13 @@ ieee80211_choose_rsnparams(struct ieee80211com *ic)
         ni->ni_rsnciphers = IEEE80211_CIPHER_TKIP;
     ni->ni_rsncipher = (enum ieee80211_cipher)ni->ni_rsnciphers;
     
-    /* use MFP if we both support it */
-    if ((ic->ic_caps & IEEE80211_C_MFP) &&
-        (ni->ni_rsncaps & IEEE80211_RSNCAP_MFPC))
+    /* use MFP if we both support it, or mandatory for SAE */
+    if ((ni->ni_rsnakms & IEEE80211_AKM_SAE) ||
+        ((ic->ic_caps & IEEE80211_C_MFP) &&
+         (ni->ni_rsncaps & IEEE80211_RSNCAP_MFPC))) {
         ni->ni_flags |= IEEE80211_NODE_MFP;
+        ni->ni_rsngroupmgmtcipher = ic->ic_rsngroupmgmtcipher;
+    }
 }
 
 int
@@ -1708,6 +1716,7 @@ ieee80211_node_cleanup(struct ieee80211com *ic, struct ieee80211_node *ni)
         ni->ni_unref_arg = NULL;
         ni->ni_unref_arg_size = 0;
     }
+    ieee80211_sae_free(ni);
     
 #ifndef IEEE80211_STA_ONLY
     mq_purge(&ni->ni_savedq);

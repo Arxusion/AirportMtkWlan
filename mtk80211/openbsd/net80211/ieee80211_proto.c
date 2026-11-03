@@ -76,6 +76,7 @@
 
 #include <net80211/ieee80211_var.h>
 #include <net80211/ieee80211_priv.h>
+#include <net80211/ieee80211_sae.h>
 
 const char * const ieee80211_mgt_subtype_name[] = {
 	"assoc_req",	"assoc_resp",	"reassoc_req",	"reassoc_resp",
@@ -1581,6 +1582,12 @@ justcleanup:
 				    ieee80211_state_name[nstate]);
 			break;
 		case IEEE80211_S_SCAN:
+			if (ni->ni_rsnakms & IEEE80211_AKM_SAE) {
+				if (ieee80211_sae_start(ic, ni) != 0) {
+					XYLog("%s: failed to start SAE, aborting auth\n", ifp->if_xname);
+					break;
+				}
+			}
 			IEEE80211_SEND_MGMT(ic, ni,
 			    IEEE80211_FC0_SUBTYPE_AUTH, 1);
 			break;
