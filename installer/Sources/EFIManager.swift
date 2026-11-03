@@ -401,9 +401,9 @@ public class EFIManager {
         
         let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         if output.contains("AirportMtkWlan") {
-            return DriverStatus(isLoaded: true, loadedVersion: "1.6.0", kextIdentifier: "com.flxxxxddd.AirportMtkWlan")
+            return DriverStatus(isLoaded: true, loadedVersion: "1.6.1", kextIdentifier: "com.flxxxxddd.AirportMtkWlan")
         } else if output.contains("SimpleMtkWlan") {
-            return DriverStatus(isLoaded: true, loadedVersion: "1.6.0", kextIdentifier: "com.laobamac.SimpleMtkWlan")
+            return DriverStatus(isLoaded: true, loadedVersion: "1.6.1", kextIdentifier: "com.laobamac.SimpleMtkWlan")
         }
         return DriverStatus(isLoaded: false, loadedVersion: nil, kextIdentifier: nil)
     }

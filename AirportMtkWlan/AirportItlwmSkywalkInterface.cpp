@@ -616,7 +616,10 @@ getRATE(struct apple80211_rate_data *rd)
         if (rx_kbps != 0 && (ic->ic_bss->ni_flags & (IEEE80211_NODE_HE | IEEE80211_NODE_VHT | IEEE80211_NODE_HT))) {
             rd->rate[0] = (rx_kbps + 500) / 1000;
         } else if (ic->ic_bss->ni_flags & IEEE80211_NODE_HE) {
-            rd->rate[0] = 0;
+            bool wide = (ic->ic_bss->ni_chw == IEEE80211_CHAN_WIDTH_160);
+            int bw = wide ? 3 : (ic->ic_bss->ni_chw == IEEE80211_CHAN_WIDTH_80 ? 2 : (ic->ic_bss->ni_chw == IEEE80211_CHAN_WIDTH_40 ? 1 : 0));
+            nss = fHalService->getDriverInfo()->getTxNSS();
+            rd->rate[0] = (bw == 3 ? 1201 : bw == 2 ? 600 : bw == 1 ? 287 : 143) * nss;
         } else if (ic->ic_curmode == IEEE80211_MODE_11AC) {
             if (sgi)
                 index += 1;

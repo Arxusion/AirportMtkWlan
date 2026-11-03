@@ -36,7 +36,7 @@
 			<key>IOMatchCategory</key>
 			<string>IODefaultMatchCategory</string>
 			<key>IOPCIPrimaryMatch</key>
-			<string>0x796114c3 0x060814c3 0x792214c3</string>
+			<string>0x796114c3 0x060814c3 0x792214c3 0x061614c3</string>
 			<key>IOProbeScore</key>
 			<integer>2000</integer>
 			<key>IOProviderClass</key>

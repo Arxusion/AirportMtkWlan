@@ -100,6 +100,7 @@ Configuration properties can be set in OpenCore NVRAM (`7C436110-AB2A-4BBB-A880-
 Optional boot arguments can be added to `boot-args` in OpenCore:
 
 * `mtk_cc=XX` — Overrides the 2-letter ISO country code.
+* `-no160` — Restricts 802.11ac/ax to 80 MHz channel width (disables 160 MHz).
 * `-novht` — Disables 802.11ac VHT capabilities (limits connection to 802.11n).
 * `-noht40` — Restricts 802.11n to 20 MHz channel width.
 * `-mtknoamsdu` — Disables hardware TX A-MSDU inside A-MPDU aggregation.

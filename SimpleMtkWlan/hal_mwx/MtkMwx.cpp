@@ -82,6 +82,7 @@ OSDefineMetaClassAndStructors(MtkMwx, MtkHalService)
 #define PCI_PRODUCT_MEDIATEK_MT7921    0x7961
 #define PCI_PRODUCT_MEDIATEK_MT7921K   0x0608
 #define PCI_PRODUCT_MEDIATEK_MT7922    0x7922
+#define PCI_PRODUCT_MEDIATEK_MT7922K   0x0616
 
 /*
  * RX rate histogram from the P-RXV (RXD group 3) of unicast frames, to see
@@ -100,11 +101,20 @@ static uint32_t mwx_rxr_sgi, mwx_rxr_stbc, mwx_rxr_ldpc, mwx_rxr_total;
 static int mwx_rxr_last_mcs = -1;
 static uint32_t mwx_rxr_last_kbps;
 
-/* HT/VHT 1SS long GI data rates in 100 kbit/s, by bandwidth and MCS. */
-static const uint16_t mwx_vht_rate[3][10] = {
+/* HT/VHT 1SS long GI data rates in 100 kbit/s, by bandwidth (20/40/80/160) and MCS 0-9. */
+static const uint16_t mwx_vht_rate[4][10] = {
 	{ 65, 130, 195, 260, 390, 520, 585, 650, 780, 867 },
 	{ 135, 270, 405, 540, 810, 1080, 1215, 1350, 1620, 1800 },
 	{ 293, 585, 878, 1170, 1755, 2340, 2633, 2925, 3510, 3900 },
+	{ 585, 1170, 1755, 2340, 3510, 4680, 5265, 5850, 7020, 7800 },
+};
+
+/* HE (802.11ax) 1SS 0.8us GI data rates in 100 kbit/s, by bandwidth (20/40/80/160) and MCS 0-11. */
+static const uint16_t mwx_he_rate[4][12] = {
+	{ 86, 172, 258, 344, 516, 688, 774, 860, 1032, 1147, 1290, 1434 },
+	{ 172, 344, 516, 688, 1032, 1376, 1549, 1721, 2065, 2294, 2581, 2868 },
+	{ 360, 721, 1081, 1441, 2162, 2882, 3243, 3603, 4324, 4804, 5404, 6005 },
+	{ 721, 1441, 2162, 2882, 4324, 5765, 6485, 7206, 8647, 9608, 10809, 12010 },
 };
 
 static void
@@ -112,10 +122,11 @@ mwx_rx_rate_account(uint32_t v0)
 {
 	uint32_t mode = MWX_PRXV_TX_MODE(v0), idx = MWX_PRXV_TX_RATE(v0);
 	uint32_t nss = MWX_PRXV_NSTS(v0) + 1;
+	uint32_t bw = MWX_PRXV_FRAME_MODE(v0) & 3;
 
 	mwx_rxr_total++;
-	mwx_rxr_mode[mode]++;
-	mwx_rxr_bw[MWX_PRXV_FRAME_MODE(v0) & 3]++;
+	mwx_rxr_mode[mode & 0xf]++;
+	mwx_rxr_bw[bw]++;
 	if (mode == 2 || mode == 3) {		/* HT: idx = MCS 0-15 */
 		nss = (idx >> 3) + 1;
 		idx &= 7;
@@ -129,9 +140,13 @@ mwx_rx_rate_account(uint32_t v0)
 	if (MWX_PRXV_LDPC(v0))
 		mwx_rxr_ldpc++;
 
-	if (mode >= 2 && mode <= 4 && idx <= 9 && (MWX_PRXV_FRAME_MODE(v0) & 3) < 3) {
-		uint32_t kbps = mwx_vht_rate[MWX_PRXV_FRAME_MODE(v0) & 3][idx] *
-		    100 * nss;
+	if (mode >= MT_PHY_TYPE_HE_SU && mode <= MT_PHY_TYPE_HE_MU && (idx & 0xf) <= 11) {
+		uint32_t he_mcs = idx & 0xf;
+		uint32_t kbps = mwx_he_rate[bw][he_mcs] * 100 * nss;
+		mwx_rxr_last_kbps = kbps;
+		mwx_rxr_last_mcs = (int)he_mcs;
+	} else if (mode >= 2 && mode <= 4 && idx <= 9) {
+		uint32_t kbps = mwx_vht_rate[bw][idx] * 100 * nss;
 		if (MWX_PRXV_SGI(v0))
 			kbps = kbps * 10 / 9;
 		mwx_rxr_last_kbps = kbps;
@@ -363,6 +378,7 @@ static const struct pci_matchid mwx_devices[] = {
 	{ PCI_VENDOR_MEDIATEK, PCI_PRODUCT_MEDIATEK_MT7921 },
 	{ PCI_VENDOR_MEDIATEK, PCI_PRODUCT_MEDIATEK_MT7921K },
 	{ PCI_VENDOR_MEDIATEK, PCI_PRODUCT_MEDIATEK_MT7922 },
+	{ PCI_VENDOR_MEDIATEK, PCI_PRODUCT_MEDIATEK_MT7922K },
 };
 
 /* Keep the OpenBSD DPRINTF path available, but do not enable it by default.
@@ -2345,7 +2361,10 @@ mwx_preinit(struct mwx_softc *sc)
 			    IEEE80211_CHAN_HT20 | IEEE80211_CHAN_HT40 |
 			    IEEE80211_CHAN_VHT20 |
 			    IEEE80211_CHAN_VHT40 | IEEE80211_CHAN_VHT80;
-			if ((chan >= 36 && chan <= 64) || (chan >= 100 && chan <= 128))
+			int no_160 = 0;
+			if ((sc->sc_hwtype == MWX_HW_MT7922) &&
+			    !PE_parse_boot_argn("-no160", &no_160, sizeof(no_160)) &&
+			    ((chan >= 36 && chan <= 64) || (chan >= 100 && chan <= 128)))
 				ic->ic_channels[chan].ic_flags |= IEEE80211_CHAN_VHT160;
 		}
 	}
@@ -2437,7 +2456,8 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 	sc->sc_dmat = pa->pa_dmat;
 	sc->sc_intr_mask = MT_INT_RX_DONE_ALL | MT_INT_TX_DONE_ALL |
 	    MT_INT_MCU_CMD;
-	if (PCI_PRODUCT(pa->pa_id) == PCI_PRODUCT_MEDIATEK_MT7922)
+	if (PCI_PRODUCT(pa->pa_id) == PCI_PRODUCT_MEDIATEK_MT7922 ||
+	    PCI_PRODUCT(pa->pa_id) == PCI_PRODUCT_MEDIATEK_MT7922K)
 		sc->sc_hwtype = MWX_HW_MT7922;
 	else
 		sc->sc_hwtype = MWX_HW_MT7921;
@@ -2603,8 +2623,6 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 	 */
 	ic->ic_vhtcaps = IEEE80211_VHTCAP_MAX_MPDU_LENGTH_3895 |
 	    IEEE80211_VHTCAP_RXLDPC | IEEE80211_VHTCAP_SHORT_GI_80 |
-	    IEEE80211_VHTCAP_SHORT_GI_160 |
-	    IEEE80211_VHTCAP_SUPP_CHAN_WIDTH_160MHZ |
 	    IEEE80211_VHTCAP_RXSTBC_1 |
 	    IEEE80211_VHTCAP_SU_BEAMFORMEE_CAPABLE |
 	    IEEE80211_VHTCAP_MU_BEAMFORMEE_CAPABLE |
@@ -2612,19 +2630,38 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 	    (3U << IEEE80211_VHTCAP_MAX_A_MPDU_LENGTH_EXPONENT_SHIFT) |
 	    IEEE80211_VHTCAP_RX_ANTENNA_PATTERN |
 	    IEEE80211_VHTCAP_TX_ANTENNA_PATTERN;
-	/* 2 bits per NSS: 2 = MCS 0-9, 3 = not supported */
-	ic->ic_vht_rx_mcs_map = 0xfffa;
-	ic->ic_vht_tx_mcs_map = 0xfffa;
-	ic->ic_vht_rx_highest = 0;
-	ic->ic_vht_tx_highest = 0;
 
-	/* 802.11ax Wi-Fi 6 HE 160 MHz capabilities & MCS rates */
-	ic->ic_he_cap_elem.phy_cap_info[0] |=
-	    IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_160MHZ_IN_5G;
-	ic->ic_he_mcs_nss_supp.rx_mcs_80 = htole16(0xfffa);
-	ic->ic_he_mcs_nss_supp.tx_mcs_80 = htole16(0xfffa);
-	ic->ic_he_mcs_nss_supp.rx_mcs_160 = htole16(0xfffa);
-	ic->ic_he_mcs_nss_supp.tx_mcs_160 = htole16(0xfffa);
+	{
+		bool enable_160 = (sc->sc_hwtype == MWX_HW_MT7922);
+		int no_160 = 0;
+		if (PE_parse_boot_argn("-no160", &no_160, sizeof(no_160)))
+			enable_160 = false;
+
+		if (enable_160) {
+			ic->ic_vhtcaps |= IEEE80211_VHTCAP_SHORT_GI_160 |
+			    IEEE80211_VHTCAP_SUPP_CHAN_WIDTH_160MHZ;
+		}
+		/* 2 bits per NSS: 2 = MCS 0-9, 3 = not supported */
+		ic->ic_vht_rx_mcs_map = 0xfffa;
+		ic->ic_vht_tx_mcs_map = 0xfffa;
+		ic->ic_vht_rx_highest = 0;
+		ic->ic_vht_tx_highest = 0;
+
+		/* 802.11ax Wi-Fi 6 HE capabilities & MCS rates */
+		ic->ic_he_mcs_nss_supp.rx_mcs_80 = htole16(0xfffa);
+		ic->ic_he_mcs_nss_supp.tx_mcs_80 = htole16(0xfffa);
+		if (enable_160) {
+			ic->ic_he_cap_elem.phy_cap_info[0] |=
+			    IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_160MHZ_IN_5G;
+			ic->ic_he_mcs_nss_supp.rx_mcs_160 = htole16(0xfffa);
+			ic->ic_he_mcs_nss_supp.tx_mcs_160 = htole16(0xfffa);
+		} else {
+			ic->ic_he_mcs_nss_supp.rx_mcs_160 = htole16(0xffff);
+			ic->ic_he_mcs_nss_supp.tx_mcs_160 = htole16(0xffff);
+		}
+		ic->ic_he_mcs_nss_supp.rx_mcs_80p80 = htole16(0xffff);
+		ic->ic_he_mcs_nss_supp.tx_mcs_80p80 = htole16(0xffff);
+	}
 
 #if NOTYET
 	ic->ic_vhtcaps = IEEE80211_VHTCAP_MAX_MPDU_LENGTH_11454 |
@@ -5413,7 +5450,7 @@ mt7921_mcu_set_channel_domain(struct mwx_softc *sc)
 		channel++;
 		n_2ch++;
 	}
-	hdr->bw_5g = 3; /* BW_20_40_80_160M */
+	hdr->bw_5g = (sc->sc_hwtype == MWX_HW_MT7922) ? 3 : 2; /* 3 = 160M, 2 = 80M */
 	for (i = 0; i <= IEEE80211_CHAN_MAX; i++) {
 		chan = &ic->ic_channels[i];
 		if (!IEEE80211_IS_CHAN_5GHZ(chan))
@@ -5427,7 +5464,7 @@ mt7921_mcu_set_channel_domain(struct mwx_softc *sc)
 	}
 #ifdef NOTYET
 	/* 6GHz handling */
-	hdr->bw_6g = 3; /* BW_20_40_80_160M */
+	hdr->bw_6g = (sc->sc_hwtype == MWX_HW_MT7922) ? 3 : 2; /* 3 = 160M, 2 = 80M */
 	for (i = 0; i <= IEEE80211_CHAN_MAX; i++) {
 		chan = &ic->ic_channels[i];
 		if (!IEEE80211_IS_CHAN_6GHZ(chan))
