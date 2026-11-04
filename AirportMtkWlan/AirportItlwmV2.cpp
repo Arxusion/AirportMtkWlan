@@ -534,10 +534,6 @@ void AirportItlwm::stop(IOService *provider)
     setLinkStatus(kIONetworkLinkValid);
     fHalService->detach(pciNub);
     ether_ifdetach(ifp);
-    if (fAwdlIf) {
-        detachVirtualInterface(fAwdlIf, true);
-        fAwdlIf = NULL;
-    }
     detachInterface(fNetIf, true);
     OSSafeReleaseNULL(fNetIf);
     releaseAll();
@@ -1050,15 +1046,6 @@ getCARD_CAPABILITIES(OSObject *object,
     // WCL uses this capability together with the BSS HE IE for PHY reporting.
     if (caps & IEEE80211_C_HE)
         cd->capabilities[17] |= 0x80;
-    // Capability 75 (byte 9, bit 3): WPA3-SAE support for airportd
-    cd->capabilities[9] |= (1 << 3);
-    // Gate 3: PMF / MFP capability (byte 6, bit 0 + bit 4 for _getMFPCaps in Apple80211)
-    cd->capabilities[6] |= (1 << 0) | (1 << 4);
-    // Wake on Wireless
-    cd->capabilities[2] |= (1 << (APPLE80211_CAP_WOW - 16));
-    if (isMT7922()) {
-        cd->capabilities[7] |= (1 << 1); // SDB supported (WCLDeviceConfiguration::isSdbSupported)
-    }
 #else
     cd->capabilities[2] = 0xFF; // BURST, WME, SHORT_GI_40MHZ, SHORT_GI_20MHZ, WOW, TSN, ?, ?
     cd->capabilities[3] = 0x2B;
@@ -1484,64 +1471,4 @@ void AirportItlwm::setPowerStateOn()
     pmPolicyMaker->acknowledgeSetPowerState();
 }
 
-IO80211VirtualInterface* AirportItlwm::createVirtualInterface(ether_addr *ea, UInt role)
-{
-    XYLog("%s: requested role %u\n", __FUNCTION__, role);
-    if (role == APPLE80211_VIF_AWDL || role == 6 || role == 4) {
-        IO80211VirtualInterface *vif = OSTypeAlloc(IO80211VirtualInterface);
-        if (!vif) {
-            XYLog("%s: OSTypeAlloc(IO80211VirtualInterface) failed\n", __FUNCTION__);
-            return NULL;
-        }
-
-        ether_addr awdl_ea;
-        if (ea && (ea->octet[0] || ea->octet[1] || ea->octet[2] || ea->octet[3] || ea->octet[4] || ea->octet[5])) {
-            memcpy(&awdl_ea, ea, sizeof(awdl_ea));
-        } else {
-            IOEthernetAddress primary_ea;
-            getHardwareAddress(&primary_ea);
-            memcpy(&awdl_ea, &primary_ea, sizeof(awdl_ea));
-            awdl_ea.octet[0] ^= 0x02; // locally administered unicast
-        }
-
-        if (!vif->init(this, &awdl_ea, role, "awdl")) {
-            XYLog("%s: vif->init failed for role %u\n", __FUNCTION__, role);
-            vif->release();
-            return NULL;
-        }
-
-        fAwdlIf = vif;
-        memcpy(fAwdlMac, &awdl_ea, 6);
-        XYLog("%s: successfully created %s (role %u) with MAC %02x:%02x:%02x:%02x:%02x:%02x\n",
-              __FUNCTION__, vif->getBSDName() ? vif->getBSDName() : "awdl0", role,
-              awdl_ea.octet[0], awdl_ea.octet[1], awdl_ea.octet[2],
-              awdl_ea.octet[3], awdl_ea.octet[4], awdl_ea.octet[5]);
-        return vif;
-    }
-
-    return super::createVirtualInterface(ea, role);
-}
-
-SInt32 AirportItlwm::enableVirtualInterface(IO80211VirtualInterface *vif)
-{
-    XYLog("%s: vif=%p\n", __FUNCTION__, vif);
-    if (vif == fAwdlIf) {
-        fAwdlEnabled = true;
-    }
-    return super::enableVirtualInterface(vif);
-}
-
-SInt32 AirportItlwm::disableVirtualInterface(IO80211VirtualInterface *vif)
-{
-    XYLog("%s: vif=%p\n", __FUNCTION__, vif);
-    if (vif == fAwdlIf) {
-        fAwdlEnabled = false;
-    }
-    return super::disableVirtualInterface(vif);
-}
-
-bool AirportItlwm::isMT7922()
-{
-    return fHalService && fHalService->isMT7922();
-}
 

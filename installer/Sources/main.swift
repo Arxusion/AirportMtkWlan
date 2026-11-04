@@ -15,12 +15,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let contentView = ContentView()
 
         window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 560, height: 660),
-            styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 640),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
         window.center()
+        window.minSize = NSSize(width: 500, height: 480)
+        window.collectionBehavior = [.fullScreenPrimary]
         window.title = "AirportMtkWlan Installer"
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true

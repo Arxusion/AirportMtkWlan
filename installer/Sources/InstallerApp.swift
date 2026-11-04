@@ -87,6 +87,7 @@ struct ContentView: View {
     @State private var alertMessage: String = ""
     @State private var showAlert: Bool = false
     @State private var showLogs: Bool = false
+    @State private var hasExtensionConflict: Bool = false
     
     // Live Telemetry
     @State private var wifiSsid: String = "Detecting..."
@@ -123,6 +124,9 @@ struct ContentView: View {
                 ScrollView(showsIndicators: false) {
                     VStack(spacing: 16) {
                         telemetryCard
+                        if hasExtensionConflict {
+                            conflictBanner
+                        }
                         destinationCard
                         configurationCard
                         actionsSection
@@ -136,7 +140,7 @@ struct ContentView: View {
                 }
             }
         }
-        .frame(minWidth: 540, idealWidth: 560, maxWidth: 600, minHeight: 640, idealHeight: 680, maxHeight: 780)
+        .frame(minWidth: 500, minHeight: 480)
         .onAppear {
             setupInitialState()
         }
@@ -240,6 +244,47 @@ struct ContentView: View {
         .padding(8)
         .background(Color.black.opacity(0.35))
         .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+    
+    // MARK: - Extension Folder Conflict Warning Banner
+    private var conflictBanner: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundColor(.orange)
+                .font(.system(size: 16))
+                .padding(.top, 2)
+            
+            VStack(alignment: .leading, spacing: 5) {
+                Text("AuxKC Conflict Detected (/Library/Extensions)")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundColor(.white)
+                
+                Text("An older or duplicate kext exists in /Library/Extensions. macOS blocks OpenCore EFI Wi-Fi power toggles when duplicate kexts exist in AuxKC.")
+                    .font(.system(size: 11))
+                    .foregroundColor(Color.white.opacity(0.8))
+                
+                Button(action: purgeExtensionConflict) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "trash.fill")
+                            .font(.system(size: 10))
+                        Text("Purge /Library/Extensions & Clear AuxKC Cache")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                    .foregroundColor(.black)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(Color.orange)
+                    .clipShape(RoundedRectangle(cornerRadius: 5))
+                }
+                .buttonStyle(PlainButtonStyle())
+                .padding(.top, 2)
+            }
+            Spacer()
+        }
+        .padding(12)
+        .background(Color.orange.opacity(0.12))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.orange.opacity(0.35), lineWidth: 1))
     }
     
     // MARK: - Destination Card
@@ -500,9 +545,27 @@ struct ContentView: View {
             selectedFlavor = .sequoia
         }
         
+        hasExtensionConflict = EFIManager.shared.hasLibraryExtensionsConflict()
         refreshDestinations()
         refreshDriverStatus()
         pollTelemetry()
+    }
+    
+    private func purgeExtensionConflict() {
+        isProcessing = true
+        appendLog("Purging conflicting /Library/Extensions kexts...")
+        DispatchQueue.global(qos: .userInitiated).async {
+            let ok = EFIManager.shared.purgeLibraryExtensionsConflict { log in
+                DispatchQueue.main.async { appendLog(log) }
+            }
+            DispatchQueue.main.async {
+                isProcessing = false
+                hasExtensionConflict = EFIManager.shared.hasLibraryExtensionsConflict()
+                alertTitle = ok ? "AuxKC Cache Cleared" : "Action Failed"
+                alertMessage = ok ? "Successfully purged /Library/Extensions kexts and cleared AuxKC staging cache. Reboot your Mac to complete changes." : "Failed to purge extensions. You can run 'sudo rm -rf /Library/Extensions/AirportMtkWlan.kext && sudo kmutil clear-staging' in Terminal."
+                showAlert = true
+            }
+        }
     }
     
     private func refreshDestinations() {

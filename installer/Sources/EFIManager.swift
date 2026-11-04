@@ -408,6 +408,35 @@ public class EFIManager {
         return DriverStatus(isLoaded: false, loadedVersion: nil, kextIdentifier: nil)
     }
     
+    // MARK: - Extension Folder Conflict Check & Fix
+    
+    public func hasLibraryExtensionsConflict() -> Bool {
+        let fm = FileManager.default
+        return fm.fileExists(atPath: "/Library/Extensions/AirportMtkWlan.kext") ||
+               fm.fileExists(atPath: "/Library/Extensions/SimpleMtkWlan.kext")
+    }
+    
+    public func purgeLibraryExtensionsConflict(logger: @escaping (String) -> Void) -> Bool {
+        logger("Purging conflicting kexts from /Library/Extensions (AuxKC)...")
+        let script = """
+        do shell script "rm -rf /Library/Extensions/AirportMtkWlan.kext /Library/Extensions/SimpleMtkWlan.kext && kmutil clear-staging 2>&1" with administrator privileges
+        """
+        
+        var error: NSDictionary?
+        if let appleScript = NSAppleScript(source: script) {
+            appleScript.executeAndReturnError(&error)
+            if let error = error {
+                let msg = error[NSAppleScript.errorMessage] as? String ?? "Authorization failed"
+                logger("ERROR: Failed to clean /Library/Extensions: \(msg)")
+                return false
+            } else {
+                logger("Successfully removed conflicting /Library/Extensions kexts and cleared AuxKC staging cache!")
+                return true
+            }
+        }
+        return false
+    }
+
     // MARK: - Helpers
     
     private func findKextSource(for flavor: DriverFlavor) -> URL? {
