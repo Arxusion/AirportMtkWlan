@@ -1054,10 +1054,8 @@ getCARD_CAPABILITIES(OSObject *object,
     cd->capabilities[9] |= (1 << 3);
     // Gate 3: PMF / MFP capability (byte 6, bit 0 + bit 4 for _getMFPCaps in Apple80211)
     cd->capabilities[6] |= (1 << 0) | (1 << 4);
-    // AWDL & Multichannel Concurrency:
-    cd->capabilities[9] |= (1 << 6);  // Concurrency enabled (WCLDeviceConfiguration::isConcurrencyEnabled)
-    cd->capabilities[13] |= (1 << 6); // AWDL Data Info supported (WCLDeviceConfiguration::isAWDDataInfoSupported)
-    cd->capabilities[2] |= (1 << (APPLE80211_CAP_WOW - 16)); // Wake on Wireless
+    // Wake on Wireless
+    cd->capabilities[2] |= (1 << (APPLE80211_CAP_WOW - 16));
     if (isMT7922()) {
         cd->capabilities[7] |= (1 << 1); // SDB supported (WCLDeviceConfiguration::isSdbSupported)
     }
