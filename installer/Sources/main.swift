@@ -1,6 +1,6 @@
 //
 //  main.swift
-//  AirportMtkWlan Installer
+//  AirportMtkWlan Installer v2.0
 //
 //  Copyright © 2026 Aswini Soni (Arxusion). All rights reserved.
 //
@@ -15,7 +15,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let contentView = ContentView()
 
         window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 540, height: 600),
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 660),
             styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -24,6 +24,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.title = "AirportMtkWlan Installer"
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
+        window.backgroundColor = NSColor(red: 0.03, green: 0.03, blue: 0.03, alpha: 1.0)
+        window.appearance = NSAppearance(named: .darkAqua)
         window.isReleasedWhenClosed = false
         window.contentView = NSHostingView(rootView: contentView)
         window.makeKeyAndOrderFront(nil)

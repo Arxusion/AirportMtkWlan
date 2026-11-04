@@ -30,7 +30,7 @@ The repository builds two front-ends:
 | **Power Management (S3)** | ✅ | Clean hardware quiescing on sleep; full re-attach and firmware restore on wake |
 | **Network Roaming** | ✅ | Band steering preferring 5 GHz when within 15 dBm RSSI of 2.4 GHz |
 | **802.11ax (HE)** | ✅ | Wi-Fi 6 HE association, 256 BlockAck window, and A-MSDU reassembly enabled |
-| **Apple Continuity / AWDL** | ❌ | Requires proprietary Apple wireless driver extensions |
+| **Apple Continuity / AWDL** | 🚧 | Dedicated research repository: [AirportMtk-AWDL](https://github.com/Arxusion/AirportMtk-AWDL) |
 
 ---
 
@@ -50,9 +50,18 @@ The repository builds two front-ends:
 
 ## Installation Guide (OpenCore)
 
+### Option A: Graphical OpenCore Installer (Recommended)
+Download **`AirportMtkWlan-Installer-v2.0.0.zip`** from [Releases](https://github.com/Arxusion/AirportMtkWlan/releases).
+- Launch `AirportMtkWlan Installer.app`
+- Select your target OpenCore EFI partition (or click Browse to locate your EFI folder)
+- Choose your OS flavor (`macOS 26 Tahoe` or `macOS 15 Sequoia`)
+- Click **Deploy Driver to EFI** — the app copies the driver into `EFI/OC/Kexts` and safely registers it inside your `config.plist`.
+
+### Option B: Manual Installation
+
 1. Download the latest release package matching your macOS version from [Releases](https://github.com/Arxusion/AirportMtkWlan/releases):
-   * `AirportMtkWlan-Sequoia-v1.7.2-RELEASE.zip` for **macOS 15 Sequoia (15.2+)**
-   * `AirportMtkWlan-Tahoe-v1.7.2-RELEASE.zip` for **macOS 26 Tahoe**
+   * `AirportMtkWlan-Sequoia-v2.0.0-RELEASE.zip` for **macOS 15 Sequoia (15.2+)**
+   * `AirportMtkWlan-Tahoe-v2.0.0-RELEASE.zip` for **macOS 26 Tahoe**
    * *For macOS 14 Sonoma, 13 Ventura, or earlier*: Native AirPort Skywalk is not compatible; download `SimpleMtkWlan.kext` and use [SimpleMTK](https://github.com/laobamac/SimpleMTKClient) (HeliPort).
 2. Extract and place `AirportMtkWlan.kext` into your EFI directory: `EFI/OC/Kexts/`.
 3. Add the kernel extension entry to your `config.plist` under `Kernel -> Add`:
