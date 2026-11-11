@@ -71,6 +71,13 @@ public struct DriverStatus {
     public let kextIdentifier: String?
 }
 
+public struct DiagnosticGrabResult {
+    public let success: Bool
+    public let archiveURL: URL?
+    public let summaryText: String
+    public let message: String
+}
+
 public class EFIManager {
     public static let shared = EFIManager()
     
@@ -435,6 +442,111 @@ public class EFIManager {
             }
         }
         return false
+    }
+
+    // MARK: - Diagnostic Log Grabber
+
+    public func findLogGrabberScript() -> URL? {
+        let fm = FileManager.default
+        var candidates: [URL] = []
+        if let bundleScript = Bundle.main.resourceURL?.appendingPathComponent("mtk-grab-logs.sh") {
+            candidates.append(bundleScript)
+        }
+        candidates.append(URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent("tools/mtk-grab-logs.sh"))
+        candidates.append(URL(fileURLWithPath: "/Users/yash/nmx-build/wifi5/src/tools/mtk-grab-logs.sh"))
+        return candidates.first(where: { fm.fileExists(atPath: $0.path) })
+    }
+
+    private func shellQuote(_ value: String) -> String {
+        return "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    public func collectDiagnosticLogs(
+        privileged: Bool,
+        sessionLogs: [String],
+        outputURL: URL,
+        logger: @escaping (String) -> Void
+    ) -> DiagnosticGrabResult {
+        guard let scriptURL = findLogGrabberScript() else {
+            let msg = "Log grabber helper (mtk-grab-logs.sh) was not found inside the app bundle or tools/."
+            logger("ERROR: \(msg)")
+            return DiagnosticGrabResult(success: false, archiveURL: nil, summaryText: "", message: msg)
+        }
+
+        let fm = FileManager.default
+        let sessionURL = fm.temporaryDirectory.appendingPathComponent("mtk-session-\(UUID().uuidString).log")
+        let sessionBody = sessionLogs.isEmpty ? "(no installer activity logged in this session)\n" : sessionLogs.joined(separator: "\n") + "\n"
+        try? sessionBody.write(to: sessionURL, atomically: true, encoding: .utf8)
+        defer { try? fm.removeItem(at: sessionURL) }
+
+        logger(privileged ? "Starting full diagnostic log grab (admin privileges requested)..." : "Starting quick diagnostic log grab (standard user scope)...")
+
+        var rawOutput = ""
+        var succeeded = false
+
+        if privileged {
+            let cmd = "MTK_TARGET_USER=\(shellQuote(NSUserName())) /bin/bash \(shellQuote(scriptURL.path)) --out \(shellQuote(outputURL.path)) --session-log \(shellQuote(sessionURL.path)) 2>&1"
+            let escapedForAS = cmd.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+            let appleScriptSource = "do shell script \"\(escapedForAS)\" with administrator privileges"
+            var error: NSDictionary?
+            if let appleScript = NSAppleScript(source: appleScriptSource) {
+                let result = appleScript.executeAndReturnError(&error)
+                if let error = error {
+                    let msg = error[NSAppleScript.errorMessage] as? String ?? "Administrator authorization canceled or failed"
+                    logger("ERROR: \(msg)")
+                    return DiagnosticGrabResult(success: false, archiveURL: nil, summaryText: "", message: msg)
+                }
+                rawOutput = result.stringValue ?? ""
+                succeeded = fm.fileExists(atPath: outputURL.path)
+            }
+        } else {
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/bin/bash")
+            task.arguments = [
+                scriptURL.path,
+                "--out", outputURL.path,
+                "--session-log", sessionURL.path
+            ]
+            let pipe = Pipe()
+            task.standardOutput = pipe
+            task.standardError = pipe
+            do {
+                try task.run()
+                task.waitUntilExit()
+                rawOutput = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                succeeded = (task.terminationStatus == 0) && fm.fileExists(atPath: outputURL.path)
+            } catch {
+                logger("ERROR: \(error.localizedDescription)")
+                return DiagnosticGrabResult(success: false, archiveURL: nil, summaryText: "", message: error.localizedDescription)
+            }
+        }
+
+        for line in rawOutput.components(separatedBy: .newlines) where !line.trimmingCharacters(in: .whitespaces).isEmpty {
+            logger(line)
+        }
+
+        guard succeeded else {
+            let msg = "Log collection did not produce \(outputURL.lastPathComponent)."
+            logger("ERROR: \(msg)")
+            return DiagnosticGrabResult(success: false, archiveURL: nil, summaryText: "", message: msg)
+        }
+
+        let summaryTask = Process()
+        summaryTask.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
+        summaryTask.arguments = ["-xOzf", outputURL.path, "*/00-summary.txt"]
+        let summaryPipe = Pipe()
+        summaryTask.standardOutput = summaryPipe
+        try? summaryTask.run()
+        summaryTask.waitUntilExit()
+        let summaryText = String(data: summaryPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+
+        logger("Saved redacted diagnostic archive to \(outputURL.path)")
+        return DiagnosticGrabResult(
+            success: true,
+            archiveURL: outputURL,
+            summaryText: summaryText,
+            message: "Collected and redacted diagnostics into \(outputURL.lastPathComponent)."
+        )
     }
 
     // MARK: - Helpers

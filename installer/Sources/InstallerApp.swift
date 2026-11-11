@@ -151,7 +151,16 @@ struct ContentView: View {
                 dismissButton: .default(Text("OK"))
             )
         }
+        .sheet(isPresented: $showDiagnosticsSheet) {
+            DiagnosticsSheetView(
+                sessionLogs: logs,
+                onAppendLog: { msg in appendLog(msg) },
+                onClose: { showDiagnosticsSheet = false }
+            )
+        }
     }
+
+    @State private var showDiagnosticsSheet = false
     
     // MARK: - Header
     private var headerView: some View {
@@ -437,10 +446,10 @@ struct ContentView: View {
                 Button(action: exportDiagnostics) {
                     HStack(spacing: 6) {
                         Image(systemName: "doc.text.magnifyingglass")
-                        Text("Export Diagnostics")
+                        Text("Grab Logs")
                     }
                     .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(Color.white.opacity(0.8))
+                    .foregroundColor(Color.white.opacity(0.85))
                     .frame(maxWidth: .infinity)
                     .frame(height: 32)
                     .background(Color.white.opacity(0.06))
@@ -451,6 +460,7 @@ struct ContentView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 6))
                 }
                 .buttonStyle(PlainButtonStyle())
+                .help("Collect redacted Wi-Fi, kernel, MtkDebugLog, OpenCore, and crash logs into an archive for bug reports")
                 
                 Button(action: { showLogs.toggle() }) {
                     HStack(spacing: 6) {
@@ -707,29 +717,7 @@ struct ContentView: View {
     }
     
     private func exportDiagnostics() {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/sbin/ioreg")
-        task.arguments = ["-l", "-w0"]
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        try? task.run()
-        task.waitUntilExit()
-        
-        let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        var report = "=== AirportMtkWlan Diagnostic Dump v2.1 ===\nDate: \(Date())\n\n"
-        for line in out.components(separatedBy: "\n") {
-            if line.contains("MtkDebugLog") || line.contains("IO80211") || line.contains("AirportMtkWlan") {
-                report += line + "\n"
-            }
-        }
-        
-        let savePanel = NSSavePanel()
-        savePanel.nameFieldStringValue = "mtk_diagnostic_\(Int(Date().timeIntervalSince1970)).txt"
-        savePanel.prompt = "Save"
-        if savePanel.runModal() == .OK, let url = savePanel.url {
-            try? report.write(to: url, atomically: true, encoding: .utf8)
-            appendLog("Saved diagnostic dump to \(url.lastPathComponent)")
-        }
+        showDiagnosticsSheet = true
     }
     
     private func appendLog(_ text: String) {
@@ -737,5 +725,238 @@ struct ContentView: View {
         df.dateFormat = "HH:mm:ss"
         let timestamp = df.string(from: Date())
         logs.append("[\(timestamp)] \(text)")
+    }
+}
+
+struct DiagnosticsSheetView: View {
+    let sessionLogs: [String]
+    let onAppendLog: (String) -> Void
+    let onClose: () -> Void
+
+    @State private var isGrabbing = false
+    @State private var statusText = "Choose Full Logs (recommended) or Quick Grab."
+    @State private var result: DiagnosticGrabResult?
+    @State private var copiedSummary = false
+
+    private static let issueURL = URL(string: "https://github.com/Arxusion/AirportMtkWlan/issues/new?template=1-bug.yml")!
+
+    var body: some View {
+        ZStack {
+            Color(red: 0.06, green: 0.06, blue: 0.07)
+                .edgesIgnoringSafeArea(.all)
+
+            VStack(alignment: .leading, spacing: 14) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Diagnostic Log Grabber")
+                            .font(.system(size: 18, weight: .bold, design: .serif))
+                            .foregroundColor(.white)
+                        Text("One-click bundle for debugging AirportMtkWlan issues")
+                            .font(.system(size: 11))
+                            .foregroundColor(Color.white.opacity(0.55))
+                    }
+                    Spacer()
+                    Text("AUTO-REDACTED")
+                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                        .foregroundColor(Color(red: 0.95, green: 0.72, blue: 0.38))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(Color(red: 0.95, green: 0.72, blue: 0.38).opacity(0.14))
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("WHAT IS COLLECTED & REDACTED")
+                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                        .foregroundColor(Color.white.opacity(0.45))
+                    Text("Captures MtkDebugLog, MediaTek PCI/USB IORegistry, kmutil & AuxKC state, kernel & airportd logs, network/Wi-Fi state, sanitized OpenCore config.plist, and recent panics/crashes into a .tar.gz archive on your Desktop.")
+                        .font(.system(size: 11))
+                        .foregroundColor(Color.white.opacity(0.8))
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("Privacy: usernames, hostnames, serial numbers, UUIDs, MLB/ROM, SSIDs, BSSID/MAC host bytes, IPs, and Wi-Fi keys are automatically stripped before packaging.")
+                        .font(.system(size: 10))
+                        .foregroundColor(Color(red: 0.95, green: 0.72, blue: 0.38).opacity(0.9))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(12)
+                .background(Color.white.opacity(0.04))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.08), lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                HStack(spacing: 8) {
+                    if isGrabbing {
+                        ProgressView()
+                            .scaleEffect(0.75)
+                    }
+                    Text(statusText)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(result?.success == false ? Color.red.opacity(0.9) : Color.white.opacity(0.75))
+                        .lineLimit(2)
+                    Spacer()
+                }
+
+                if let res = result, res.success, let archiveURL = res.archiveURL {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Label(archiveURL.lastPathComponent, systemImage: "checkmark.seal.fill")
+                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                .foregroundColor(Color(red: 0.3, green: 0.85, blue: 0.45))
+                            Spacer()
+                            if copiedSummary {
+                                Text("Summary copied")
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundColor(Color(red: 0.95, green: 0.72, blue: 0.38))
+                            }
+                        }
+
+                        ScrollView {
+                            Text(res.summaryText.isEmpty ? "(Summary unavailable)" : res.summaryText)
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundColor(Color.white.opacity(0.8))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(8)
+                        }
+                        .frame(height: 120)
+                        .background(Color.black.opacity(0.5))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+
+                        HStack(spacing: 8) {
+                            Button(action: { sendToGitHub(archiveURL: archiveURL, summary: res.summaryText) }) {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "paperplane.fill")
+                                    Text("Open GitHub Issue & Attach")
+                                }
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundColor(.black)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 32)
+                                .background(Color.white)
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                            }
+                            .buttonStyle(PlainButtonStyle())
+
+                            Button(action: {
+                                NSWorkspace.shared.activateFileViewerSelecting([archiveURL])
+                            }) {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "folder")
+                                    Text("Reveal in Finder")
+                                }
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 12)
+                                .frame(height: 32)
+                                .background(Color.white.opacity(0.08))
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                            }
+                            .buttonStyle(PlainButtonStyle())
+                        }
+                    }
+                    .padding(10)
+                    .background(Color.green.opacity(0.08))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.green.opacity(0.28), lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+
+                HStack(spacing: 8) {
+                    Button(action: { startGrab(privileged: true) }) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "lock.shield.fill")
+                            Text(result == nil ? "Grab Full Logs (Admin)" : "Re-Grab Full")
+                        }
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.black)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 34)
+                        .background(Color(red: 0.95, green: 0.72, blue: 0.38))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                    .disabled(isGrabbing)
+
+                    Button(action: { startGrab(privileged: false) }) {
+                        Text(result == nil ? "Quick Grab (No Password)" : "Re-Grab Quick")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.white)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 34)
+                            .background(Color.white.opacity(0.08))
+                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.white.opacity(0.14), lineWidth: 1))
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                    .disabled(isGrabbing)
+
+                    Button("Close", action: onClose)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(Color.white.opacity(0.75))
+                        .padding(.horizontal, 12)
+                        .frame(height: 34)
+                        .background(Color.white.opacity(0.05))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .buttonStyle(PlainButtonStyle())
+                        .disabled(isGrabbing)
+                }
+            }
+            .padding(20)
+        }
+        .frame(width: 490)
+    }
+
+    private func defaultArchiveURL() -> URL {
+        let df = DateFormatter()
+        df.dateFormat = "yyyyMMdd-HHmmss"
+        let name = "AirportMtkWlan-Logs-\(df.string(from: Date())).tar.gz"
+        let fm = FileManager.default
+        if let desktop = fm.urls(for: .desktopDirectory, in: .userDomainMask).first,
+           fm.isWritableFile(atPath: desktop.path) {
+            return desktop.appendingPathComponent(name)
+        }
+        return fm.temporaryDirectory.appendingPathComponent(name)
+    }
+
+    private func startGrab(privileged: Bool) {
+        isGrabbing = true
+        copiedSummary = false
+        statusText = privileged ? "Requesting admin privileges & collecting logs..." : "Collecting user-scope logs..."
+        let targetURL = defaultArchiveURL()
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let res = EFIManager.shared.collectDiagnosticLogs(
+                privileged: privileged,
+                sessionLogs: sessionLogs,
+                outputURL: targetURL
+            ) { line in
+                DispatchQueue.main.async {
+                    if line.hasPrefix("STEP ") {
+                        statusText = String(line.dropFirst(5))
+                    }
+                    onAppendLog(line)
+                }
+            }
+
+            DispatchQueue.main.async {
+                isGrabbing = false
+                result = res
+                statusText = res.message
+                if res.success, let url = res.archiveURL {
+                    NSWorkspace.shared.activateFileViewerSelecting([url])
+                }
+            }
+        }
+    }
+
+    private func sendToGitHub(archiveURL: URL, summary: String) {
+        let diagSnippet = summary
+            .components(separatedBy: .newlines)
+            .filter { $0.hasPrefix("diag:") }
+            .joined(separator: "\n")
+        if !diagSnippet.isEmpty {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString("```text\n\(diagSnippet)\n```\n", forType: .string)
+            copiedSummary = true
+        }
+        NSWorkspace.shared.activateFileViewerSelecting([archiveURL])
+        NSWorkspace.shared.open(Self.issueURL)
     }
 }

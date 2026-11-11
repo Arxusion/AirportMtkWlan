@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Troubleshooting & Setup Guide
+    url: https://github.com/Arxusion/AirportMtkWlan#readme
+    about: Check supported chipsets, OpenCore requirements, and log grabber instructions first.

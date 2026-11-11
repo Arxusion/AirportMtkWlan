@@ -15,5 +15,10 @@ if sh tests/scan/run.sh >/tmp/simplemtk-test.log 2>&1; then
 else
 	echo "FAIL tests/scan/run.sh"; cat /tmp/simplemtk-test.log; fail=1
 fi
+if bash tests/diagnostics/grab-logs-test.sh >/tmp/simplemtk-test.log 2>&1; then
+	echo "PASS tests/diagnostics/grab-logs-test.sh"
+else
+	echo "FAIL tests/diagnostics/grab-logs-test.sh"; cat /tmp/simplemtk-test.log; fail=1
+fi
 rm -f tests/scan/scan.cpp tests/scan/scan-test /tmp/simplemtk-test.log
 exit $fail

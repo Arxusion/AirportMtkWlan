@@ -143,15 +143,23 @@ Optional boot arguments can be added to `boot-args` in OpenCore:
 
 ---
 
-## Diagnostics & Kernel Logging
+## Diagnostics, Log Grabber & Bug Reporting
 
-The driver maintains an in-kernel circular debug ring buffer that persists across soft reboots and is accessible without root permissions:
+When something fails to load, scan, toggle Wi-Fi, or connect, use the built-in diagnostic log grabber to capture every log needed for debugging in one automatically redacted `.tar.gz` archive:
+
+* **From the GUI Installer (Recommended)**: Open **AirportMtkWlan Installer**, click **Grab Logs**, choose **Grab Full Logs (Admin)** (so `dmesg`, `wdutil`, previous-boot kernel logs, and your sanitized OpenCore config are included), then click **Open GitHub Issue & Attach** and drag the archive from your Desktop into the issue.
+* **From Terminal or Finder**:
 
 ```sh
+# Full redacted diagnostic archive saved to Desktop:
+sudo ./tools/mtk-grab-logs.sh
+# Or double-click tools/Grab Logs.command in Finder
+
+# Quick in-kernel MtkDebugLog ring buffer only (no root required):
 ./tools/mtklog.sh > mtk_debug.log
 ```
 
-The output contains periodic frame statistics (`rx_hwdec`, `rx_swdec`, drop counts), PHY link rate distribution, and DMA ring health status.
+Captured archives automatically redact usernames, hostnames, serial numbers, UUIDs, `MLB`/`ROM`, Wi-Fi keys/passphrases, SSIDs, BSSID/MAC host bytes, and IP addresses before saving, while preserving `MtkDebugLog`, MediaTek PCI/USB IDs, `kmutil` & `/Library/Extensions` state, `airportd`/`kernel` logs, and sanitized OpenCore settings.
 
 ---
 

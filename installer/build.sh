@@ -31,6 +31,10 @@ cp "$HERE/Resources/Info.plist" "$APP_BUNDLE/Contents/"
 if [ -f "$HERE/Resources/AppIcon.icns" ]; then
     cp "$HERE/Resources/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/"
 fi
+if [ -f "$HERE/../tools/mtk-grab-logs.sh" ]; then
+    cp "$HERE/../tools/mtk-grab-logs.sh" "$APP_BUNDLE/Contents/Resources/mtk-grab-logs.sh"
+    chmod +x "$APP_BUNDLE/Contents/Resources/mtk-grab-logs.sh"
+fi
 
 # 3. Embed pre-built release kexts
 echo "[3/4] Embedding release drivers into application resources..."

@@ -1,0 +1,53 @@
+name: Bug Report
+description: Report a Wi-Fi hardware, driver loading, scan, authentication, or stability issue.
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ### First: Grab & Attach Diagnostic Logs
+        1. Open **AirportMtkWlan Installer** and click **Grab Logs** (choose **Full Logs** when prompted so `dmesg`, `wdutil`, and your sanitized OpenCore config are included), **or** run `./tools/mtk-grab-logs.sh` / double-click `Grab Logs.command`.
+        2. Drag and drop the generated `AirportMtkWlan-Logs-*.tar.gz` file from your Desktop into the **What happened** section below.
+
+        > Privacy: usernames, hostnames, serial numbers, UUIDs, SSIDs, BSSID/MAC suffixes, IPs, and Wi-Fi keys/passphrases are automatically redacted before packaging.
+
+  - type: dropdown
+    id: stage
+    attributes:
+      label: Where does it go wrong?
+      options:
+        - Kext fails to load / Wi-Fi not visible in System Settings
+        - Wi-Fi power toggle turns back Off / cannot enable Wi-Fi
+        - Scan returns no networks
+        - Cannot connect / WPA2, WPA3-SAE, or Enterprise auth fails
+        - Slow speed, drops, or sleep/wake regression
+        - Kernel panic or system freeze
+        - Installer app or OpenCore config issue
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: version_env
+    attributes:
+      label: AirportMtkWlan version, macOS version & Wi-Fi card model
+      description: Example - AirportMtkWlan v2.1.0, macOS 26.x / 15.7.x, MediaTek MT7921 / RZ608 / MT7922 / RZ616
+      placeholder: "v2.1.0, macOS 26.x, MT7922"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened & Diagnostic Archive
+      description: Describe the issue and drag-and-drop your `AirportMtkWlan-Logs-*.tar.gz` file here.
+    validations:
+      required: true
+
+  - type: textarea
+    id: changes
+    attributes:
+      label: Any manual kext, boot-arg, or OpenCore modifications?
+      description: Extra Wi-Fi kexts, custom ACPI patches, AMFIPass/Lilu versions, or "None".
+      placeholder: "None"
