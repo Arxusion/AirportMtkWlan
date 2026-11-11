@@ -469,7 +469,7 @@ IOReturn AirportItlwmSkywalkInterface::startWCLJoin(AirportWCL::JoinRequest &joi
         memcpy(joinBSSID, join.bssid, sizeof(joinBSSID));
         explicit_bzero(&join, sizeof(join));
         joinDeferred = joinPending = true;
-        joinTimer->setTimeoutMS(30000);
+        joinTimer->setTimeoutMS(15000);
         return kIOReturnSuccess;
     }
     if (!supported || !(ic->ic_if.if_flags & IFF_RUNNING) || joinPending || scanPending) {
@@ -491,22 +491,28 @@ IOReturn AirportItlwmSkywalkInterface::startWCLJoin(AirportWCL::JoinRequest &joi
         if (join.upperAuth & (APPLE80211_AUTHTYPE_WPA | APPLE80211_AUTHTYPE_WPA_PSK))
             wpa.i_protos |= IEEE80211_WPA_PROTO_WPA1;
         if (join.upperAuth & (APPLE80211_AUTHTYPE_WPA2 | APPLE80211_AUTHTYPE_WPA2_PSK |
+                              APPLE80211_AUTHTYPE_FT_PSK | APPLE80211_AUTHTYPE_FT_8021X |
                               APPLE80211_AUTHTYPE_SHA256_PSK | APPLE80211_AUTHTYPE_SHA256_8021X |
-                              APPLE80211_AUTHTYPE_WPA3_SAE | APPLE80211_AUTHTYPE_WPA3_FT_SAE))
+                              APPLE80211_AUTHTYPE_WPA3_SAE | APPLE80211_AUTHTYPE_WPA3_FT_SAE |
+                              APPLE80211_AUTHTYPE_WPA3_ENTERPRISE |
+                              APPLE80211_AUTHTYPE_WPA3_FT_ENTERPRISE))
             wpa.i_protos |= IEEE80211_WPA_PROTO_WPA2;
-        if (join.upperAuth & (APPLE80211_AUTHTYPE_WPA_PSK | APPLE80211_AUTHTYPE_WPA2_PSK))
-            wpa.i_akms |= IEEE80211_WPA_AKM_PSK | IEEE80211_WPA_AKM_FT_PSK;
-        if (join.upperAuth & (APPLE80211_AUTHTYPE_WPA | APPLE80211_AUTHTYPE_WPA2))
-            wpa.i_akms |= IEEE80211_WPA_AKM_8021X | IEEE80211_WPA_AKM_FT_8021X;
+        if (join.upperAuth & (APPLE80211_AUTHTYPE_WPA_PSK | APPLE80211_AUTHTYPE_WPA2_PSK |
+                              APPLE80211_AUTHTYPE_FT_PSK))
+            wpa.i_akms |= IEEE80211_WPA_AKM_PSK;
+        if (join.upperAuth & (APPLE80211_AUTHTYPE_WPA | APPLE80211_AUTHTYPE_WPA2 |
+                              APPLE80211_AUTHTYPE_FT_8021X |
+                              APPLE80211_AUTHTYPE_WPA3_ENTERPRISE |
+                              APPLE80211_AUTHTYPE_WPA3_FT_ENTERPRISE))
+            wpa.i_akms |= IEEE80211_WPA_AKM_8021X;
         if (join.upperAuth & APPLE80211_AUTHTYPE_SHA256_PSK)
             wpa.i_akms |= IEEE80211_WPA_AKM_SHA256_PSK;
-        if (join.upperAuth & APPLE80211_AUTHTYPE_SHA256_8021X)
+        if (join.upperAuth & (APPLE80211_AUTHTYPE_SHA256_8021X |
+                              APPLE80211_AUTHTYPE_WPA3_ENTERPRISE |
+                              APPLE80211_AUTHTYPE_WPA3_FT_ENTERPRISE))
             wpa.i_akms |= IEEE80211_WPA_AKM_SHA256_8021X;
-        if (join.upperAuth & (APPLE80211_AUTHTYPE_WPA3_SAE | APPLE80211_AUTHTYPE_WPA3_FT_SAE)) {
+        if (join.upperAuth & (APPLE80211_AUTHTYPE_WPA3_SAE | APPLE80211_AUTHTYPE_WPA3_FT_SAE))
             wpa.i_akms |= IEEE80211_WPA_AKM_SAE;
-            if (join.upperAuth & APPLE80211_AUTHTYPE_WPA3_FT_SAE)
-                wpa.i_akms |= IEEE80211_WPA_AKM_FT_SAE;
-        }
         wpa.i_ciphers = IEEE80211_WPA_CIPHER_CCMP | IEEE80211_WPA_CIPHER_TKIP;
         if (join.rsnLength >= 8 && join.rsn[0] == IEEE80211_ELEMID_RSN &&
             join.rsn[4] == 0 && join.rsn[5] == 0x0f && join.rsn[6] == 0xac) {
@@ -540,11 +546,16 @@ IOReturn AirportItlwmSkywalkInterface::startWCLJoin(AirportWCL::JoinRequest &joi
             XYLog("WCL join PSK key check %02x (SAE=%d)\n",
                   ieee80211_key_check(ic->ic_psk, sizeof(ic->ic_psk)),
                   (join.upperAuth & (APPLE80211_AUTHTYPE_WPA3_SAE | APPLE80211_AUTHTYPE_WPA3_FT_SAE)) != 0);
-        } else if (join.keyLength == IEEE80211_PMK_LEN) {
+        } else if (join.keyLength >= IEEE80211_PMK_LEN) {
             bool cached = true;
-            if (join.upperAuth & (APPLE80211_AUTHTYPE_WPA | APPLE80211_AUTHTYPE_WPA2))
+            if (join.upperAuth & (APPLE80211_AUTHTYPE_WPA | APPLE80211_AUTHTYPE_WPA2 |
+                                  APPLE80211_AUTHTYPE_FT_8021X |
+                                  APPLE80211_AUTHTYPE_WPA3_ENTERPRISE |
+                                  APPLE80211_AUTHTYPE_WPA3_FT_ENTERPRISE))
                 cached = ieee80211_pmksa_add(ic, IEEE80211_AKM_8021X, join.bssid, join.key, 0) != nullptr;
-            if (cached && (join.upperAuth & APPLE80211_AUTHTYPE_SHA256_8021X))
+            if (cached && (join.upperAuth & (APPLE80211_AUTHTYPE_SHA256_8021X |
+                                             APPLE80211_AUTHTYPE_WPA3_ENTERPRISE |
+                                             APPLE80211_AUTHTYPE_WPA3_FT_ENTERPRISE)))
                 cached = ieee80211_pmksa_add(ic, IEEE80211_AKM_SHA256_8021X, join.bssid, join.key, 0) != nullptr;
             if (!cached) {
                 clearWCLPMKSA();
@@ -580,7 +591,7 @@ IOReturn AirportItlwmSkywalkInterface::startWCLJoin(AirportWCL::JoinRequest &joi
     wclAssociatedBeacons = 0;
     bzero(wclBeaconInfo, sizeof(wclBeaconInfo));
     disassocIsVoluntary = false;
-    joinTimer->setTimeoutMS(30000);
+    joinTimer->setTimeoutMS(15000);
     if (ic->ic_state == IEEE80211_S_SCAN && ic->ic_wcl_scan_idle) {
         // The stack waits for us between scans (ieee80211_end_scan).
         ic->ic_wcl_scan_idle = false;

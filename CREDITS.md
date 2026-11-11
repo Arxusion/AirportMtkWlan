@@ -40,6 +40,10 @@ files.
 - Aswini Soni (Arxusion): WPA2/WPA3 transition mode association fixes, selective
   PMF/MFP negotiation for mixed APs, WCL authentication mapping, country code
   configuration improvements, release packaging, and stability optimizations.
+- YYavicWiFi by yusufcanyavic (https://github.com/yusufcanyavic/YYavicWiFi,
+  `GPL-3.0-or-later`): 256-entry RX BlockAck reorder window and 100 ms gap
+  timeout (`ieee80211_node.h`), HE STA firmware TLV builder (`mwx_yy_sta_he_tlv`),
+  and RX A-MSDU reassembly (`mwx_amsdu_*`).
 
 ## Current Project Work
 
@@ -50,6 +54,8 @@ files.
 
 ## License Notes
 
-The top-level project is distributed under GPLv2. Individual files may include
-more specific GPL, BSD, OpenBSD, NetBSD, FreeBSD, or permissive license notices;
-those notices remain authoritative for the corresponding files.
+The top-level project is distributed under GNU GPL v3 or later (`GPL-3.0-or-later`;
+see `LICENSE`) to maintain compatibility with integrated `GPL-3.0-or-later`
+contributions such as `YYavicWiFi`. Individual files may include more specific
+GPL, BSD, OpenBSD, NetBSD, FreeBSD, or permissive license notices; those notices
+remain authoritative for the corresponding files.

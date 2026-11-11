@@ -1,6 +1,6 @@
 //
 //  main.swift
-//  AirportMtkWlan Installer v2.0
+//  AirportMtkWlan Installer v2.1
 //
 //  Copyright © 2026 Aswini Soni (Arxusion). All rights reserved.
 //

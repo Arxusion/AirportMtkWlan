@@ -278,6 +278,10 @@ struct ieee80211_tx_ba {
 	/* Number of A-MPDU subframes in reorder buffer. */
 	u_int16_t		ba_winsize;
 #define IEEE80211_BA_MAX_WINSZ	64	/* corresponds to maximum ADDBA BUFSZ */
+/*
+ * 256-entry RX BlockAck reorder window and 100 ms gap timeout adapted from
+ * YYavicWiFi (https://github.com/yusufcanyavic/YYavicWiFi, GPL-3.0-or-later).
+ */
 #define IEEE80211_BA_MAX_RX_WINSZ	256	/* RX reorder window (HE allows 256, Linux mt7921 uses it) */
 
 	u_int8_t		ba_token;

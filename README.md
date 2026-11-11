@@ -1,7 +1,7 @@
 # AirportMtkWlan
 
 [![Release](https://img.shields.io/github/v/release/Arxusion/AirportMtkWlan)](https://github.com/Arxusion/AirportMtkWlan/releases)
-[![License: GPL v2](https://img.shields.io/badge/license-GPLv2-blue.svg)](LICENSE)
+[![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20Tahoe%20%7C%20Sequoia-lightgrey.svg)](https://apple.com/macos)
 
 **Native AirPort & Skywalk Wi-Fi driver for MediaTek MT7921 / MT7921K (AMD RZ608) / MT7922 (AMD RZ616) PCIe cards on macOS.**
@@ -21,7 +21,7 @@ The repository builds two front-ends:
 | **PCIe Initialization & Firmware** | ✅ | Automated firmware staging in 4 KB DMA clusters; MSI interrupt registration |
 | **Native macOS Wi-Fi UI** | ✅ | Direct binding to `IO80211SkywalkInterface` and `IO80211Controller` |
 | **Channel Scanning** | ✅ | Concurrent 2.4 GHz and 5 GHz sweeps with fast background scan throttling |
-| **WPA2-PSK Authentication** | ✅ | Robust 4-way EAPOL handshake with hardware CCMP decryption |
+| **WPA2-PSK & Enterprise** | ✅ | 4-way EAPOL handshake, PEAP/802.1X MSK & PMKSA caching, hardware CCMP |
 | **WPA2 / WPA3 Transition Mode** | ✅ | Dynamic PMF/MFP negotiation and SAE-to-PSK fallback for mixed networks |
 | **802.11n (HT20 / HT40)** | ✅ | MCS 0–15, Short Guard Interval (SGI), RX STBC, WMM QoS queuing |
 | **802.11ac (VHT20 / 40 / 80)** | ✅ | 2×2 MIMO up to 867 Mbps PHY rate, VHT beamformee, HT LDPC |
@@ -44,24 +44,25 @@ The repository builds two front-ends:
 | **MediaTek MT7922** | `14c3:7922` | macOS 26 Tahoe / 15 Sequoia | Operational with standard channel widths |
 
 > [!NOTE]
-> Ensure any vendor SSDT designed to disguise or disable non-Apple Wi-Fi cards (such as `SSDT-Disable_Network_*.aml`) is disabled in your OpenCore configuration. The device must present its native vendor ID `0x14C3`.
+> - Ensure any vendor SSDT designed to disguise or disable non-Apple Wi-Fi cards (such as `SSDT-Disable_Network_*.aml`) is disabled in your OpenCore configuration. The device must present its native vendor ID `0x14C3`.
+> - **Unsupported / Out-of-Scope Hardware**: USB MediaTek adapters such as **MT7921AU** (`0e8d:7961`) and different PCIe silicon such as **MediaTek MT7902 / MT7902LEN** are **not supported**. This driver exclusively targets PCIe MT7921 (`MT7921`/`MT7921K`/`RZ608`) and MT7922 (`MT7922`/`RZ616`) chipsets.
 
 ---
 
 ## Installation Guide (OpenCore)
 
 ### Option A: Graphical OpenCore Installer (Recommended)
-Download **`AirportMtkWlan-Installer-v2.0.0.zip`** from [Releases](https://github.com/Arxusion/AirportMtkWlan/releases).
+Download **`AirportMtkWlan-Installer-v2.1.0.zip`** from [Releases](https://github.com/Arxusion/AirportMtkWlan/releases).
 - Launch `AirportMtkWlan Installer.app`
 - Select your target OpenCore EFI partition (or click Browse to locate your EFI folder)
 - Choose your OS flavor (`macOS 26 Tahoe` or `macOS 15 Sequoia`)
-- Click **Deploy Driver to EFI** — the app copies the driver into `EFI/OC/Kexts` and safely registers it inside your `config.plist`.
+- Click **Deploy Driver to EFI** — the app copies the driver into `EFI/OC/Kexts`, sets `DisableIoMapper = true`, and registers the kext in `config.plist`.
 
 ### Option B: Manual Installation
 
 1. Download the latest release package matching your macOS version from [Releases](https://github.com/Arxusion/AirportMtkWlan/releases):
-   * `AirportMtkWlan-Sequoia-v2.0.0-RELEASE.zip` for **macOS 15 Sequoia (15.2+)**
-   * `AirportMtkWlan-Tahoe-v2.0.0-RELEASE.zip` for **macOS 26 Tahoe**
+   * `AirportMtkWlan-Sequoia-v2.1.0-RELEASE.zip` for **macOS 15 Sequoia (15.2+)**
+   * `AirportMtkWlan-Tahoe-v2.1.0-RELEASE.zip` for **macOS 26 Tahoe**
    * *For macOS 14 Sonoma, 13 Ventura, or earlier*: Native AirPort Skywalk is not compatible; download `SimpleMtkWlan.kext` and use [SimpleMTK](https://github.com/laobamac/SimpleMTKClient) (HeliPort).
 2. Extract and place `AirportMtkWlan.kext` into your EFI directory: `EFI/OC/Kexts/`.
 3. Add the kernel extension entry to your `config.plist` under `Kernel -> Add`:
@@ -80,7 +81,7 @@ Download **`AirportMtkWlan-Installer-v2.0.0.zip`** from [Releases](https://githu
     <key>ExecutablePath</key>
     <string>Contents/MacOS/AirportMtkWlan</string>
     <key>MinKernel</key>
-    <string>24.0.0</string>
+    <string>24.2.0</string>
     <key>MaxKernel</key>
     <string>24.99.99</string>
     <key>PlistPath</key>
@@ -111,9 +112,9 @@ Download **`AirportMtkWlan-Installer-v2.0.0.zip`** from [Releases](https://githu
 ```
 
 > [!IMPORTANT]
-> - **Match your macOS kernel version**: Setting `MinKernel` to `25.0.0` on Sequoia (kernel 24.x) will prevent OpenCore from injecting the driver entirely! If your card shows up in Hackintool as `pci14c3,608` with no driver attached, check that your `MinKernel` / `MaxKernel` match your installed macOS version.
-> - **Pick the matching release build**: The internal `IO80211SkywalkInterface` vtables differ between Sequoia and Tahoe. Always use the build matching your operating system.
-> - Enable `Kernel -> Quirks -> DisableIoMapper` = `true` in OpenCore. The driver interacts directly with physical DMA and does not currently support AppleVTD remapping.
+> - **Enable `Kernel -> Quirks -> DisableIoMapper = true` in OpenCore**: The driver programs physical DMA rings directly and does not support AppleVTD IOMMU remapping. Leaving AppleVTD enabled can cause firmware/DMA stalls or Wi-Fi failures on Tahoe and Sequoia.
+> - **Match your macOS kernel version**: Use the **Sequoia** build with `MinKernel = 24.2.0` / `MaxKernel = 24.99.99` on macOS 15.2+ and the **Tahoe** build with `MinKernel = 25.0.0` / `MaxKernel = 25.99.99` on macOS 26. Setting the wrong `MinKernel` prevents injection, and injecting the wrong OS build breaks `IO80211SkywalkInterface` vtables.
+> - **Fixing OpenCore `Invalid Parameter` at boot**: Re-download the matching zip (do not rename/strip inside the `.kext` bundle), confirm `Arch = x86_64`, `ExecutablePath = Contents/MacOS/AirportMtkWlan`, `PlistPath = Contents/Info.plist`, and remove any old copies from `/Library/Extensions` or `EFI/OC/Kexts`.
 > - **Do NOT** load `AirportMtkWlan.kext` and `SimpleMtkWlan.kext` simultaneously.
 
 ---
@@ -122,12 +123,12 @@ Download **`AirportMtkWlan-Installer-v2.0.0.zip`** from [Releases](https://githu
 
 ### NVRAM Variables
 
-Configuration properties can be set in OpenCore NVRAM (`7C436110-AB2A-4BBB-A880-FE41995C9F82`):
+Configuration properties can be set in OpenCore NVRAM (`7C436110-AB2A-4BBB-A880-FE41995C9F82`) as either `<string>` or `<data>` values:
 
 | Property | Values | Description |
 |---|---|---|
-| `mtk-wifi-band` | `5`, `2`, *unset* | `5` locks the driver to 5 GHz channels only. `2` disables band prioritization. Unset defaults to preferring 5 GHz when RSSI is comparable. |
-| `mtk-wifi-cc` | e.g. `US`, `IN`, `DE`, `00` | Overrides the regulatory country code for 802.11d channel availability. |
+| `mtk-wifi-band` | `5`, `2`, *unset* | `5` restricts the driver to 5 GHz channels only; `2` restricts to 2.4 GHz channels only. Unset enables dual-band operation preferring 5 GHz when RSSI is comparable. |
+| `mtk-wifi-cc` | e.g. `CN`, `US`, `IN`, `DE`, `00` | Overrides the regulatory country code (`<string>` or ASCII `<data>`) for 802.11d channel availability. |
 
 ### Boot Arguments
 
@@ -175,7 +176,8 @@ AIRPORT_OS=tahoe ./build-macos.sh Release AirportMtkWlan
 * **[zxystd (钟先耀)](https://github.com/OpenIntelWireless/itlwm)** — Pioneer of the macOS `net80211` kernel port and AirportItlwm framework.
 * **[pengubow](https://github.com/pengubow/SimpleMtkWlan)** — MediaTek HAL integration for AirportItlwm WCL front-end.
 * **[flxxxxddd](https://github.com/flxxxxddd/SimpleMtkWlan)** — MT7921/RZ608 bringing up, 802.11n/ac aggregation, and initial Tahoe build support.
-* **[Aswini Soni (Arxusion)](https://github.com/Arxusion)** — WPA2/WPA3 transition mode association engine, PMF/MFP negotiation fixes, WCL authentication mapping, country code discovery improvements, and release packaging.
+* **[Aswini Soni (Arxusion)](https://github.com/Arxusion)** — WPA2/WPA3 transition mode & WPA2-Enterprise fixes, PMF/MFP & WCL stability improvements, country/band NVRAM fixes, and release packaging.
+* **[yusufcanyavic](https://github.com/yusufcanyavic/YYavicWiFi)** (`GPL-3.0-or-later`) — 256-entry RX BlockAck reorder window and 100 ms gap timeout, HE STA firmware TLV builder (`mwx_yy_sta_he_tlv`), and RX A-MSDU reassembly (`mwx_amsdu_*`).
 * **OpenBSD & Linux mt76 Developers** — Hardware reference and `mwx(4)` driver implementation.
 * **[Acidanthera](https://github.com/acidanthera)** — `MacKernelSDK` and the OpenCore bootloader ecosystem.
 
@@ -183,4 +185,4 @@ AIRPORT_OS=tahoe ./build-macos.sh Release AirportMtkWlan
 
 ## License
 
-This project is licensed under the **GNU General Public License v2.0 (GPL-2.0)**. See the [LICENSE](LICENSE) file for complete terms. Embedded MediaTek firmware binaries remain under their respective vendor redistribution licenses.
+This project is licensed under the **GNU General Public License v3.0 or later (GPL-3.0-or-later)**. See [LICENSE](LICENSE) and [CREDITS.md](CREDITS.md) for complete terms and upstream source attributions. Individual files retain their original copyright and license notices, and embedded MediaTek firmware binaries remain under their respective vendor redistribution licenses.

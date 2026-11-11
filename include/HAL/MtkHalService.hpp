@@ -51,6 +51,9 @@ public:
     virtual IOReturn disable(IONetworkInterface *interface) = 0;
     
     virtual struct ieee80211com *get80211Controller() = 0;
+    /* Regulatory country code synchronization (ISO 3166-1 alpha-2 or "00"). */
+    virtual IOReturn setCountryCode(const char *) { return kIOReturnUnsupported; }
+
 #ifdef AIRPORT_WCL
     /* Native Wi-Fi (AirportMtkWlan): off-channel time per channel macOS asks scans to use. */
     virtual IOReturn setScanHomeAwayTime(uint32_t) { return kIOReturnUnsupported; }

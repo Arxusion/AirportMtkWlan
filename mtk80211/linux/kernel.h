@@ -6,7 +6,7 @@
 //  Copyright © 2026 laobamac (王孝慈). All rights reserved.
 //
 
-/* SPDX-License-Identifier: GPL-2.0 */
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 
 #ifndef kernel_h
 #define kernel_h

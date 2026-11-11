@@ -1126,7 +1126,7 @@ ieee80211_add_rsn_body(u_int8_t *frm, struct ieee80211com *ic,
         frm += IEEE80211_PMKID_LEN;
     }
 
-    if (!((ni->ni_rsnakms & IEEE80211_AKM_SAE) ||
+    if (!((ni->ni_rsnakms & (IEEE80211_AKM_SAE | IEEE80211_AKM_FT_SAE)) ||
           ((ic->ic_caps & IEEE80211_C_MFP) && (ni->ni_flags & IEEE80211_NODE_MFP))))
         return frm;
 
@@ -1310,7 +1310,10 @@ ieee80211_add_hecaps(uint8_t *frm, struct ieee80211com *ic)
     
     memcpy(frm, &ic->ic_he_mcs_nss_supp, nss_size);
     frm += nss_size;
-    
+
+    /* Set length before optional PPE thresholds so it is always initialized */
+    orig_pos[1] = (frm - orig_pos) - 2;
+
     /* Check if PPE Threshold should be present */
     if ((ic->ic_he_cap_elem.phy_cap_info[6] &
          IEEE80211_HE_PHY_CAP6_PPE_THRESHOLD_PRESENT) == 0)
@@ -1614,8 +1617,7 @@ ieee80211_get_assoc_req(struct ieee80211com *ic, struct ieee80211_node *ni,
 		2 + IEEE80211_WPAIE_MAXLEN : 0) +
 	    ((ic->ic_flags & IEEE80211_F_HTON) ? sizeof(struct ieee80211_ie_htcap) + sizeof(struct ieee80211_wme_info) : 0) +
         (((ic->ic_flags & IEEE80211_F_VHTON) && !IEEE80211_IS_CHAN_2GHZ(ni->ni_chan)) ? sizeof(struct ieee80211_ie_vhtcap) + 2 : 0) +
-        ((ic->ic_flags & IEEE80211_F_HEON) ? (sizeof(struct ieee80211_he_cap_elem) + 2 + 1 + sizeof(struct ieee80211_he_mcs_nss_supp) + IEEE80211_HE_PPE_THRES_MAX_LEN) : 0) +
-        (ni->ni_has_mde ? 5 : 0));
+        ((ic->ic_flags & IEEE80211_F_HEON) ? (sizeof(struct ieee80211_he_cap_elem) + 2 + 1 + sizeof(struct ieee80211_he_mcs_nss_supp) + IEEE80211_HE_PPE_THRES_MAX_LEN) : 0));
 	if (m == NULL)
 		return NULL;
 
@@ -1673,14 +1675,6 @@ ieee80211_get_assoc_req(struct ieee80211com *ic, struct ieee80211_node *ni,
     
     if (ic->ic_flags & IEEE80211_F_HEON)
         frm = ieee80211_add_hecaps(frm, ic);
-
-    if (ni->ni_has_mde) {
-        *frm++ = IEEE80211_ELEMID_MDE;
-        *frm++ = 3;
-        LE_WRITE_2(frm, ni->ni_mdid);
-        frm += 2;
-        *frm++ = ni->ni_ft_cap_policy;
-    }
 
     size_t l = frm - mtod(m, u_int8_t *);
     mbuf_pkthdr_setlen(m, l);

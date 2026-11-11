@@ -53,6 +53,7 @@ public:
     void debugPoll() override;
     void suspend() override;
     void resume() override;
+    IOReturn setCountryCode(const char *cc) override;
     IOReturn setMulticastList(IOEthernetAddress *addr, int count) override;
 
     static bool mwx_match(IOPCIDevice *device);

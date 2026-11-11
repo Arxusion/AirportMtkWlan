@@ -518,13 +518,6 @@ ieee80211_ess_calculate_score(struct ieee80211com *ic,
     /* Boost this AP if it had no auth/assoc failures in the past. */
     if (ni->ni_fails == 0)
         score += 21;
-
-    /* Fast BSS Transition (802.11r) and Mobility Domain roaming preference */
-    if (ni->ni_has_mde)
-        score += 4;
-    if (ic->ic_bss != NULL && ic->ic_bss->ni_has_mde &&
-        ni->ni_has_mde && ni->ni_mdid == ic->ic_bss->ni_mdid)
-        score += 8;
     
     return score;
 }
@@ -1641,52 +1634,29 @@ ieee80211_choose_rsnparams(struct ieee80211com *ic)
     
     /* filter out unsupported AKMPs */
     ni->ni_rsnakms &= ic->ic_rsnakms;
-    /* prefer SAE / FT-SAE, then PSK / FT-PSK, then 802.1X / FT-802.1X */
-    if (ni->ni_rsnakms & IEEE80211_AKM_FT_SAE) {
-        ni->ni_rsnakms = IEEE80211_AKM_FT_SAE;
-    } else if (ni->ni_rsnakms & IEEE80211_AKM_SAE) {
+    /* prefer SAE, then PSK, then 802.1X (do not select unimplemented 802.11r FT AKMs) */
+    if (ni->ni_rsnakms & IEEE80211_AKM_SAE) {
         ni->ni_rsnakms = IEEE80211_AKM_SAE;
     } else if ((ic->ic_flags & IEEE80211_F_PSK) && (ni->ni_rsnakms &
-                                             (IEEE80211_AKM_PSK | IEEE80211_AKM_SHA256_PSK | IEEE80211_AKM_FT_PSK))) {
+                                             (IEEE80211_AKM_PSK | IEEE80211_AKM_SHA256_PSK))) {
         /* AP supports PSK AKMP and a PSK is configured */
-        if (ni->ni_rsnakms & IEEE80211_AKM_FT_PSK)
-            ni->ni_rsnakms = IEEE80211_AKM_FT_PSK;
-        else if (ni->ni_rsnakms & IEEE80211_AKM_SHA256_PSK)
+        if (ni->ni_rsnakms & IEEE80211_AKM_SHA256_PSK)
             ni->ni_rsnakms = IEEE80211_AKM_SHA256_PSK;
         else
             ni->ni_rsnakms = IEEE80211_AKM_PSK;
+    } else if (ni->ni_rsnakms & IEEE80211_AKM_SHA256_8021X) {
+        ni->ni_rsnakms = IEEE80211_AKM_SHA256_8021X;
     } else {
-        if (ni->ni_rsnakms & IEEE80211_AKM_FT_8021X)
-            ni->ni_rsnakms = IEEE80211_AKM_FT_8021X;
-        else if (ni->ni_rsnakms & IEEE80211_AKM_SHA256_8021X)
-            ni->ni_rsnakms = IEEE80211_AKM_SHA256_8021X;
-        else
-            ni->ni_rsnakms = IEEE80211_AKM_8021X;
+        ni->ni_rsnakms = IEEE80211_AKM_8021X;
     }
 
-    /* check if we have a cached PMK or can perform Opportunistic Key Caching (OKC) */
+    /* check if we have a cached PMK for this specific BSSID and AKM */
     if (ni->ni_rsnprotos == IEEE80211_PROTO_RSN) {
         pmk = ieee80211_pmksa_find(ic, ni, NULL);
         if (pmk != NULL) {
             memcpy(ni->ni_pmkid, pmk->pmk_pmkid, IEEE80211_PMKID_LEN);
             memcpy(ni->ni_pmk, pmk->pmk_key, IEEE80211_PMK_LEN);
             ni->ni_flags |= (IEEE80211_NODE_PMK | IEEE80211_NODE_PMKID);
-        } else if (ni->ni_has_mde || (ic->ic_flags & IEEE80211_F_PSK) ||
-                   (ni->ni_rsnakms & (IEEE80211_AKM_SAE | IEEE80211_AKM_FT_SAE))) {
-            struct ieee80211_pmk *cand;
-            TAILQ_FOREACH(cand, &ic->ic_pmksa, pmk_next) {
-                if (cand->pmk_akm == ni->ni_rsnakms ||
-                    (ieee80211_is_psk_akm(cand->pmk_akm) && ieee80211_is_psk_akm((enum ieee80211_akm)ni->ni_rsnakms)) ||
-                    (ieee80211_is_sae_akm(cand->pmk_akm) && ieee80211_is_sae_akm((enum ieee80211_akm)ni->ni_rsnakms))) {
-                    ieee80211_derive_pmkid((enum ieee80211_akm)ni->ni_rsnakms, cand->pmk_key,
-                        ni->ni_bssid, ic->ic_myaddr, ni->ni_pmkid);
-                    memcpy(ni->ni_pmk, cand->pmk_key, IEEE80211_PMK_LEN);
-                    ni->ni_flags |= (IEEE80211_NODE_PMK | IEEE80211_NODE_PMKID);
-                    ieee80211_pmksa_add(ic, (enum ieee80211_akm)ni->ni_rsnakms, ni->ni_bssid,
-                        cand->pmk_key, IEEE80211_PMK_INFINITE);
-                    break;
-                }
-            }
         }
     }
     
@@ -2872,29 +2842,44 @@ void
 ieee80211_setup_hecaps(struct ieee80211_node *ni, const uint8_t *data,
                        uint8_t len)
 {
-    struct ieee80211_he_cap_elem *he_cap_ie_elem = (struct ieee80211_he_cap_elem *)data;
-    uint8_t mcs_nss_size, he_ppe_size, he_total_size;
-    
+    const struct ieee80211_he_cap_elem *he_cap_ie_elem;
+    uint8_t mcs_nss_size, he_ppe_size = 0;
+    size_t he_total_size;
+
+    if (len < sizeof(ni->ni_he_cap_elem))
+        return;
+
+    he_cap_ie_elem = (const struct ieee80211_he_cap_elem *)data;
     mcs_nss_size = ieee80211_he_mcs_nss_size(he_cap_ie_elem);
-    he_ppe_size =
-        ieee80211_he_ppe_size(data[sizeof(ni->ni_he_cap_elem) +
-                        mcs_nss_size],
-                      he_cap_ie_elem->phy_cap_info);
-    he_total_size = sizeof(ni->ni_he_cap_elem) + mcs_nss_size +
-            he_ppe_size;
-    
+    if (mcs_nss_size > sizeof(ni->ni_he_mcs_nss_supp) ||
+        len < sizeof(ni->ni_he_cap_elem) + mcs_nss_size)
+        return;
+
+    if (he_cap_ie_elem->phy_cap_info[6] &
+        IEEE80211_HE_PHY_CAP6_PPE_THRESHOLD_PRESENT) {
+        if (len < sizeof(ni->ni_he_cap_elem) + mcs_nss_size + 1)
+            return;
+        he_ppe_size = ieee80211_he_ppe_size(
+            data[sizeof(ni->ni_he_cap_elem) + mcs_nss_size],
+            he_cap_ie_elem->phy_cap_info);
+        if (he_ppe_size > sizeof(ni->ni_ppe_thres))
+            return;
+    }
+
+    he_total_size = sizeof(ni->ni_he_cap_elem) + mcs_nss_size + he_ppe_size;
     if (len < he_total_size)
         return;
-    
+
     memcpy(&ni->ni_he_cap_elem, data, sizeof(ni->ni_he_cap_elem));
-    
+
     /* HE Tx/Rx HE MCS NSS Support Field */
+    memset(&ni->ni_he_mcs_nss_supp, 0xff, sizeof(ni->ni_he_mcs_nss_supp));
     memcpy(&ni->ni_he_mcs_nss_supp,
            &data[sizeof(ni->ni_he_cap_elem)], mcs_nss_size);
-    
+
     /* Check if there are (optional) PPE Thresholds */
-    if (ni->ni_he_cap_elem.phy_cap_info[6] &
-        IEEE80211_HE_PHY_CAP6_PPE_THRESHOLD_PRESENT)
+    bzero(ni->ni_ppe_thres, sizeof(ni->ni_ppe_thres));
+    if (he_ppe_size > 0)
         memcpy(ni->ni_ppe_thres,
                &data[sizeof(ni->ni_he_cap_elem) + mcs_nss_size],
                he_ppe_size);
@@ -2904,13 +2889,19 @@ int
 ieee80211_setup_heop(struct ieee80211_node *ni, const uint8_t *data,
                      uint8_t len)
 {
-    struct ieee80211_he_operation *he_op_ie = (struct ieee80211_he_operation *)data;
-    
+    const struct ieee80211_he_operation *he_op_ie =
+        (const struct ieee80211_he_operation *)data;
+    const size_t min_len = __offsetof(struct ieee80211_he_operation, optional);
+
+    if (len < min_len)
+        return 0;
+
     ni->ni_he_oper_params = le32toh(he_op_ie->he_oper_params);
     ni->ni_he_oper_nss_set = le16toh(he_op_ie->he_mcs_nss_set);
     bzero(&ni->ni_he_optional, sizeof(ni->ni_he_optional));
-    if (len > __offsetof(struct ieee80211_he_operation, optional)) {
-        memcpy(ni->ni_he_optional, he_op_ie->optional, min(sizeof(ni->ni_he_optional), len - __offsetof(struct ieee80211_he_operation, optional)));
+    if (len > min_len) {
+        memcpy(ni->ni_he_optional, he_op_ie->optional,
+               min(sizeof(ni->ni_he_optional), (size_t)(len - min_len)));
     }
     return 1;
 }

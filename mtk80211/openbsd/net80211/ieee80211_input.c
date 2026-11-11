@@ -1948,7 +1948,7 @@ ieee80211_recv_probe_resp(struct ieee80211com *ic, mbuf_t m,
         ieee80211_setup_vhtcaps(ic, ni, vhtcap);
         ieee80211_setup_vhtopmode(ni, vhtopmode);
     }
-    if (hecap != NULL && heopmode != NULL) {
+    if (hecap != NULL && heopmode != NULL && hecap[1] >= 1 && heopmode[1] >= 1) {
         ieee80211_setup_hecaps(ni, hecap + 3, hecap[1] - 1);
         ieee80211_setup_heop(ni, heopmode + 3, heopmode[1] - 1);
     }
@@ -2874,16 +2874,20 @@ ieee80211_recv_assoc_resp(struct ieee80211com *ic, mbuf_t m,
         ieee80211_setup_vhtcaps(ic, ni, vhtcap);
         ieee80211_setup_vhtopmode(ni, vhtopmode);
     }
-    if (hecap != NULL && heopmode != NULL) {
+    if (hecap != NULL && heopmode != NULL && hecap[1] >= 1 && heopmode[1] >= 1) {
         ieee80211_setup_hecaps(ni, hecap + 3, hecap[1] - 1);
-        ieee80211_setup_heop(ni, heopmode + 3, heopmode[1] - 1);
+        if (ieee80211_setup_heop(ni, heopmode + 3, heopmode[1] - 1) &&
+            hecap[1] >= 1 + sizeof(ni->ni_he_cap_elem)) {
+            ieee80211_he_negotiate(ic, ni);
+        } else {
+            ni->ni_flags &= ~IEEE80211_NODE_HE;
+        }
+    } else {
+        ni->ni_flags &= ~IEEE80211_NODE_HE;
     }
 
     ieee80211_ht_negotiate(ic, ni);
     ieee80211_vht_negotiate(ic, ni);
-    if (hecap != NULL && heopmode != NULL) {
-        ieee80211_he_negotiate(ic, ni);
-    }
 
     if (mde != NULL && mde[1] >= 3) {
         ni->ni_has_mde = 1;

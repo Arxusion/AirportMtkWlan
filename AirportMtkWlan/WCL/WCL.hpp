@@ -459,7 +459,7 @@ struct JoinRequest {
     uint32_t keyLength;
     uint32_t keyCipher;
     uint16_t keyIndex;
-    uint8_t key[32];
+    uint8_t key[64];
     uint8_t bssid[6];
     uint16_t channelSpec;
     uint16_t rsnLength;
@@ -468,10 +468,11 @@ struct JoinRequest {
 
 inline bool validCipherKey(uint32_t cipher, uint32_t length, uint16_t flags,
                            uint16_t index, uint32_t rscLength) {
-    // Native WCL accepts PMK/MSK for enterprise, not legacy PTK/GTK.
+    // Native WCL accepts 32-byte PMK/PMKSA/MSK and 64-byte EAP MSK for enterprise.
     (void)flags; // PTK/GTK selectors do not apply to PMK material.
     (void)index;
-    return (cipher == 6 || cipher == 7 || cipher == 9) && length == 32 && rscLength <= 8;
+    const bool validLen = (length == 32) || (cipher == 7 && length == 64);
+    return (cipher == 6 || cipher == 7 || cipher == 9) && validLen && rscLength <= 8;
 }
 
 inline bool validRSNOverride(const uint8_t *ie, size_t length) {
@@ -511,10 +512,19 @@ inline LegacyAuth classifyLegacyAuth(const JoinRequest &j) {
     if (!validRSNOverride(j.rsn, j.rsnLength)) return LegacyAuth::Invalid;
     if (j.lowerAuth != 1) return LegacyAuth::Invalid;
     uint32_t upper = j.upperAuth;
-    // Map WPA3-SAE / WPA3-FT-SAE to WPA2-PSK for transition networks and mobile hotspots
-    if (upper & ((1u << 12) | (1u << 13))) {
-        upper &= ~((1u << 12) | (1u << 13));
+    // Map WPA3-SAE / WPA3-FT-SAE / FT-PSK to WPA2-PSK, and FT-802.1X / WPA3-Enterprise
+    // to 802.1X equivalents supported by net80211 (FT AKMs are not implemented in firmware/PAE).
+    if (upper & ((1u << 4) | (1u << 12) | (1u << 13))) {
+        upper &= ~((1u << 4) | (1u << 12) | (1u << 13));
         upper |= (1u << 3); // APPLE80211_AUTHTYPE_WPA2_PSK
+    }
+    if (upper & (1u << 7)) {
+        upper &= ~(1u << 7);
+        upper |= (1u << 2); // APPLE80211_AUTHTYPE_WPA2
+    }
+    if (upper & ((1u << 14) | (1u << 15))) {
+        upper &= ~((1u << 14) | (1u << 15));
+        upper |= (1u << 2) | (1u << 11); // APPLE80211_AUTHTYPE_WPA2 | SHA256_8021X
     }
     if (!upper) {
         if (!j.keyLength) return LegacyAuth::Open;
@@ -531,7 +541,8 @@ inline LegacyAuth classifyLegacyAuth(const JoinRequest &j) {
         return (j.keyLength == 32 && (j.keyCipher == 6 || j.keyCipher == 7)) || isPassphrase(j) ?
             LegacyAuth::Personal : LegacyAuth::Invalid;
     if (upper & enterprise)
-        return (!j.keyLength || (j.keyLength == 32 && (j.keyCipher == 6 || j.keyCipher == 7))) ?
+        return (!j.keyLength || (j.keyLength == 32 && (j.keyCipher == 6 || j.keyCipher == 7)) ||
+                (j.keyLength == 64 && j.keyCipher == 7)) ?
             LegacyAuth::Enterprise : LegacyAuth::Invalid;
     return LegacyAuth::Invalid;
 }
@@ -544,7 +555,7 @@ inline bool decodeJoin(const void *buffer, size_t length, JoinRequest &out) {
     uint32_t keyLength = read32(p + 0x44);
     uint16_t rsnLength = read16(p + 0xd4);
     if (!count || count > 10 || !ssidLength || ssidLength > 32 ||
-        keyLength > 32 || rsnLength > 257 || length < 0x218 + size_t(count) * 18)
+        keyLength > 64 || rsnLength > 257 || length < 0x218 + size_t(count) * 18)
         return false;
     if (p[0x21c] & 1)
         return false;

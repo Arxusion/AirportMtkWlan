@@ -14,6 +14,7 @@
 
 #include "AirportItlwmSkywalkInterface.hpp"
 #include "IOPCIEDeviceWrapper.hpp"
+#include <HAL/MtkNvramHelper.hpp>
 
 #define super IO80211Controller
 OSDefineMetaClassAndStructors(AirportItlwm, IO80211Controller);
@@ -368,9 +369,12 @@ bool AirportItlwm::start(IOService *provider)
         fHalService->get80211Controller()->ic_userflags |= IEEE80211_F_NOHT40;
 
 #ifdef AIRPORT_WCL
+    struct ieee80211com *ic_he = fHalService->get80211Controller();
     int no_he = 0;
-    if (!PE_parse_boot_argn("-nohe", &no_he, sizeof(no_he)))
-        fHalService->get80211Controller()->ic_userflags |= IEEE80211_F_HEON;
+    if (PE_parse_boot_argn("-nohe", &no_he, sizeof(no_he)))
+        ic_he->ic_flags &= ~IEEE80211_F_HEON;
+    else if (ic_he->ic_caps & IEEE80211_C_HE)
+        ic_he->ic_flags |= IEEE80211_F_HEON;
 #endif
 
     if (!fHalService->attach(pciNub)) {
@@ -1046,6 +1050,12 @@ getCARD_CAPABILITIES(OSObject *object,
     // WCL uses this capability together with the BSS HE IE for PHY reporting.
     if (caps & IEEE80211_C_HE)
         cd->capabilities[17] |= 0x80;
+    // Capability 75 (byte 9, bit 3): WPA3-SAE support for airportd
+    cd->capabilities[9] |= (1 << 3);
+    // PMF / MFP capability (byte 6, bit 0 + bit 4 for _getMFPCaps in Apple80211)
+    cd->capabilities[6] |= (1 << 0) | (1 << 4);
+    // Wake on Wireless
+    cd->capabilities[2] |= (1 << (APPLE80211_CAP_WOW - 16));
 #else
     cd->capabilities[2] = 0xFF; // BURST, WME, SHORT_GI_40MHZ, SHORT_GI_20MHZ, WOW, TSN, ?, ?
     cd->capabilities[3] = 0x2B;
@@ -1116,39 +1126,35 @@ getHARDWARE_VERSION(OSObject *object,
     return kIOReturnSuccess;
 }
 
+static bool
+resolveUserCountryOverride(char out[3])
+{
+    char raw[8] = {0};
+    if (PE_parse_boot_argn("mtk_cc", raw, sizeof(raw)) &&
+        mtkNormalizeCountryCode(raw, sizeof(raw), out))
+        return true;
+    memset(raw, 0, sizeof(raw));
+    if (PE_parse_boot_argn("itlwm_cc", raw, sizeof(raw)) &&
+        mtkNormalizeCountryCode(raw, sizeof(raw), out))
+        return true;
+    memset(raw, 0, sizeof(raw));
+    if (mtkReadNvramAscii("mtk-wifi-cc", "nullmoth-wifi-cc", raw, sizeof(raw)) &&
+        mtkNormalizeCountryCode(raw, sizeof(raw), out))
+        return true;
+    return false;
+}
+
 IOReturn AirportItlwm::
 getCOUNTRY_CODE(OSObject *object,
                                 struct apple80211_country_code_data *cd)
 {
-    char user_override_cc[3];
+    char user_override_cc[3] = {0};
     const char *cc_fw = fHalService->getDriverInfo()->getFirmwareCountryCode();
 
     if (!cd)
         return kIOReturnError;
     cd->version = APPLE80211_VERSION;
-    memset(user_override_cc, 0, sizeof(user_override_cc));
-    PE_parse_boot_argn("itlwm_cc", user_override_cc, 3);
-    if (!user_override_cc[0]) {
-        PE_parse_boot_argn("mtk_cc", user_override_cc, 3);
-    }
-    if (!user_override_cc[0]) {
-        if (const IORegistryPlane *dt = IORegistryEntry::getPlane("IODeviceTree")) {
-            if (IORegistryEntry *opts = IORegistryEntry::fromPath("/options", dt)) {
-                OSData *d = OSDynamicCast(OSData, opts->copyProperty("mtk-wifi-cc"));
-                if (!d) {
-                    d = OSDynamicCast(OSData, opts->copyProperty("nullmoth-wifi-cc"));
-                }
-                if (d) {
-                    if (d->getLength() >= 2) {
-                        memcpy(user_override_cc, d->getBytesNoCopy(), 2);
-                        user_override_cc[2] = '\0';
-                    }
-                    d->release();
-                }
-                opts->release();
-            }
-        }
-    }
+    resolveUserCountryOverride(user_override_cc);
     const char *chosen = NULL;
     if (user_override_cc[0]) {
         chosen = user_override_cc;
@@ -1159,28 +1165,44 @@ getCOUNTRY_CODE(OSObject *object,
     } else {
         chosen = "00"; /* Worldwide regulatory domain fallback */
     }
-    strncpy((char*)cd->cc, chosen, sizeof(cd->cc));
+    memset(cd->cc, 0, sizeof(cd->cc));
+    memcpy(cd->cc, chosen, 2);
     return kIOReturnSuccess;
 }
 
 IOReturn AirportItlwm::
 setCOUNTRY_CODE(OSObject *object, struct apple80211_country_code_data *data)
 {
-#ifdef AIRPORT_WCL
     if (!data)
         return kIOReturnBadArgument;
-    if (data->cc[0] != 'x' && data->cc[0] != 'X' &&
-        memcmp(geo_location_cc, data->cc, sizeof(geo_location_cc)) != 0) {
-        memcpy(geo_location_cc, data->cc, sizeof(geo_location_cc));
+
+    char normCc[3] = {0};
+    if (!mtkNormalizeCountryCode((const char *)data->cc,
+                                 strnlen((const char *)data->cc, sizeof(data->cc)),
+                                 normCc))
+        return kIOReturnSuccess;
+
+    char overrideCc[3] = {0};
+    const bool hasOverride = resolveUserCountryOverride(overrideCc);
+#ifdef AIRPORT_WCL
+    if (memcmp(geo_location_cc, normCc, 2) != 0) {
+        memset(geo_location_cc, 0, sizeof(geo_location_cc));
+        memcpy(geo_location_cc, normCc, 2);
+        if (!hasOverride && fHalService)
+            fHalService->setCountryCode(normCc);
         if (fNetIf)
             static_cast<AirportItlwmSkywalkInterface *>(fNetIf)->handleWCLEvent(
                 IEEE80211_EVT_COUNTRY_CODE_UPDATE, nullptr);
     }
 #else
-    XYLog("%s cc=%s\n", __FUNCTION__, data->cc);
-    if (data && data->cc[0] != 120 && data->cc[0] != 88) {
-        memcpy(geo_location_cc, data->cc, sizeof(geo_location_cc));
-        fNetIf->postMessage(APPLE80211_M_COUNTRY_CODE_CHANGED, NULL, 0, 0);
+    XYLog("%s cc=%s\n", __FUNCTION__, normCc);
+    if (memcmp(geo_location_cc, normCc, 2) != 0) {
+        memset(geo_location_cc, 0, sizeof(geo_location_cc));
+        memcpy(geo_location_cc, normCc, 2);
+        if (!hasOverride && fHalService)
+            fHalService->setCountryCode(normCc);
+        if (fNetIf)
+            fNetIf->postMessage(APPLE80211_M_COUNTRY_CODE_CHANGED, NULL, 0, 0);
     }
 #endif
     return kIOReturnSuccess;
@@ -1210,20 +1232,27 @@ setPOWER(OSObject *object,
         return kIOReturnError;
     IOLog("itlwm: setPOWER: num_radios[%d]  power_state(0:%u  1:%u  2:%u  3:%u)\n", pd->num_radios, pd->power_state[0], pd->power_state[1], pd->power_state[2], pd->power_state[3]);
     if (pd->num_radios > 0) {
-        bool isRunning = (fHalService->get80211Controller()->ic_ac.ac_if.if_flags & IFF_RUNNING) != 0;
+        const uint32_t prevPower = power_state;
+        struct ieee80211com *ic = fHalService->get80211Controller();
+        bool isRunning = (ic->ic_ac.ac_if.if_flags & IFF_RUNNING) != 0;
         if (pd->power_state[0] == 0) {
-            fHalService->get80211Controller()->ic_wcl_mac_reconfig = false;
-            changePowerStateToPriv(kPowerStateOff);
-            if (fHalService->get80211Controller()->ic_ac.ac_if.if_flags & (IFF_UP | IFF_RUNNING)) {
-                net80211_ifstats(fHalService->get80211Controller());
+            ic->ic_wcl_mac_reconfig = false;
+            if (ic->ic_ac.ac_if.if_flags & (IFF_UP | IFF_RUNNING)) {
+                net80211_ifstats(ic);
                 disableAdapter(bsdInterface);
             }
         } else {
+            // Keep PCI/MCU hardware awake across radio toggles instead of triggering
+            // async setPowerStateOff/suspend() races with enableAdapter().
+            fHalService->resume();
             changePowerStateToPriv(kPowerStateOn);
             if (!isRunning)
                 enableAdapter(bsdInterface);
         }
-        power_state = (pd->power_state[0]);
+        power_state = pd->power_state[0];
+        if (fNetIf && prevPower != power_state) {
+            fNetIf->postMessage(APPLE80211_M_POWER_CHANGED, NULL, 0, false);
+        }
     }
 
     return kIOReturnSuccess;
@@ -1232,6 +1261,7 @@ setPOWER(OSObject *object,
         return kIOReturnError;
     IOLog("itlwm: setPOWER: num_radios[%d]  power_state(0:%u  1:%u  2:%u  3:%u)\n", pd->num_radios, pd->power_state[0], pd->power_state[1], pd->power_state[2], pd->power_state[3]);
     if (pd->num_radios > 0) {
+        const uint32_t prevPower = power_state;
         bool isRunning = (fHalService->get80211Controller()->ic_ac.ac_if.if_flags & (IFF_UP | IFF_RUNNING)) != 0;
         if (pd->power_state[0] == 0) {
             changePowerStateToPriv(1);
@@ -1244,7 +1274,10 @@ setPOWER(OSObject *object,
             if (!isRunning)
                 enableAdapter(bsdInterface);
         }
-        power_state = (pd->power_state[0]);
+        power_state = pd->power_state[0];
+        if (fNetIf && prevPower != power_state) {
+            fNetIf->postMessage(APPLE80211_M_POWER_CHANGED, NULL, 0, false);
+        }
     }
 
     return kIOReturnSuccess;
@@ -1468,6 +1501,13 @@ void AirportItlwm::setPowerStateOn()
     pmPowerState = kPowerStateOn;
     /* The card was powered off: reload its firmware before it is enabled. */
     fHalService->resume();
+    if (power_state && bsdInterface && fHalService &&
+        !(fHalService->get80211Controller()->ic_ac.ac_if.if_flags & (IFF_UP | IFF_RUNNING))) {
+        enableAdapter(bsdInterface);
+    }
+    if (fNetIf && power_state) {
+        fNetIf->postMessage(APPLE80211_M_POWER_CHANGED, NULL, 0, false);
+    }
     pmPolicyMaker->acknowledgeSetPowerState();
 }
 

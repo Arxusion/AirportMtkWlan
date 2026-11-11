@@ -30,6 +30,7 @@
 
 #include "MtkMwx.hpp"
 #include <IOKit/IODeviceTreeSupport.h>
+#include <HAL/MtkNvramHelper.hpp>
 
 char nmx_wifi_band;	/* NVRAM nullmoth-wifi-band, read at preinit: '5', '2' or 0 (prefer 5 GHz) */
 
@@ -1993,6 +1994,9 @@ mwx_rx_deliver(struct mwx_softc *sc, struct mbuf *m, struct ieee80211_rxinfo *rx
 }
 
 /*
+ * RX A-MSDU reassembly helpers (mwx_amsdu_*) adapted from YYavicWiFi by
+ * yusufcanyavic (https://github.com/yusufcanyavic/YYavicWiFi, GPL-3.0-or-later).
+ *
  * RX A-MSDU: deliver the collected subframes as one A-MSDU MPDU
  * (802.11 header of the first, then every subframe padded to 4 bytes but
  * the last), as it was sent over the air. One subframe goes as it is.
@@ -2318,16 +2322,11 @@ mwx_preinit(struct mwx_softc *sc)
 	 *   unset = prefer 5 GHz (scans 5 GHz channels first, hides 2.4 GHz twins of 5 GHz SSIDs)
 	 */
 	nmx_wifi_band = 0;
-	if (IORegistryEntry *opts = IORegistryEntry::fromPath("/options", gIODTPlane)) {
-		OSData *d = OSDynamicCast(OSData, opts->copyProperty("mtk-wifi-band"));
-		if (!d)
-			d = OSDynamicCast(OSData, opts->copyProperty("nullmoth-wifi-band"));
-		if (d) {
-			if (d->getLength() >= 1)
-				nmx_wifi_band = ((const char *)d->getBytesNoCopy())[0];
-			d->release();
-		}
-		opts->release();
+	{
+		char bandBuf[8];
+		if (mtkReadNvramAscii("mtk-wifi-band", "nullmoth-wifi-band",
+		    bandBuf, sizeof(bandBuf)))
+			nmx_wifi_band = mtkParseBandOption(bandBuf, sizeof(bandBuf));
 	}
 	bool only5 = nmx_wifi_band == '5';
 	MWX_DEV_LOG(sc, "preinit wifi-band=%c: %s\n", nmx_wifi_band ? nmx_wifi_band : '-',
@@ -2548,9 +2547,22 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 	}
 	MWX_DEV_LOG(sc, "attach DMA resources ready\n");
 
-	/* set regulatory domain to '00' */
+	/* Initialize regulatory domain from boot-arg/NVRAM, defaulting to '00'. */
+	memset(sc->sc_alpha2, 0, sizeof(sc->sc_alpha2));
 	sc->sc_alpha2[0] = '0';
 	sc->sc_alpha2[1] = '0';
+	{
+		char rawCc[8] = {0};
+		char normCc[3] = {0};
+		if ((PE_parse_boot_argn("mtk_cc", rawCc, sizeof(rawCc)) ||
+		     PE_parse_boot_argn("itlwm_cc", rawCc, sizeof(rawCc)) ||
+		     mtkReadNvramAscii("mtk-wifi-cc", "nullmoth-wifi-cc",
+		         rawCc, sizeof(rawCc))) &&
+		    mtkNormalizeCountryCode(rawCc, sizeof(rawCc), normCc)) {
+			sc->sc_alpha2[0] = normCc[0];
+			sc->sc_alpha2[1] = normCc[1];
+		}
+	}
 
 	ic->ic_phytype = IEEE80211_T_OFDM;	/* not only, but not used */
 	ic->ic_opmode = IEEE80211_M_STA;	/* default to BSS mode */
@@ -2642,19 +2654,77 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 			    IEEE80211_VHTCAP_SUPP_CHAN_WIDTH_160MHZ;
 		}
 		/* 2 bits per NSS: 2 = MCS 0-9, 3 = not supported */
-		ic->ic_vht_rx_mcs_map = 0xfffa;
-		ic->ic_vht_tx_mcs_map = 0xfffa;
+		uint16_t mcs_map_2ss = (sc->sc_capa.num_streams >= 2) ? 0xfffa : 0xfffe;
+		ic->ic_vht_rx_mcs_map = mcs_map_2ss;
+		ic->ic_vht_tx_mcs_map = mcs_map_2ss;
 		ic->ic_vht_rx_highest = 0;
 		ic->ic_vht_tx_highest = 0;
 
 		/* 802.11ax Wi-Fi 6 HE capabilities & MCS rates */
-		ic->ic_he_mcs_nss_supp.rx_mcs_80 = htole16(0xfffa);
-		ic->ic_he_mcs_nss_supp.tx_mcs_80 = htole16(0xfffa);
+		memset(&ic->ic_he_cap_elem, 0, sizeof(ic->ic_he_cap_elem));
+		memset(ic->ic_ppe_thres, 0, sizeof(ic->ic_ppe_thres));
+
+		ic->ic_he_cap_elem.mac_cap_info[0] =
+		    IEEE80211_HE_MAC_CAP0_HTC_HE;
+		ic->ic_he_cap_elem.mac_cap_info[2] =
+		    IEEE80211_HE_MAC_CAP2_BSR;
+		ic->ic_he_cap_elem.mac_cap_info[3] =
+		    IEEE80211_HE_MAC_CAP3_OMI_CONTROL |
+		    IEEE80211_HE_MAC_CAP3_MAX_AMPDU_LEN_EXP_USE_VHT;
+		ic->ic_he_cap_elem.mac_cap_info[4] =
+		    IEEE80211_HE_MAC_CAP4_BQR |
+		    IEEE80211_HE_MAC_CAP4_AMDSU_IN_AMPDU;
+
+		ic->ic_he_cap_elem.phy_cap_info[0] =
+		    IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_40MHZ_IN_2G |
+		    IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_40MHZ_80MHZ_IN_5G;
+		ic->ic_he_cap_elem.phy_cap_info[1] =
+		    IEEE80211_HE_PHY_CAP1_LDPC_CODING_IN_PAYLOAD |
+		    IEEE80211_HE_PHY_CAP1_HE_LTF_AND_GI_FOR_HE_PPDUS_0_8US;
+		ic->ic_he_cap_elem.phy_cap_info[2] =
+		    IEEE80211_HE_PHY_CAP2_NDP_4x_LTF_AND_3_2US |
+		    IEEE80211_HE_PHY_CAP2_STBC_RX_UNDER_80MHZ;
+		ic->ic_he_cap_elem.phy_cap_info[4] =
+		    IEEE80211_HE_PHY_CAP4_SU_BEAMFORMEE |
+		    IEEE80211_HE_PHY_CAP4_BEAMFORMEE_MAX_STS_UNDER_80MHZ_4;
+		ic->ic_he_cap_elem.phy_cap_info[5] =
+		    IEEE80211_HE_PHY_CAP5_BEAMFORMEE_NUM_SND_DIM_UNDER_80MHZ_1 |
+		    IEEE80211_HE_PHY_CAP5_NG16_SU_FEEDBACK |
+		    IEEE80211_HE_PHY_CAP5_NG16_MU_FEEDBACK;
+		ic->ic_he_cap_elem.phy_cap_info[6] =
+		    IEEE80211_HE_PHY_CAP6_CODEBOOK_SIZE_42_SU |
+		    IEEE80211_HE_PHY_CAP6_CODEBOOK_SIZE_75_MU |
+		    IEEE80211_HE_PHY_CAP6_TRIG_SU_BEAMFORMER_FB |
+		    IEEE80211_HE_PHY_CAP6_TRIG_MU_BEAMFORMER_FB |
+		    IEEE80211_HE_PHY_CAP6_PARTIAL_BW_EXT_RANGE;
+		ic->ic_he_cap_elem.phy_cap_info[7] =
+		    IEEE80211_HE_PHY_CAP7_HE_SU_MU_PPDU_4XLTF_AND_08_US_GI;
+		ic->ic_he_cap_elem.phy_cap_info[8] =
+		    IEEE80211_HE_PHY_CAP8_HE_ER_SU_PPDU_4XLTF_AND_08_US_GI |
+		    IEEE80211_HE_PHY_CAP8_20MHZ_IN_40MHZ_HE_PPDU_IN_2G |
+		    IEEE80211_HE_PHY_CAP8_HE_ER_SU_1XLTF_AND_08_US_GI;
+		ic->ic_he_cap_elem.phy_cap_info[9] =
+		    IEEE80211_HE_PHY_CAP9_NON_TRIGGERED_CQI_FEEDBACK |
+		    IEEE80211_HE_PHY_CAP9_TX_1024_QAM_LESS_THAN_242_TONE_RU |
+		    IEEE80211_HE_PHY_CAP9_RX_1024_QAM_LESS_THAN_242_TONE_RU |
+		    IEEE80211_HE_PHY_CAP9_RX_FULL_BW_SU_USING_MU_WITH_COMP_SIGB |
+		    IEEE80211_HE_PHY_CAP9_RX_FULL_BW_SU_USING_MU_WITH_NON_COMP_SIGB |
+		    IEEE80211_HE_PHY_CAP9_NOMIMAL_PKT_PADDING_16US;
+
+		ic->ic_he_mcs_nss_supp.rx_mcs_80 = htole16(mcs_map_2ss);
+		ic->ic_he_mcs_nss_supp.tx_mcs_80 = htole16(mcs_map_2ss);
 		if (enable_160) {
 			ic->ic_he_cap_elem.phy_cap_info[0] |=
 			    IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_160MHZ_IN_5G;
-			ic->ic_he_mcs_nss_supp.rx_mcs_160 = htole16(0xfffa);
-			ic->ic_he_mcs_nss_supp.tx_mcs_160 = htole16(0xfffa);
+			ic->ic_he_cap_elem.phy_cap_info[4] |=
+			    IEEE80211_HE_PHY_CAP4_BEAMFORMEE_MAX_STS_ABOVE_80MHZ_4;
+			ic->ic_he_cap_elem.phy_cap_info[7] |=
+			    IEEE80211_HE_PHY_CAP7_STBC_RX_ABOVE_80MHZ;
+			ic->ic_he_cap_elem.phy_cap_info[8] |=
+			    IEEE80211_HE_PHY_CAP8_20MHZ_IN_160MHZ_HE_PPDU |
+			    IEEE80211_HE_PHY_CAP8_80MHZ_IN_160MHZ_HE_PPDU;
+			ic->ic_he_mcs_nss_supp.rx_mcs_160 = htole16(mcs_map_2ss);
+			ic->ic_he_mcs_nss_supp.tx_mcs_160 = htole16(mcs_map_2ss);
 		} else {
 			ic->ic_he_mcs_nss_supp.rx_mcs_160 = htole16(0xffff);
 			ic->ic_he_mcs_nss_supp.tx_mcs_160 = htole16(0xffff);
@@ -5226,9 +5296,7 @@ mt7921_mcu_hw_scan(struct mwx_softc *sc, int bgscan)
 			continue;
 #ifdef AIRPORT_WCL
 		bool restrict_chan = ic->ic_wcl_scan_requested && ic->ic_wcl_scan_restricted;
-		if (restrict_chan && ic->ic_wcl_scan_ssid_length == 0 && !IEEE80211_IS_CHAN_2GHZ(c)) {
-			// Allow full 5 GHz discovery during broadcast network scans
-		} else if (!AirportWCL::scanChannelSelected(ic->ic_wcl_scan_channels,
+		if (!AirportWCL::scanChannelSelected(ic->ic_wcl_scan_channels,
 		    restrict_chan,
 		    ieee80211_mhz2ieee(c->ic_freq, 0)))
 			continue;
@@ -5377,7 +5445,8 @@ mt7921_mcu_scan_event(struct mwx_softc *sc, struct mbuf *m)
 	}
 
 	if (mt7921_mcu_hw_scan_cancel(sc) != 0)
-		return;
+		MWX_DEV_LOG(sc, "hw scan cancel failed; clearing local scan state\n");
+	sc->sc_flags &= ~(MWX_FLAG_SCANNING | MWX_FLAG_BGSCAN);
 	task_add(systq, &sc->sc_scan_task);
 }
 
@@ -5450,7 +5519,10 @@ mt7921_mcu_set_channel_domain(struct mwx_softc *sc)
 		channel++;
 		n_2ch++;
 	}
-	hdr->bw_5g = (sc->sc_hwtype == MWX_HW_MT7922) ? 3 : 2; /* 3 = 160M, 2 = 80M */
+	int no_160 = 0;
+	bool allow_160 = (sc->sc_hwtype == MWX_HW_MT7922) &&
+	    !PE_parse_boot_argn("-no160", &no_160, sizeof(no_160));
+	hdr->bw_5g = allow_160 ? 3 : 2; /* 3 = 160M, 2 = 80M */
 	for (i = 0; i <= IEEE80211_CHAN_MAX; i++) {
 		chan = &ic->ic_channels[i];
 		if (!IEEE80211_IS_CHAN_5GHZ(chan))
@@ -7223,7 +7295,8 @@ mt7921_mcu_add_sta_tlv(struct mbuf *m, uint16_t *tlvnum, struct mwx_softc *sc,
 	else
 		supp_rates = FIELD_PREP(RA_LEGACY_OFDM, supp_rates);
 #else
-	supp_rates = RA_LEGACY_OFDM;
+	supp_rates = (ni && ni->ni_chan && IEEE80211_IS_CHAN_2GHZ(ni->ni_chan)) ?
+	    (RA_LEGACY_OFDM | RA_LEGACY_CCK) : RA_LEGACY_OFDM;
 #endif
 
 	ra_info = (struct sta_rec_ra_info *)mwx_append_tlv(m, tlvnum,
@@ -7767,13 +7840,48 @@ MtkMwx::supportedFeatures()
 const char *
 MtkMwx::getFirmwareCountryCode()
 {
-	static char alpha2[3] = "IN";
-	if (com != NULL && com->sc_alpha2[0] && com->sc_alpha2[0] != '0') {
+	static char alpha2[3] = "00";
+	if (com != NULL && com->sc_alpha2[0] && com->sc_alpha2[1]) {
 		alpha2[0] = com->sc_alpha2[0];
 		alpha2[1] = com->sc_alpha2[1];
 		alpha2[2] = '\0';
+	} else {
+		alpha2[0] = '0';
+		alpha2[1] = '0';
+		alpha2[2] = '\0';
 	}
 	return alpha2;
+}
+
+IOReturn
+MtkMwx::setCountryCode(const char *cc)
+{
+	char normCc[3];
+	if (com == NULL || !cc || !mtkNormalizeCountryCode(cc, strlen(cc), normCc))
+		return kIOReturnBadArgument;
+
+	if (com->sc_alpha2[0] == normCc[0] && com->sc_alpha2[1] == normCc[1])
+		return kIOReturnSuccess;
+
+	com->sc_alpha2[0] = normCc[0];
+	com->sc_alpha2[1] = normCc[1];
+	com->sc_alpha2[2] = '\0';
+	com->sc_alpha2[3] = '\0';
+
+	if (com->sc_fw_loaded && !com->sc_resetting && !com->sc_suspended &&
+	    (com->sc_ic.ic_if.if_flags & IFF_RUNNING)) {
+		int rv = mt7921_mcu_set_channel_domain(com);
+		if (rv == 0)
+			rv = mt7921_mcu_set_rate_txpower(com);
+		if (rv != 0) {
+			MWX_DEV_LOG(com, "setCountryCode(%s) mcu update error=%d\n",
+			    normCc, rv);
+			return kIOReturnIOError;
+		}
+		MWX_DEV_LOG(com, "setCountryCode(%s) updated channel domain & txpower\n",
+		    normCc);
+	}
+	return kIOReturnSuccess;
 }
 
 uint32_t
@@ -7842,6 +7950,10 @@ static int mwx_send_assoc_status(struct mwx_softc *sc, uint32_t cmd, void *data,
     return rv ? rv : (status ? EIO : 0);
 }
 
+/*
+ * HE STA TLV construction (yy_he_*, mwx_yy_sta_he_tlv) adapted from YYavicWiFi
+ * by yusufcanyavic (https://github.com/yusufcanyavic/YYavicWiFi, GPL-3.0-or-later).
+ */
 static inline uint8_t
 yy_he_bits(uint8_t v, uint8_t mask)
 {
@@ -7959,31 +8071,35 @@ int mt7921_mcu_set_associated_peer(struct mwx_softc *sc)
     if (!m) return ENOBUFS;
     uint16_t tlvnum = 0;
     mt7921_mcu_add_basic_tlv(m, &tlvnum, sc, ni, 1, 0);
+    struct sta_rec_phy *phy = (struct sta_rec_phy *)mwx_append_tlv(m,
+        &tlvnum, STA_REC_PHY, sizeof(*phy));
+    phy->basic_rate = htole16(0x0150);
+    phy->phy_type = mt7921_get_phy_mode_v2(sc, ni);
+    phy->ampdu = (ni->ni_flags & IEEE80211_NODE_HT) ? (ni->ni_ampdu_param & 0x1f) : 0;
+    /*
+     * Keep phy->rcpi at 0xdc (matching Linux mt76). The MT7921 MCU firmware
+     * autonomously tracks RCPI from received frames in its WTBL hardware table.
+     * Clamping to 0xdc gives the firmware full rate margin even when operating far from the AP.
+     */
+    phy->rcpi = 0xdc;
+    struct sta_rec_ra_info *ra = (struct sta_rec_ra_info *)mwx_append_tlv(m,
+        &tlvnum, STA_REC_RA, sizeof(*ra));
+    ra->legacy = htole16((ni->ni_chan && IEEE80211_IS_CHAN_2GHZ(ni->ni_chan)) ?
+        (RA_LEGACY_OFDM | RA_LEGACY_CCK) : RA_LEGACY_OFDM);
     if (ni->ni_flags & IEEE80211_NODE_HT) {
-        /* 802.11n: peer HT caps, PHY type/A-MPDU params, RA MCS mask. */
+        /* 802.11n: peer HT caps and RA MCS mask. */
         struct sta_rec_ht_v1 *ht = (struct sta_rec_ht_v1 *)mwx_append_tlv(m,
             &tlvnum, STA_REC_HT, sizeof(*ht));
         ht->ht_cap = htole16(ni->ni_htcaps);
-        struct sta_rec_phy *phy = (struct sta_rec_phy *)mwx_append_tlv(m,
-            &tlvnum, STA_REC_PHY, sizeof(*phy));
-        phy->basic_rate = htole16(0x0150);
-        phy->phy_type = mt7921_get_phy_mode_v2(sc, ni);
-        phy->ampdu = ni->ni_ampdu_param & 0x1f;
-        /*
-         * Keep phy->rcpi at 0xdc (matching Linux mt76). The MT7921 MCU firmware
-         * tracks RCPI autonomously in hardware. Clamping to 0xdc gives the firmware
-         * full rate margin even when operating far from the AP.
-         */
-        phy->rcpi = 0xdc;
-        struct sta_rec_ra_info *ra = (struct sta_rec_ra_info *)mwx_append_tlv(m,
-            &tlvnum, STA_REC_RA, sizeof(*ra));
-        ra->legacy = htole16(RA_LEGACY_OFDM);
         for (int i = 0; i < HT_MCS_MASK_NUM; i++)
             ra->rx_mcs_bitmask[i] = ni->ni_rxmcs[i] &
                 (i < 2 ? sc->sc_ic.ic_sup_mcs[i] : 0);
         MWX_DEV_LOG(sc, "assoc_peer HT htcaps=0x%04x ampdu=0x%02x phy=0x%02x mcs=%02x%02x\n",
             ni->ni_htcaps, ni->ni_ampdu_param, phy->phy_type,
             ra->rx_mcs_bitmask[1], ra->rx_mcs_bitmask[0]);
+    } else {
+        MWX_DEV_LOG(sc, "assoc_peer legacy phy=0x%02x legacy_rates=0x%04x\n",
+            phy->phy_type, le16toh(ra->legacy));
     }
     if ((ni->ni_flags & IEEE80211_NODE_HT) && sc->sc_tx_amsdu) {
         /* Hardware TX A-MSDU (Linux mt76_connac_mcu_sta_amsdu_tlv). */

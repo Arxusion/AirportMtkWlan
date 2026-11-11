@@ -139,14 +139,14 @@ void AirportItlwmSkywalkInterface::associateSSID(uint8_t *ssid, uint32_t ssid_le
     }
     
 #endif
-    if (authtype_upper & (APPLE80211_AUTHTYPE_WPA | APPLE80211_AUTHTYPE_WPA_PSK | APPLE80211_AUTHTYPE_WPA2 | APPLE80211_AUTHTYPE_WPA2_PSK | APPLE80211_AUTHTYPE_SHA256_PSK | APPLE80211_AUTHTYPE_SHA256_8021X)) {
+    if (authtype_upper & (APPLE80211_AUTHTYPE_WPA | APPLE80211_AUTHTYPE_WPA_PSK | APPLE80211_AUTHTYPE_WPA2 | APPLE80211_AUTHTYPE_WPA2_PSK | APPLE80211_AUTHTYPE_FT_PSK | APPLE80211_AUTHTYPE_FT_8021X | APPLE80211_AUTHTYPE_SHA256_PSK | APPLE80211_AUTHTYPE_SHA256_8021X | APPLE80211_AUTHTYPE_WPA3_ENTERPRISE | APPLE80211_AUTHTYPE_WPA3_FT_ENTERPRISE)) {
         XYLog("%s %d\n", __FUNCTION__, __LINE__);
         wpa.i_protos = IEEE80211_WPA_PROTO_WPA1 | IEEE80211_WPA_PROTO_WPA2;
     }
     
-    if (authtype_upper & (APPLE80211_AUTHTYPE_WPA_PSK | APPLE80211_AUTHTYPE_WPA2_PSK | APPLE80211_AUTHTYPE_SHA256_PSK)) {
+    if (authtype_upper & (APPLE80211_AUTHTYPE_WPA_PSK | APPLE80211_AUTHTYPE_WPA2_PSK | APPLE80211_AUTHTYPE_FT_PSK | APPLE80211_AUTHTYPE_SHA256_PSK)) {
         XYLog("%s %d\n", __FUNCTION__, __LINE__);
-        wpa.i_akms |= IEEE80211_WPA_AKM_PSK | IEEE80211_WPA_AKM_SHA256_PSK | IEEE80211_WPA_AKM_FT_PSK;
+        wpa.i_akms |= IEEE80211_WPA_AKM_PSK | IEEE80211_WPA_AKM_SHA256_PSK;
         wpa.i_enabled = 1;
         if (key_len >= 8 && key_len < IEEE80211_PMK_LEN) {
             // a passphrase rather than the PMK macOS normally derives
@@ -161,9 +161,9 @@ void AirportItlwmSkywalkInterface::associateSSID(uint8_t *ssid, uint32_t ssid_le
         ic->ic_flags |= IEEE80211_F_PSK;
         ieee80211_ioctl_setwpaparms(ic, &wpa);
     }
-    if (authtype_upper & (APPLE80211_AUTHTYPE_WPA | APPLE80211_AUTHTYPE_WPA2 | APPLE80211_AUTHTYPE_SHA256_8021X)) {
+    if (authtype_upper & (APPLE80211_AUTHTYPE_WPA | APPLE80211_AUTHTYPE_WPA2 | APPLE80211_AUTHTYPE_FT_8021X | APPLE80211_AUTHTYPE_SHA256_8021X | APPLE80211_AUTHTYPE_WPA3_ENTERPRISE | APPLE80211_AUTHTYPE_WPA3_FT_ENTERPRISE)) {
         XYLog("%s %d\n", __FUNCTION__, __LINE__);
-        wpa.i_akms |= IEEE80211_WPA_AKM_8021X | IEEE80211_WPA_AKM_SHA256_8021X | IEEE80211_WPA_AKM_FT_8021X;
+        wpa.i_akms |= IEEE80211_WPA_AKM_8021X | IEEE80211_WPA_AKM_SHA256_8021X;
         wpa.i_enabled = 1;
         ieee80211_ioctl_setwpaparms(ic, &wpa);
     }
@@ -400,18 +400,18 @@ setCIPHER_KEY(struct apple80211_key *key)
             }
             break;
         case APPLE80211_CIPHER_PMK:
-            XYLog("Setting WPA PMK is not supported\n");
-            break;
         case APPLE80211_CIPHER_MSK:
-            XYLog("Setting MSK\n");
-            ieee80211_pmksa_add(fHalService->get80211Controller(), IEEE80211_AKM_8021X,
-                                fHalService->get80211Controller()->ic_bss->ni_macaddr, key->key, 0);
+        case APPLE80211_CIPHER_PMKSA: {
+            struct ieee80211com *ic = fHalService->get80211Controller();
+            XYLog("Setting enterprise cipher key (%u, len=%u)\n",
+                  key->key_cipher_type, key->key_len);
+            if (ic && ic->ic_bss && key->key_len >= IEEE80211_PMK_LEN) {
+                enum ieee80211_akm akm = (ic->ic_bss->ni_rsnakms != 0) ?
+                    (enum ieee80211_akm)ic->ic_bss->ni_rsnakms : IEEE80211_AKM_8021X;
+                ieee80211_pmksa_add(ic, akm, ic->ic_bss->ni_macaddr, key->key, 0);
+            }
             break;
-        case APPLE80211_CIPHER_PMKSA:
-            XYLog("Setting WPA PMKSA\n");
-            ieee80211_pmksa_add(fHalService->get80211Controller(), IEEE80211_AKM_8021X,
-                                fHalService->get80211Controller()->ic_bss->ni_macaddr, key->key, 0);
-            break;
+        }
     }
     //fInterface->postMessage(APPLE80211_M_CIPHER_KEY_CHANGED);
     return kIOReturnSuccess;

@@ -1,7 +1,7 @@
 from pathlib import Path
 import subprocess,sys,tempfile
 b=Path(__file__).resolve().parent
-src=Path(sys.argv[1]) if len(sys.argv)>1 else b.parents[1]/'SimpleMtkWlan/hal_mwx/MtkMwx.cpp';s=src.read_text();f=s[s.index('int\nmwx_tx('):s.index('\nvoid\nmwx_rx(')]
+src=Path(sys.argv[1]) if len(sys.argv)>1 else b.parents[1]/'SimpleMtkWlan/hal_mwx/MtkMwx.cpp';s=src.read_text();a=s.index('int\nmwx_tx(');f=s[a:s.index('\n}\n',a)+3]
 pre=r'''
 #include <cassert>
 #include <cstdint>

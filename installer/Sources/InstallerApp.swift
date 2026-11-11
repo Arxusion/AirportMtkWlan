@@ -1,6 +1,6 @@
 //
 //  InstallerApp.swift
-//  AirportMtkWlan Installer v2.0
+//  AirportMtkWlan Installer v2.1
 //
 //  Copyright © 2026 Aswini Soni (Arxusion). All rights reserved.
 //
@@ -162,7 +162,7 @@ struct ContentView: View {
                         .font(.system(size: 24, weight: .bold, design: .serif))
                         .foregroundColor(.white)
                     
-                    Text("v2.0")
+                    Text("v2.1")
                         .font(.system(size: 11, weight: .semibold, design: .monospaced))
                         .foregroundColor(Color(red: 0.95, green: 0.72, blue: 0.38))
                         .padding(.horizontal, 6)
@@ -671,7 +671,7 @@ struct ContentView: View {
                 isProcessing = false
                 if ok {
                     alertTitle = "Deployment Successful"
-                    alertMessage = "AirportMtkWlan v2.0 has been deployed to \(dest.ocPath). Reboot to apply."
+                    alertMessage = "AirportMtkWlan v2.1 has been deployed to \(dest.ocPath). Reboot to apply."
                     showAlert = true
                 } else {
                     alertTitle = "Deployment Failed"
@@ -716,7 +716,7 @@ struct ContentView: View {
         task.waitUntilExit()
         
         let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        var report = "=== AirportMtkWlan Diagnostic Dump v2.0 ===\nDate: \(Date())\n\n"
+        var report = "=== AirportMtkWlan Diagnostic Dump v2.1 ===\nDate: \(Date())\n\n"
         for line in out.components(separatedBy: "\n") {
             if line.contains("MtkDebugLog") || line.contains("IO80211") || line.contains("AirportMtkWlan") {
                 report += line + "\n"
