@@ -33,11 +33,11 @@ struct SimpleMtkWlan: Super {Hal* fHalService=&hal;IONetworkStats* fpNetStats;bo
 main=r'''
 int main(){
  SimpleMtkWlan d;IONetworkInterface iface;
- assert(d.configureInterface(&iface));assert(iface.calls==1);assert(iface.options==kIONetworkWorkLoopSynchronous);
+ assert(d.configureInterface(&iface));assert(iface.calls==1);assert(iface.options==0);
  iface.result=-1;assert(!d.configureInterface(&iface));
  iface.calls=0;iface.missing=true;assert(!d.configureInterface(&iface));assert(iface.calls==0);
  iface.missing=false;d.ok=false;assert(!d.configureInterface(&iface));assert(iface.calls==0);
- puts("PASS: extracted configureInterface requests shared work-loop serialization, propagates pull-configuration failure, preserves early failures. Host contract test only, not Darwin scheduler/hardware validation.");
+ puts("PASS: extracted configureInterface uses async output pull thread (0, with gated batching in outputStart), propagates pull-configuration failure, preserves early failures. Host contract test only, not Darwin scheduler/hardware validation.");
 }
 '''
 tmp=tempfile.TemporaryDirectory(prefix='mtk-tx-test-');art=Path(tmp.name)

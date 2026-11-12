@@ -7,14 +7,18 @@ pre=r'''
 #include <cassert>
 #include <cstdio>
 #include <cstddef>
+#include <cstdint>
 #define NBPFILTER 0
+#define MT_DMA_CPU_IDX 0x08
 const int IFF_RUNNING=1,IFF_UP=2,IEEE80211_S_RUN=4,IEEE80211_F_TX_MGMT_ONLY=8;
 struct ieee80211_node{int refs=0;};
 struct mbuf{ieee80211_node*node;};struct queue{mbuf*m=nullptr;};
 struct netstat{unsigned long long outputPackets=0,outputErrors=0;};
 struct ifnet {void*if_softc;int if_flags=3;queue if_snd;int if_oerrors=0,if_timer=0;netstat*netStat=nullptr;};
 struct ieee80211com {int ic_state=4,ic_xflags=0;queue ic_mgtq;};
-struct mwx_softc{ieee80211com sc_ic;unsigned sc_tx_full_cnt=0;};
+struct mwx_queue {int mq_regbase=0,mq_prod=0;};
+struct mwx_softc{ieee80211com sc_ic;mwx_queue sc_txq;unsigned sc_tx_full_cnt=0;};
+inline void mwx_write(mwx_softc*,int,int){}
 int room=1;
 int mwx_tx_has_room(mwx_softc*,unsigned){return room;}
 int paused;
@@ -28,7 +32,7 @@ mbuf*m_pullup(mbuf*m,size_t){return m;}
 mbuf*ieee80211_encap(ifnet*,mbuf*m,ieee80211_node**ni){*ni=m->node;(*ni)->refs++;return m;}
 void ieee80211_release_node(ieee80211com*,ieee80211_node*ni){assert(ni->refs>0);ni->refs--;}
 int result;
-int mwx_tx(mwx_softc*,mbuf*,ieee80211_node*ni){assert(ni->refs==1);return result;}
+int mwx_tx(mwx_softc*,mbuf*,ieee80211_node*ni,bool=true){assert(ni->refs==1);return result;}
 '''
 main=r'''
 int main(){

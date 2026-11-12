@@ -753,7 +753,9 @@ void	mwx_delete_key(struct ieee80211com *, struct ieee80211_node *,
 	    struct ieee80211_key *);
 void	mwx_setkey_task(void *);
 
-int	mwx_tx(struct mwx_softc *, struct mbuf *, struct ieee80211_node *);
+int	mwx_tx(struct mwx_softc *, struct mbuf *, struct ieee80211_node *,
+	    bool = true);
+void	mwx_pci_disable_aspm(struct mwx_softc *, IOPCIDevice *);
 void	mwx_rx(struct mwx_softc *, struct mbuf *, struct mbuf_list *);
 int	mwx_count_nodes(struct ieee80211com *);
 int	mwx_intr(void *);
@@ -784,7 +786,7 @@ void	mwx_dma_free(struct mwx_softc *);
 int	mwx_dma_tx_enqueue(struct mwx_softc *, struct mwx_queue *,
 	    struct mbuf *);
 int	mwx_dma_txwi_enqueue(struct mwx_softc *, struct mwx_queue *,
-	    struct mwx_txwi *);
+	    struct mwx_txwi *, bool = true);
 void	mwx_dma_tx_cleanup(struct mwx_softc *, struct mwx_queue *);
 void	mwx_dma_tx_done(struct mwx_softc *);
 void	mwx_dma_rx_process(struct mwx_softc *, struct mbuf_list *);
@@ -818,6 +820,7 @@ void		mwx_ampdu_tx_stop(struct ieee80211com *, struct ieee80211_node *,
 int		mwx_mcu_fw_pmctrl(struct mwx_softc *);
 int		mwx_mcu_drv_pmctrl(struct mwx_softc *);
 int		mwx_wfsys_reset(struct mwx_softc *sc);
+int		mwx_ensure_drv_own(struct mwx_softc *, const char *);
 uint32_t	mwx_reg_addr(struct mwx_softc *, uint32_t);
 int		mwx_init_hardware(struct mwx_softc *);
 int		mt7921_mcu_init(struct mwx_softc *);
@@ -1025,8 +1028,14 @@ mwx_init_hw(struct ifnet *ifp)
 	struct ieee80211com *ic = &sc->sc_ic;
 	struct mwx_node *mn;
 	const uint8_t *lladdr = ((struct arpcom *)ifp)->ac_enaddr;
+	bool reloaded;
 	int rv;
 
+	if (sc->sc_hard_reset)
+		sc->sc_fw_loaded = 0;
+
+	reloaded = !sc->sc_fw_loaded;
+ retry_init:
 	if (!sc->sc_fw_loaded) {
 		rv = mwx_preinit(sc);
 		if (rv) {
@@ -1059,6 +1068,13 @@ mwx_init_hw(struct ifnet *ifp)
 	rv = mt7921_mcu_set_mac_enable(sc, 0, 1);
 	if (rv) {
 		MWX_DEV_LOG(sc, "init mac enable failed error=%d\n", rv);
+		if (!reloaded) {
+			MWX_DEV_LOG(sc, "init warm enable failed, reloading firmware\n");
+			sc->sc_fw_loaded = 0;
+			sc->sc_hard_reset = 1;
+			reloaded = true;
+			goto retry_init;
+		}
 		return rv;
 	}
 	MWX_DEV_LOG(sc, "init mac enable ok\n");
@@ -1198,19 +1214,47 @@ mwx_stop(struct ifnet *ifp)
 
 	if (was_running) {
 		struct mwx_node *mn;
+		int fw_err = 0;
 
 		free(sc->sc_bgscan_arg, M_DEVBUF, sc->sc_bgscan_arg_size);
 		sc->sc_bgscan_arg = NULL;
 		sc->sc_bgscan_arg_size = 0;
 		if (sc->sc_flags & MWX_FLAG_SCANNING) {
-			mt7921_mcu_hw_scan_cancel(sc);
+			if (mt7921_mcu_hw_scan_cancel(sc) != 0)
+				fw_err = 1;
 			sc->sc_flags &= ~MWX_FLAG_SCANNING;
 		}
 
+		/*
+		 * Tear down the active BSS and peer STA before disabling the
+		 * device/OMAC; deactivating UNI_BSS_INFO_BASIC while a peer
+		 * WCID is still bound causes MT7921 firmware to coredump.
+		 */
+		if (!fw_err && ic->ic_opmode == IEEE80211_M_STA &&
+		    (ic->ic_state == IEEE80211_S_RUN || sc->sc_sta_added)) {
+			int brv = (ic->ic_state == IEEE80211_S_RUN) ?
+			    mt7921_mcu_set_associated_bss(sc, 0) : 0;
+			int srv = (ic->ic_bss != NULL) ?
+			    mt7921_mac_sta_update(sc, ic->ic_bss, 0, 0) : 0;
+			MWX_DEV_LOG(sc, "stop leave BSS: bss_off=%d sta_remove=%d\n",
+			    brv, srv);
+			sc->sc_sta_added = 0;
+			if (brv != 0 || srv != 0)
+				fw_err = 1;
+		}
+
 		mn = &sc->sc_vif.vif_mn;
-		mt7921_mcu_uni_add_dev(sc, &sc->sc_vif, mn, 0);
-		mwx_mcu_set_deep_sleep(sc, 1);
-		mt7921_mcu_set_mac_enable(sc, 0, 0);
+		if (!fw_err && mt7921_mcu_uni_add_dev(sc, &sc->sc_vif, mn, 0) != 0)
+			fw_err = 1;
+		if (!fw_err && mt7921_mcu_set_mac_enable(sc, 0, 0) != 0)
+			fw_err = 1;
+		if (!fw_err && mwx_mcu_set_deep_sleep(sc, 1) != 0)
+			fw_err = 1;
+		if (fw_err) {
+			MWX_DEV_LOG(sc, "stop: MCU teardown failed, marking hard reset\n");
+			sc->sc_fw_loaded = 0;
+			sc->sc_hard_reset = 1;
+		}
 	}
 
 	sc->sc_newstate(ic, IEEE80211_S_INIT, -1);
@@ -1273,6 +1317,7 @@ mwx_start(struct ifnet *ifp)
 	struct ieee80211_node *ni;
 	struct ether_header *eh;
 	struct mbuf *m;
+	uint32_t since_doorbell = 0;
 
 	if (!(ifp->if_flags & IFF_RUNNING) || ifq_is_oactive(&ifp->if_snd))
 		return;
@@ -1322,7 +1367,8 @@ mwx_start(struct ifnet *ifp)
 		if (ic->ic_rawbpf != NULL)
 			bpf_mtap(ic->ic_rawbpf, m, BPF_DIRECTION_OUT);
 #endif
-		int rv = mwx_tx(sc, m, ni);
+		/* Defer the PCIe CPU_IDX MMIO doorbell to once per burst (or every 16 frames). */
+		int rv = mwx_tx(sc, m, ni, false);
 		/* mwx_tx copies node metadata into the descriptor; completion uses
 		 * the packet/token only, so release the enqueue reference here. */
 		ieee80211_release_node(ic, ni);
@@ -1332,12 +1378,20 @@ mwx_start(struct ifnet *ifp)
 				ifp->netStat->outputErrors++;
 			continue;
 		}
+		if (++since_doorbell >= 16) {
+			mwx_write(sc, sc->sc_txq.mq_regbase + MT_DMA_CPU_IDX,
+			    sc->sc_txq.mq_prod);
+			since_doorbell = 0;
+		}
 		if (ifp->netStat)
 			ifp->netStat->outputPackets++;
 
 		if (ifp->if_flags & IFF_UP)
 			ifp->if_timer = 1;
 	}
+	if (since_doorbell > 0)
+		mwx_write(sc, sc->sc_txq.mq_regbase + MT_DMA_CPU_IDX,
+		    sc->sc_txq.mq_prod);
 }
 
 int
@@ -1517,6 +1571,9 @@ mwx_newstate(struct ieee80211com *ic, enum ieee80211_state nstate, int arg)
 	    nstate != IEEE80211_S_AUTH)
 		return 0;
 
+	if (!(ic->ic_if.if_flags & IFF_UP) && nstate > IEEE80211_S_INIT)
+		return 0;
+
 	if (ic->ic_state == IEEE80211_S_RUN) {
 		/* cancel other tasks here */
 	}
@@ -1572,6 +1629,15 @@ mwx_newstate_task(void *ptr)
 
 	DPRINTF("%s: %s %d -> %d\n", DEVNAME(sc), __func__, ostate, nstate);
 	MWX_DEV_LOG(sc, "newstate task %d -> %d arg=%d\n", ostate, nstate, arg);
+
+	if (nstate > IEEE80211_S_INIT &&
+	    (ic->ic_if.if_flags & (IFF_UP | IFF_RUNNING)) !=
+	    (IFF_UP | IFF_RUNNING)) {
+		MWX_DEV_LOG(sc, "newstate task skipped: interface down flags=0x%x\n",
+		    ic->ic_if.if_flags);
+		splx(s);
+		return;
+	}
 
 	switch (nstate) {
 	case IEEE80211_S_INIT:
@@ -1980,7 +2046,8 @@ mwx_tx_linearize(struct mbuf *m)
 }
 
 int
-mwx_tx(struct mwx_softc *sc, struct mbuf *m, struct ieee80211_node *ni)
+mwx_tx(struct mwx_softc *sc, struct mbuf *m, struct ieee80211_node *ni,
+    bool doorbell)
 {
 	struct mwx_node *mn = (struct mwx_node *)ni;
 	struct mwx_txwi *mt;
@@ -2038,7 +2105,7 @@ mwx_tx(struct mwx_softc *sc, struct mbuf *m, struct ieee80211_node *ni)
 		tx_log_count++;
 	}
 
-	rv = mwx_dma_txwi_enqueue(sc, &sc->sc_txq, mt);
+	rv = mwx_dma_txwi_enqueue(sc, &sc->sc_txq, mt, doorbell);
 	if (rv != 0)
 		mwx_txwi_put(sc, mt);
 	return rv;
@@ -2187,10 +2254,13 @@ mwx_rx(struct mwx_softc *sc, struct mbuf *m, struct mbuf_list *ml)
 		mwx_amsdu_add(sc, m, &rxi, ml);
 		return;
 	}
-	if (sc->sc_amsdu_n > 0)		/* another frame ends a pending A-MSDU */
-		mwx_amsdu_flush(sc, ml);
-
 	wh = mtod(m, struct ieee80211_frame *);
+	/* Only a non-AMSDU data frame from the same TA ends a pending A-MSDU;
+	 * beacons/mgmt/control frames must not split it into ba_below drops. */
+	if (sc->sc_amsdu_n > 0 &&
+	    (wh->i_fc[0] & IEEE80211_FC0_TYPE_MASK) == IEEE80211_FC0_TYPE_DATA &&
+	    IEEE80211_ADDR_EQ(wh->i_addr2, sc->sc_amsdu_ta))
+		mwx_amsdu_flush(sc, ml);
 	if (sc->sc_rx_delivered < 32) {
 		uint8_t type = wh->i_fc[0] & IEEE80211_FC0_TYPE_MASK;
 		uint8_t subtype = wh->i_fc[0] & IEEE80211_FC0_SUBTYPE_MASK;
@@ -2282,7 +2352,8 @@ mwx_intr(void *arg)
 	struct mwx_softc *sc = (struct mwx_softc *)arg;
 	uint32_t intr, intr_sw, forced;
 	uint32_t mask = sc->sc_intr_mask;
-	const int max_passes = 8;
+	/* Yield _fWorkloop between short bursts so output/WCL/watchdog aren't starved. */
+	const int max_passes = 2;
 	uint32_t work_remaining = 0;
 	static uint32_t intr_log_count;
 	static uint32_t intr_unhandled_log_count;
@@ -2450,7 +2521,18 @@ mwx_preinit(struct mwx_softc *sc)
 	int rv, i;
 	uint8_t chan;
 
-	MWX_DEV_LOG(sc, "preinit start fw_loaded=%d\n", sc->sc_fw_loaded);
+	MWX_DEV_LOG(sc, "preinit start fw_loaded=%d hard_reset=%d\n",
+	    sc->sc_fw_loaded, sc->sc_hard_reset);
+
+	if (sc->sc_hard_reset) {
+		mwx_write(sc, MT_WFDMA0_HOST_INT_ENA, 0);
+		if (mwx_ensure_drv_own(sc, "preinit") != 0)
+			return EIO;
+		mwx_set(sc, MT_MCU2HOST_SW_INT_ENA, MT_MCU_CMD_WAKE_RX_PCIE);
+		mwx_write(sc, MT_WFDMA0_HOST_INT_ENA, 0);
+		mwx_write(sc, MT_PCIE_MAC_INT_ENABLE, 0xff);
+		sc->sc_hard_reset = 0;
+	}
 
 	if ((rv = mwx_init_hardware(sc)) != 0) {
 		MWX_DEV_LOG(sc, "preinit hardware init failed error=%d\n", rv);
@@ -2634,32 +2716,10 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 	MWX_DEV_LOG(sc, "attach interrupt mapped source=%s\n",
 	    pci_intr_string(pa->pa_pc, ih));
 
-	if (mwx_mcu_fw_pmctrl(sc) != 0 ||
-	    mwx_mcu_drv_pmctrl(sc) != 0) {
-		/*
-		 * A warm reboot does not power-cycle the M.2 card, so the chip
-		 * can be left wedged by the previous OS session. Try to recover
-		 * instead of failing: WFSYS reset first, then a PCIe FLR.
-		 */
-		MWX_DEV_LOG(sc, "attach MCU power control failed lpctl=0x%08x, "
-		    "trying WFSYS reset\n", mwx_read(sc, MT_CONN_ON_LPCTL));
-		mwx_wfsys_reset(sc);
-		if (mwx_mcu_fw_pmctrl(sc) != 0 ||
-		    mwx_mcu_drv_pmctrl(sc) != 0) {
-			MWX_DEV_LOG(sc, "still failing lpctl=0x%08x, trying PCIe FLR\n",
-			    mwx_read(sc, MT_CONN_ON_LPCTL));
-			if (mwx_pci_flr(sc, pa->pa_tag) != 0 ||
-			    mwx_mcu_fw_pmctrl(sc) != 0 ||
-			    mwx_mcu_drv_pmctrl(sc) != 0) {
-				MWX_DEV_LOG(sc, "attach MCU power control failed after "
-				    "recovery lpctl=0x%08x\n",
-				    mwx_read(sc, MT_CONN_ON_LPCTL));
-				goto fail;
-			}
-		}
-		MWX_DEV_LOG(sc, "attach MCU power control recovered\n");
-	}
+	if (mwx_ensure_drv_own(sc, "attach") != 0)
+		goto fail;
 	MWX_DEV_LOG(sc, "attach MCU power control ok\n");
+	mwx_pci_disable_aspm(sc, pa->pa_tag);
 
 	hwid = mwx_read(sc, MT_HW_CHIPID) & 0xffff;
 	hwrev = mwx_read(sc, MT_HW_REV) & 0xff;
@@ -3003,9 +3063,11 @@ mwx_reset_task(void *arg)
 		mwx_stop(ifp);
 
 	if (sc->sc_hard_reset) {
-		/* mwx_init() -> mwx_preinit() does WFSYS reset + firmware load. */
+		/*
+		 * Keep sc_hard_reset set until mwx_preinit() performs the WFSYS
+		 * reset + firmware reload, even if the interface is currently down.
+		 */
 		MWX_DEV_LOG(sc, "hard reset: reloading firmware\n");
-		sc->sc_hard_reset = 0;
 		sc->sc_fw_loaded = 0;
 	}
 
@@ -3664,7 +3726,7 @@ mwx_dma_tx_enqueue(struct mwx_softc *sc, struct mwx_queue *q, struct mbuf *m)
 
 int
 mwx_dma_txwi_enqueue(struct mwx_softc *sc, struct mwx_queue *q,
-    struct mwx_txwi *mt)
+    struct mwx_txwi *mt, bool doorbell)
 {
 	struct mwx_queue_data *md;
 	struct mwx_desc *desc;
@@ -3712,7 +3774,8 @@ mwx_dma_txwi_enqueue(struct mwx_softc *sc, struct mwx_queue *q,
 
 	q->mq_prod = idx;
 
-	mwx_write(sc, q->mq_regbase + MT_DMA_CPU_IDX, q->mq_prod);
+	if (doorbell)
+		mwx_write(sc, q->mq_regbase + MT_DMA_CPU_IDX, q->mq_prod);
 
 	return 0;
 }
@@ -3782,11 +3845,14 @@ mwx_dma_tx_cleanup(struct mwx_softc *sc, struct mwx_queue *q)
 void
 mwx_dma_tx_done(struct mwx_softc *sc)
 {
+	struct ifnet *ifp = &sc->sc_ic.ic_if;
+
 	mwx_dma_tx_cleanup(sc, &sc->sc_txq);
 	mwx_dma_tx_cleanup(sc, &sc->sc_txmcuq);
 	mwx_dma_tx_cleanup(sc, &sc->sc_txfwdlq);
 
-	/* XXX do we need to wakeup someone */
+	if (ifq_is_oactive(&ifp->if_snd) && mwx_tx_has_room(sc, 1))
+		mwx_tx_kick(sc);
 }
 
 /* XXX wrong place */
@@ -3973,7 +4039,7 @@ bool
 mwx_dma_rx_done(struct mwx_softc *sc, struct mwx_queue *q)
 {
 	const int batch = 64;
-	const int max_chunks = 4;
+	const int max_chunks = 2;
 	bool more = false;
 
 	for (int chunk = 0; chunk < max_chunks; chunk++) {
@@ -4249,9 +4315,11 @@ mwx_mcu_rx_event(struct mwx_softc *sc, struct mbuf *m)
 		break;
 #endif
 	case MCU_EVENT_COREDUMP:
-		/* it makes little sense to write the coredump down */
+		/* Firmware crashed; force WFSYS reset + firmware reload on recovery. */
 		if (!sc->sc_resetting)
 			printf("%s: coredump event\n", DEVNAME(sc));
+		sc->sc_hard_reset = 1;
+		sc->sc_fw_loaded = 0;
 		mwx_reset(sc);
 		break;
 	case MCU_EVENT_LP_INFO:
@@ -4453,6 +4521,61 @@ mwx_dma_enable(struct mwx_softc *sc)
  * PCIe Function Level Reset: resets the whole function like a power cycle.
  * Config space (BARs, command, MSI) is saved and restored around it.
  */
+/*
+ * Disable PCIe ASPM (L0s/L1) and L1 PM Substates (L1.1/L1.2) on downstream
+ * endpoint first, then its upstream root/switch port (matches Linux
+ * mt76_pci_disable_aspm). On Ryzen + MT7921/MT7922 systems, leaving L1SS/L1
+ * active caps throughput near 40 Mbps and stalls DMA completions.
+ */
+static void
+mwx_pci_clear_aspm_dev(struct mwx_softc *sc, IOPCIDevice *d, const char *role)
+{
+	IOByteCount l1ss = 0;
+	UInt8 pcie = 0;
+
+	if (d == NULL)
+		return;
+	if (d->extendedFindPCICapability(kIOPCIExpressL1PMSubstatesCapability,
+	    &l1ss) != 0 && l1ss >= 0x100) {
+		uint32_t ctl1 = d->extendedConfigRead32(l1ss + 0x08);
+		if (ctl1 & 0x0000000fU) {
+			d->extendedConfigWrite32(l1ss + 0x08, ctl1 & ~0x0000000fU);
+			MWX_DEV_LOG(sc, "aspm(%s): L1SS CTL1 0x%08x -> 0x%08x\n",
+			    role, ctl1, d->extendedConfigRead32(l1ss + 0x08));
+		}
+	}
+	if (d->findPCICapability(kIOPCICapabilityIDPCIExpress, &pcie) != 0 &&
+	    pcie != 0) {
+		uint16_t lnkctl = d->configRead16((UInt8)(pcie + 0x10));
+		if (lnkctl & 0x0003U) {
+			d->configWrite16((UInt8)(pcie + 0x10),
+			    (UInt16)(lnkctl & ~0x0003U));
+			MWX_DEV_LOG(sc, "aspm(%s): LNKCTL 0x%04x -> 0x%04x\n",
+			    role, lnkctl, d->configRead16((UInt8)(pcie + 0x10)));
+		}
+	}
+}
+
+void
+mwx_pci_disable_aspm(struct mwx_softc *sc, IOPCIDevice *dev)
+{
+	int allow = 0;
+
+	if (dev == NULL || PE_parse_boot_argn("-mtkallowaspm", &allow,
+	    sizeof(allow)))
+		return;
+
+	mwx_pci_clear_aspm_dev(sc, dev, "ep");
+	for (IORegistryEntry *e = dev->getParentEntry(gIOServicePlane);
+	    e != NULL; e = e->getParentEntry(gIOServicePlane)) {
+		IOPCIDevice *parent = OSDynamicCast(IOPCIDevice, e);
+		if (parent != NULL) {
+			mwx_pci_clear_aspm_dev(sc, parent, "parent");
+			break;
+		}
+	}
+}
+
 int
 mwx_pci_flr(struct mwx_softc *sc, IOPCIDevice *dev)
 {
@@ -4478,6 +4601,7 @@ mwx_pci_flr(struct mwx_softc *sc, IOPCIDevice *dev)
 	dev->restoreDeviceState();
 	dev->setMemoryEnable(true);
 	dev->setBusMasterEnable(true);
+	mwx_pci_disable_aspm(sc, dev);
 	MWX_DEV_LOG(sc, "FLR done vendor=0x%04x\n", dev->configRead16(0));
 	return 0;
 }
@@ -4534,6 +4658,41 @@ mwx_wfsys_reset(struct mwx_softc *sc)
 
 	return mwx_poll(sc, MT_WFSYS_SW_RST_B, WFSYS_SW_INIT_DONE,
 	    WFSYS_SW_INIT_DONE, 500);
+}
+
+int
+mwx_ensure_drv_own(struct mwx_softc *sc, const char *ctx)
+{
+	if (mwx_mcu_fw_pmctrl(sc) == 0 && mwx_mcu_drv_pmctrl(sc) == 0)
+		return 0;
+
+	/*
+	 * A warm reboot, sleep/wake, or firmware coredump can leave LPCTL
+	 * wedged; escalate from WFSYS reset to PCIe FLR before giving up.
+	 */
+	MWX_DEV_LOG(sc, "%s MCU power control failed lpctl=0x%08x, "
+	    "trying WFSYS reset\n", ctx, mwx_read(sc, MT_CONN_ON_LPCTL));
+	mwx_wfsys_reset(sc);
+	if (mwx_mcu_fw_pmctrl(sc) == 0 && mwx_mcu_drv_pmctrl(sc) == 0) {
+		MWX_DEV_LOG(sc, "%s MCU power control recovered\n", ctx);
+		return 0;
+	}
+
+	if (sc->sc_tag != NULL) {
+		MWX_DEV_LOG(sc, "%s still failing lpctl=0x%08x, trying PCIe FLR\n",
+		    ctx, mwx_read(sc, MT_CONN_ON_LPCTL));
+		if (mwx_pci_flr(sc, sc->sc_tag) == 0 &&
+		    mwx_mcu_fw_pmctrl(sc) == 0 &&
+		    mwx_mcu_drv_pmctrl(sc) == 0) {
+			MWX_DEV_LOG(sc, "%s MCU power control recovered via FLR\n",
+			    ctx);
+			return 0;
+		}
+	}
+
+	MWX_DEV_LOG(sc, "%s MCU power control failed after recovery lpctl=0x%08x\n",
+	    ctx, mwx_read(sc, MT_CONN_ON_LPCTL));
+	return EIO;
 }
 
 /*
@@ -8578,18 +8737,8 @@ MtkMwx::resume()
 	if (sc == NULL || !sc->sc_suspended)
 		return;
 	MWX_DEV_LOG(sc, "resume lpctl=0x%08x\n", mwx_read(sc, MT_CONN_ON_LPCTL));
-	if (mwx_mcu_fw_pmctrl(sc) != 0 || mwx_mcu_drv_pmctrl(sc) != 0) {
-		MWX_DEV_LOG(sc, "resume: driver own failed, trying WFSYS reset\n");
-		mwx_wfsys_reset(sc);
-		if ((mwx_mcu_fw_pmctrl(sc) != 0 || mwx_mcu_drv_pmctrl(sc) != 0) &&
-		    pci != NULL && pci->pa_tag != NULL) {
-			MWX_DEV_LOG(sc, "resume: trying PCIe FLR\n");
-			if (mwx_pci_flr(sc, pci->pa_tag) == 0) {
-				mwx_mcu_fw_pmctrl(sc);
-				mwx_mcu_drv_pmctrl(sc);
-			}
-		}
-	}
+	mwx_ensure_drv_own(sc, "resume");
+	mwx_pci_disable_aspm(sc, sc->sc_tag);
 	mwx_set(sc, MT_MCU2HOST_SW_INT_ENA, MT_MCU_CMD_WAKE_RX_PCIE);
 	mwx_write(sc, MT_WFDMA0_HOST_INT_ENA, 0);
 	mwx_write(sc, MT_PCIE_MAC_INT_ENABLE, 0xff);

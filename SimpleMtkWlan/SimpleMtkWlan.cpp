@@ -139,11 +139,13 @@ bool SimpleMtkWlan::configureInterface(IONetworkInterface *netif)
     ether_ifattach(ifp, OSDynamicCast(IOEthernetInterface, netif));
     fpNetStats->collisions = 0;
 #ifdef __PRIVATE_SPI__
-    // TXWI freelist and DMA rings are also accessed by interrupt events on
-    // this work loop. The default pull thread is not serialized with them.
+    /*
+     * Pull TX packets from IONetworkInterface's async pull thread and serialize
+     * each batch once on _fCommandGate inside outputStart().
+     */
     if (netif->configureOutputPullModel(
             fHalService->getDriverInfo()->getTxQueueSize(),
-            kIONetworkWorkLoopSynchronous, 0,
+            0, 0,
             IOEthernetInterface::kOutputPacketSchedulingModelNormal, 0)
             != kIOReturnSuccess)
         return false;
@@ -639,56 +641,72 @@ IOReturn SimpleMtkWlan::setHardwareAddress(const IOEthernetAddress *addrP)
     return kIOReturnSuccess;
 }
 
-#ifdef __PRIVATE_SPI__
-IOReturn SimpleMtkWlan::outputStart(IONetworkInterface *interface, IOOptionBits options)
+bool SimpleMtkWlan::enqueuePacket(mbuf_t m)
 {
-    struct _ifnet *ifp = &fHalService->get80211Controller()->ic_ac.ac_if;
+    struct ieee80211com *ic = fHalService->get80211Controller();
+    _ifnet *ifp = &ic->ic_ac.ac_if;
+
+    if (m == NULL) {
+        if (ifp->netStat)
+            ifp->netStat->outputErrors++;
+        return false;
+    }
+    if (ic->ic_state != IEEE80211_S_RUN || ifp->if_snd.queue == NULL ||
+        mbuf_type(m) == MBUF_TYPE_FREE || !(mbuf_flags(m) & MBUF_PKTHDR) ||
+        !ifp->if_snd.queue->lockEnqueue(m)) {
+        if (ifp->netStat && ic->ic_state == IEEE80211_S_RUN && ifp->if_snd.queue != NULL)
+            ifp->netStat->outputErrors++;
+        if (mbuf_type(m) != MBUF_TYPE_FREE)
+            freePacket(m);
+        return false;
+    }
+    return true;
+}
+
+#ifdef __PRIVATE_SPI__
+IOReturn SimpleMtkWlan::outputStartGated(OSObject *owner, void *arg0, void *, void *, void *)
+{
+    auto self = static_cast<SimpleMtkWlan *>(owner);
+    auto interface = static_cast<IONetworkInterface *>(arg0);
+    struct _ifnet *ifp = &self->fHalService->get80211Controller()->ic_ac.ac_if;
     mbuf_t m = NULL;
+
+    if (!interface || !ifp->if_snd.queue)
+        return kIOReturnNoResources;
+    if (!ifq_empty(&ifp->if_snd))
+        (*ifp->if_start)(ifp);
+    const uint32_t capacity = ifp->if_snd.queue->getCapacity();
+    const uint32_t queued = ifq_len(&ifp->if_snd);
+    if (ifq_is_oactive(&ifp->if_snd) || queued >= capacity)
+        return kIOReturnNoResources;
+    const uint32_t count = MIN(64U, capacity - queued);
+    if (interface->dequeueOutputPackets(count, &m) != kIOReturnSuccess || !m)
+        return kIOReturnSuccess;
+    while (m) {
+        mbuf_t next = mbuf_nextpkt(m);
+        mbuf_setnextpkt(m, NULL);
+        self->enqueuePacket(m);
+        m = next;
+    }
+    (*ifp->if_start)(ifp);
     if (ifq_is_oactive(&ifp->if_snd))
         return kIOReturnNoResources;
-    while (kIOReturnSuccess == interface->dequeueOutputPackets(1, &m)) {
-        if (outputPacket(m, NULL)!= kIOReturnOutputSuccess ||
-            ifq_is_oactive(&ifp->if_snd))
-            return kIOReturnNoResources;
-    }
     return kIOReturnSuccess;
+}
+
+IOReturn SimpleMtkWlan::outputStart(IONetworkInterface *interface, IOOptionBits options)
+{
+    return _fCommandGate ? _fCommandGate->runAction(outputStartGated, interface) : kIOReturnNoResources;
 }
 #endif
 
 UInt32 SimpleMtkWlan::outputPacket(mbuf_t m, void *param)
 {
-//    XYLog("%s\n", __FUNCTION__);
-    IOReturn ret = kIOReturnOutputSuccess;
     _ifnet *ifp = &fHalService->get80211Controller()->ic_ac.ac_if;
-
-    if (fHalService->get80211Controller()->ic_state != IEEE80211_S_RUN || ifp->if_snd.queue == NULL) {
-        if (m && mbuf_type(m) != MBUF_TYPE_FREE) {
-            freePacket(m);
-        }
+    if (!enqueuePacket(m))
         return kIOReturnOutputDropped;
-    }
-    if (m == NULL) {
-        XYLog("%s m==NULL!!\n", __FUNCTION__);
-        ifp->netStat->outputErrors++;
-        ret = kIOReturnOutputDropped;
-    }
-    if (!(mbuf_flags(m) & MBUF_PKTHDR) ){
-        XYLog("%s pkthdr is NULL!!\n", __FUNCTION__);
-        ifp->netStat->outputErrors++;
-        freePacket(m);
-        ret = kIOReturnOutputDropped;
-    }
-    if (mbuf_type(m) == MBUF_TYPE_FREE) {
-        XYLog("%s mbuf is FREE!!\n", __FUNCTION__);
-        ifp->netStat->outputErrors++;
-        ret = kIOReturnOutputDropped;
-    }
-    if (!ifp->if_snd.queue->lockEnqueue(m)) {
-        freePacket(m);
-        ret = kIOReturnOutputDropped;
-    }
     (*ifp->if_start)(ifp);
-    return ret;
+    return kIOReturnOutputSuccess;
 }
 
 UInt32 SimpleMtkWlan::getFeatures() const

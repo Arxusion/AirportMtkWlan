@@ -108,6 +108,7 @@ public:
 #endif
 #ifdef __PRIVATE_SPI__
     virtual IOReturn outputStart(IONetworkInterface *interface, IOOptionBits options) override;
+    static IOReturn outputStartGated(OSObject *, void *, void *, void *, void *);
     virtual IOReturn networkInterfaceNotification(
                         IONetworkInterface * interface,
                         uint32_t              type,

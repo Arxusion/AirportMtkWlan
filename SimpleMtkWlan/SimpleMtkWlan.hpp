@@ -76,8 +76,10 @@ public:
                                const IONetworkMedium * activeMedium = 0,
                                UInt64                  speed        = 0,
                                OSData *                data         = 0) override;
+    bool enqueuePacket(mbuf_t m);
 #ifdef __PRIVATE_SPI__
     virtual IOReturn outputStart(IONetworkInterface *interface, IOOptionBits options) override;
+    static IOReturn outputStartGated(OSObject *owner, void *arg0, void *arg1, void *arg2, void *arg3);
 #endif
     virtual IOReturn getPacketFilters(const OSSymbol *group, UInt32 *filters) const override;
     virtual IOReturn selectMedium(const IONetworkMedium *medium) override;

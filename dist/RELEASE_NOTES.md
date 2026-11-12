@@ -1,3 +1,25 @@
+## AirportMtkWlan v2.1.4
+
+### Overview
+**AirportMtkWlan v2.1.4** fixes the `< 40 Mbps` throughput ceiling and 15-second workloop starvation on AMD Ryzen / PCIe ASPM systems, removes per-packet TX MMIO doorbell stalls, preserves in-flight RX A-MSDU chains against unrelated management/control traffic (`ba_below` drops), and fixes Wi-Fi `Off -> On` HAL disable/reset recovery.
+
+---
+
+### What's Fixed in v2.1.4
+
+1. **Disable PCIe ASPM (L0s/L1) & L1 PM Substates (L1.1/L1.2) (`MtkMwx.cpp`)**:
+   - Added `mwx_pci_disable_aspm()` called during attach, post-FLR, and resume to clear L1SS `CTL1` (`0x0f`) and PCIe `LNKCTL` (`0x03`) on the downstream `MT7921`/`MT7922` endpoint first and its upstream root/switch bridge second (override via `-mtkallowaspm`).
+2. **Eliminate `_fWorkloop` (`IO80211WorkQueue`) Starvation (`AirportItlwmV2.cpp`, `SimpleMtkWlan.cpp`, `MtkMwx.cpp`)**:
+   - Switched `configureOutputPullModel` off `kIONetworkWorkLoopSynchronous` to the async pull thread (`0`), serializing each `<= 64`-packet burst once via `_fCommandGate->runAction(outputStartGated, ...)`.
+   - Bounded `mwx_intr()` (`max_passes = 2`) and `mwx_dma_rx_done()` (`max_chunks = 2`) so the workloop yields `gateLock` promptly to WCL commands, output bursts, and watchdog timers.
+3. **Batch TX MMIO Doorbells & Wake `oactive` on Ring Free (`MtkMwx.cpp`)**:
+   - Updated `mwx_start()` / `mwx_dma_txwi_enqueue()` to defer `MT_DMA_CPU_IDX` writes to once per 16 frames (or burst end), and updated `mwx_dma_tx_done()` to invoke `mwx_tx_kick(sc)` when TX slots reopen under `oactive`.
+4. **Prevent Premature RX A-MSDU Splits & Fix Wi-Fi `Off -> On` Recovery (`MtkMwx.cpp`)**:
+   - Restricted non-AMSDU flushes in `mwx_rx()` to `IEEE80211_FC0_TYPE_DATA` frames from `sc_amsdu_ta` so neighbor beacons/control frames do not split A-MSDUs into `ba_below` drops.
+   - Completed `Off -> On` HAL disable/reset recovery when firmware state must be reinitialized.
+
+---
+
 ## AirportMtkWlan v2.1.3
 
 ### Overview

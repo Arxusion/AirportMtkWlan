@@ -649,14 +649,16 @@ bool AirportItlwm::configureInterface(IONetworkInterface *netif)
     ether_ifattach(ifp, OSDynamicCast(IOEthernetInterface, netif));
     fpNetStats->collisions = 0;
 #ifdef __PRIVATE_SPI__
-#ifdef AIRPORT_WCL
+    /*
+     * Pull TX packets from IONetworkInterface's async pull thread and serialize
+     * each batch once on _fCommandGate inside outputStart(). Using
+     * kIONetworkWorkLoopSynchronous keeps _fWorkloop's checkForWork() loop
+     * spinning under bidirectional TCP load and starves WCL / watchdog timers.
+     */
     if (netif->configureOutputPullModel(fHalService->getDriverInfo()->getTxQueueSize(),
-        kIONetworkWorkLoopSynchronous, 0,
+        0, 0,
         IOEthernetInterface::kOutputPacketSchedulingModelNormal, 0) != kIOReturnSuccess)
         return false;
-#else
-    netif->configureOutputPullModel(fHalService->getDriverInfo()->getTxQueueSize(), 0, 0, IOEthernetInterface::kOutputPacketSchedulingModelNormal, 0);
-#endif
 #endif
 
     return true;
@@ -763,12 +765,14 @@ setLinkStateGated(OSObject *target, void *arg0, void *arg1, void *arg2, void *ar
 }
 
 #ifdef __PRIVATE_SPI__
-IOReturn AirportItlwm::outputStart(IONetworkInterface *interface, IOOptionBits options)
+IOReturn AirportItlwm::outputStartGated(OSObject *owner, void *arg0, void *, void *, void *)
 {
-    struct _ifnet *ifp = &fHalService->get80211Controller()->ic_ac.ac_if;
+    auto self = static_cast<AirportItlwm *>(owner);
+    auto interface = static_cast<IONetworkInterface *>(arg0);
+    struct _ifnet *ifp = &self->fHalService->get80211Controller()->ic_ac.ac_if;
     mbuf_t m = NULL;
-#ifdef AIRPORT_WCL
-    if (!ifp->if_snd.queue)
+
+    if (!interface || !ifp->if_snd.queue)
         return kIOReturnNoResources;
     if (!ifq_empty(&ifp->if_snd))
         (*ifp->if_start)(ifp);
@@ -776,29 +780,30 @@ IOReturn AirportItlwm::outputStart(IONetworkInterface *interface, IOOptionBits o
     const uint32_t queued = ifq_len(&ifp->if_snd);
     if (ifq_is_oactive(&ifp->if_snd) || queued >= capacity)
         return kIOReturnNoResources;
-    const uint32_t count = MIN(32U, capacity - queued);
+    const uint32_t count = MIN(64U, capacity - queued);
     if (interface->dequeueOutputPackets(count, &m) != kIOReturnSuccess || !m)
         return kIOReturnSuccess;
     while (m) {
         mbuf_t next = mbuf_nextpkt(m);
         mbuf_setnextpkt(m, NULL);
-        enqueuePacket(m);
+#ifdef AIRPORT_WCL
+        self->enqueuePacket(m);
+#else
+        self->outputPacket(m, NULL);
+#endif
         m = next;
     }
+#ifdef AIRPORT_WCL
     (*ifp->if_start)(ifp);
-    if (ifq_is_oactive(&ifp->if_snd))
-        return kIOReturnNoResources;
-    return kIOReturnSuccess;
-#else
-    if (ifq_is_oactive(&ifp->if_snd))
-        return kIOReturnNoResources;
-    while (kIOReturnSuccess == interface->dequeueOutputPackets(1, &m)) {
-        if (outputPacket(m, NULL)!= kIOReturnOutputSuccess ||
-            ifq_is_oactive(&ifp->if_snd))
-            return kIOReturnNoResources;
-    }
-    return kIOReturnSuccess;
 #endif
+    if (ifq_is_oactive(&ifp->if_snd))
+        return kIOReturnNoResources;
+    return kIOReturnSuccess;
+}
+
+IOReturn AirportItlwm::outputStart(IONetworkInterface *interface, IOOptionBits options)
+{
+    return _fCommandGate ? _fCommandGate->runAction(outputStartGated, interface) : kIOReturnNoResources;
 }
 
 IOReturn AirportItlwm::networkInterfaceNotification(

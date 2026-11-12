@@ -19,13 +19,13 @@ mbuf* mwx_tx_linearize(mbuf*m){return m;}
 mwx_txwi* mwx_txwi_get(mwx_softc*){if(fail_at==1)return nullptr;assert(!mt.busy);mt.busy=true;return &mt;}
 void mt7921_mac_write_txwi(mwx_softc*,mbuf*,ieee80211_node*,mt76_txwi*){}
 int mwx_txwi_enqueue(mwx_softc*,mwx_txwi*t,mbuf*m){if(fail_at==2)return EFBIG;t->mt_mbuf=m;mapped++;return 0;}
-int mwx_dma_txwi_enqueue(mwx_softc*,int*,mwx_txwi*){return fail_at==3?EBUSY:0;}
+int mwx_dma_txwi_enqueue(mwx_softc*,int*,mwx_txwi*,bool){return fail_at==3?EBUSY:0;}
 void mwx_txwi_put(mwx_softc*,mwx_txwi*t){assert(t->busy);if(t->mt_mbuf){m_freem(t->mt_mbuf);t->mt_mbuf=nullptr;mapped--;}t->busy=false;returned++;}
 '''
 main=r'''
 int main(){mwx_softc sc{};mwx_node ni{};
  for(int trial=0;trial<100;trial++)for(fail_at=0;fail_at<=3;fail_at++){
-  mbuf m;freed=returned=mapped=0;int rv=mwx_tx(&sc,&m,&ni);
+  mbuf m;freed=returned=mapped=0;int rv=mwx_tx(&sc,&m,&ni,true);
   if(fail_at==0){assert(rv==0&&mt.busy&&mapped==1&&!m.freed);mwx_txwi_put(&sc,&mt);}
   else assert(rv!=0);
   assert(m.freed&&freed==1&&!mt.busy&&mapped==0);assert(returned==(fail_at==1?0:1));
