@@ -151,19 +151,25 @@ IOReturn AirportItlwm::halDebugPollGated(OSObject *owner, void *, void *, void *
 
 void AirportItlwm::watchdogAction(IOTimerEventSource *timer)
 {
+    uint32_t nextTimeoutMs = kWatchDogTimerPeriod;
+
     /*
      * Synchronize net80211's if_watchdog alongside debugPoll on _fCommandGate so
-     * timer housekeeping cannot race RX/TX workloop callbacks, and only warn
-     * when contention persists across multiple ticks.
+     * timer housekeeping cannot race RX/TX workloop callbacks. When the work
+     * loop is transiently busy under heavy RX/TX traffic, retry quickly instead
+     * of skipping an entire 1 s tick, and only warn if contention persists
+     * across multiple seconds.
      */
     if (_fCommandGate && _fCommandGate->attemptAction(halDebugPollGated) != kIOReturnSuccess) {
-        if (++watchdogBusyCount >= 5 && (watchdogBusyCount % 5) == 0)
+        if (++watchdogBusyCount >= 50 && (watchdogBusyCount % 50) == 0)
             XYLog("watchdog: main work loop busy, poll skipped (%u)\n", watchdogBusyCount);
+        nextTimeoutMs = kWatchDogBusyRetryPeriod;
     } else {
         watchdogBusyCount = 0;
     }
 
-    watchdogTimer->setTimeoutMS(kWatchDogTimerPeriod);
+    if (watchdogTimer)
+        watchdogTimer->setTimeoutMS(nextTimeoutMs);
 }
 
 void AirportItlwm::fakeScanDone(OSObject *owner, IOTimerEventSource *sender)
@@ -530,10 +536,11 @@ bool AirportItlwm::start(IOService *provider)
 void AirportItlwm::stop(IOService *provider)
 {
     XYLog("%s\n", __PRETTY_FUNCTION__);
-    struct _ifnet *ifp = &fHalService->get80211Controller()->ic_ac.ac_if;
+    struct _ifnet *ifp = fHalService ? &fHalService->get80211Controller()->ic_ac.ac_if : NULL;
     if (roleTimer) {
         roleTimer->cancelTimeout();
-        _fWorkloop->removeEventSource(roleTimer);
+        if (_fWorkloop)
+            _fWorkloop->removeEventSource(roleTimer);
         OSSafeReleaseNULL(roleTimer);
     }
 #ifdef AIRPORT_WCL
@@ -543,8 +550,10 @@ void AirportItlwm::stop(IOService *provider)
     super::stop(provider);
     disableAdapter(bsdInterface);
     setLinkStatus(kIONetworkLinkValid);
-    fHalService->detach(pciNub);
-    ether_ifdetach(ifp);
+    if (ifp)
+        ether_ifdetach(ifp);
+    if (fHalService)
+        fHalService->detach(pciNub);
     detachInterface(fNetIf, true);
     OSSafeReleaseNULL(fNetIf);
     releaseAll();
@@ -1318,6 +1327,8 @@ SInt32 AirportItlwm::apple80211SkywalkRequest(UInt request,int cmd,IO80211Skywal
 
 IOReturn AirportItlwm::enableAdapter(IONetworkInterface *netif)
 {
+    if (!fHalService)
+        return kIOReturnNotReady;
 #ifdef AIRPORT_WCL
     IOReturn status = fHalService->enable(netif);
     if (status != kIOReturnSuccess)
@@ -1325,16 +1336,21 @@ IOReturn AirportItlwm::enableAdapter(IONetworkInterface *netif)
 #else
     fHalService->enable(netif);
 #endif
-    watchdogTimer->setTimeoutMS(kWatchDogTimerPeriod);
-    watchdogTimer->enable();
+    if (watchdogTimer) {
+        watchdogTimer->setTimeoutMS(kWatchDogTimerPeriod);
+        watchdogTimer->enable();
+    }
     return kIOReturnSuccess;
 }
 
 void AirportItlwm::disableAdapter(IONetworkInterface *netif)
 {
-    watchdogTimer->cancelTimeout();
-    watchdogTimer->disable();
-    fHalService->disable(netif);
+    if (watchdogTimer) {
+        watchdogTimer->cancelTimeout();
+        watchdogTimer->disable();
+    }
+    if (fHalService)
+        fHalService->disable(netif);
 }
 
 IOReturn AirportItlwm::
@@ -1498,8 +1514,10 @@ void AirportItlwm::setPowerStateOff()
     XYLog("%s\n", __FUNCTION__);
     pmPowerState = kPowerStateOff;
     disableAdapter(bsdInterface);
-    fHalService->suspend();
-    pmPolicyMaker->acknowledgeSetPowerState();
+    if (fHalService)
+        fHalService->suspend();
+    if (pmPolicyMaker)
+        pmPolicyMaker->acknowledgeSetPowerState();
 }
 
 void AirportItlwm::setPowerStateOn()
@@ -1507,7 +1525,8 @@ void AirportItlwm::setPowerStateOn()
     XYLog("%s\n", __FUNCTION__);
     pmPowerState = kPowerStateOn;
     /* The card was powered off: reload its firmware before it is enabled. */
-    fHalService->resume();
+    if (fHalService)
+        fHalService->resume();
     if (power_state && bsdInterface && fHalService &&
         !(fHalService->get80211Controller()->ic_ac.ac_if.if_flags & (IFF_UP | IFF_RUNNING))) {
         enableAdapter(bsdInterface);
@@ -1515,7 +1534,8 @@ void AirportItlwm::setPowerStateOn()
     if (fNetIf && power_state) {
         fNetIf->postMessage(APPLE80211_M_POWER_CHANGED, NULL, 0, false);
     }
-    pmPolicyMaker->acknowledgeSetPowerState();
+    if (pmPolicyMaker)
+        pmPolicyMaker->acknowledgeSetPowerState();
 }
 
 

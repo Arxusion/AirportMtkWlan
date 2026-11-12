@@ -44,6 +44,7 @@ enum
 };
 
 #define kWatchDogTimerPeriod 1000
+#define kWatchDogBusyRetryPeriod 100
 #ifdef AIRPORT_WCL
 #define AIRPORT_LEGACY_OVERRIDE
 #else

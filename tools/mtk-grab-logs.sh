@@ -7,7 +7,7 @@ set -u
 set -o pipefail
 umask 077
 
-TOOL_VERSION="2.1.1"
+TOOL_VERSION="2.1.2"
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
 
@@ -261,7 +261,8 @@ redact_file_inplace() {
         $in =~ s{("(?:IOPlatformSerialNumber|IOPlatformUUID|SystemSerialNumber|BoardSerialNumber|SerialNumber|MLB|ROM|SystemUUID)"\s*=\s*)(?:"[^"]*"|<[^>]*>)}{$1<ID_REDACTED>}gi;
         $in =~ s{(<key>(?:SystemSerialNumber|MLB|SystemUUID|ROM|BoardSerialNumber|PlatformUUID|SmUUID)</key>\s*<string>)[^<]*(</string>)}{$1<ID_REDACTED>$2}gi;
         $in =~ s{(<key>ROM</key>\s*<data>)[A-Za-z0-9+/=\s]+(</data>)}{$1PElEX1JFREFDVEVEPg==$2}gi;
-        $in =~ s{("(?:crashReporterKey|deviceIdentifierForVendor|sessionID|userID|incident|bootSessionUUID|sleepWakeUUID|serial[A-Za-z]*)"\s*:\s*)"[^"]*"}{$1"<ID_REDACTED>"}gi;
+        $in =~ s{("(?:crashReporterKey|deviceIdentifierForVendor|sessionID|userID|incident|bootSessionUUID|sleepWakeUUID|systemID|machineSerialNumber|deviceID|hostUUID|serial[A-Za-z]*)"\s*:\s*)"[^"]*"}{$1"<ID_REDACTED>"}gi;
+        $in =~ s{((?:^|\n)\s*Serial\s+Number\s*:\s*)[^\r\n]+}{$1<ID_REDACTED>}gi;
 
         # 3. SSIDs & neighboring Wi-Fi scan leak protection
         $in =~ s{(Current Wi-Fi Network:\s*).+}{$1<SSID_REDACTED>}gi;
@@ -415,6 +416,15 @@ fi
     sysctl kern.boottime machdep.cpu.vendor machdep.cpu.brand_string machdep.cpu.family \
         machdep.cpu.model machdep.cpu.stepping hw.physicalcpu hw.logicalcpu hw.memsize 2>&1 || true
     echo
+    echo "== Recent Boot & Shutdown History"
+    if [ -n "$FIXTURE_DIR" ] && [ -f "$FIXTURE_DIR/last_reboot.txt" ]; then
+        cat "$FIXTURE_DIR/last_reboot.txt"
+    elif [ -n "$FIXTURE_DIR" ]; then
+        echo "(no fixture reboot history)"
+    else
+        bounded 10 sh -c 'last reboot shutdown 2>&1 | head -n 25' || true
+    fi
+    echo
     echo "== SIP & Boot Arguments"
     csrutil status 2>&1 || true
     echo "boot-args: $(nvram boot-args 2>/dev/null | cut -f2- || echo '(not set)')"
@@ -566,7 +576,7 @@ progress "Collecting kernel Wi-Fi and driver logs..."
     elif [ -n "$FIXTURE_DIR" ]; then
         echo "(no fixture kernel log)"
     else
-        PRED_KERNEL='process == "kernel" AND (eventMessage CONTAINS[c] "mtk" OR eventMessage CONTAINS[c] "mwx" OR eventMessage CONTAINS[c] "AirportMtk" OR eventMessage CONTAINS[c] "SimpleMtk" OR eventMessage CONTAINS[c] "AirportItlwm" OR eventMessage CONTAINS[c] "itlwm" OR eventMessage CONTAINS[c] "80211" OR eventMessage CONTAINS[c] "WCL" OR eventMessage CONTAINS[c] "Skywalk" OR sender CONTAINS[c] "Mtk" OR sender CONTAINS[c] "80211" OR sender CONTAINS[c] "Skywalk")'
+        PRED_KERNEL='process == "kernel" AND (eventMessage CONTAINS[c] "mtk" OR eventMessage CONTAINS[c] "mwx" OR eventMessage CONTAINS[c] "AirportMtk" OR eventMessage CONTAINS[c] "SimpleMtk" OR eventMessage CONTAINS[c] "AirportItlwm" OR eventMessage CONTAINS[c] "itlwm" OR eventMessage CONTAINS[c] "80211" OR eventMessage CONTAINS[c] "WCL" OR eventMessage CONTAINS[c] "Skywalk" OR eventMessage CONTAINS[c] "shutdown cause" OR eventMessage CONTAINS[c] "panic" OR sender CONTAINS[c] "Mtk" OR sender CONTAINS[c] "80211" OR sender CONTAINS[c] "Skywalk")'
         if [ -n "$BOOT_SEC" ]; then
             rc=0
             lshow 25 --start "$(date -r "$BOOT_SEC" '+%Y-%m-%d %H:%M:%S')" --style compact --predicate "$PRED_KERNEL" 2>&1 || rc=$?
@@ -596,29 +606,50 @@ redact_file_inplace "$ROOT_DIR/05-kernel-log-boot.txt"
 # --- Section 6: macOS Wi-Fi Daemon & KernelManager Logs ---
 progress "Collecting airportd, WiFiAgent, and kernelmanagerd logs..."
 {
-    echo "=== Wi-Fi Userspace Daemons & Kext Manager (last 30m) ==="
     if [ -n "$FIXTURE_DIR" ] && [ -f "$FIXTURE_DIR/wifi_log.txt" ]; then
+        echo "=== Wi-Fi Userspace Daemons & Kext Manager (last 30m) ==="
         cat "$FIXTURE_DIR/wifi_log.txt"
+        if [ -f "$FIXTURE_DIR/wifi_error_log.txt" ]; then
+            echo
+            echo "=== Kext Manager & Wi-Fi Errors/Lifecycle (last 2h) ==="
+            cat "$FIXTURE_DIR/wifi_error_log.txt"
+        fi
     elif [ -n "$FIXTURE_DIR" ]; then
+        echo "=== Wi-Fi Userspace Daemons & Kext Manager (last 30m) ==="
         echo "(no fixture wifi_log)"
     else
-        lshow 25 --last 30m --style compact --predicate \
+        echo "=== Kext Manager & Wi-Fi Errors/Lifecycle (last 1h) ==="
+        lshow 15 --last 1h --style compact --predicate \
+            '((process == "kernelmanagerd" OR process == "kextd") AND (messageType == error OR messageType == fault OR eventMessage CONTAINS[c] "mtk" OR eventMessage CONTAINS[c] "airport" OR eventMessage CONTAINS[c] "itlwm" OR eventMessage CONTAINS[c] "80211")) OR ((process == "airportd" OR process == "WiFiAgent" OR process == "wifip2pd" OR process == "wifivelocityd") AND (messageType == error OR messageType == fault OR eventMessage CONTAINS[c] "mtk" OR eventMessage CONTAINS[c] "assoc" OR eventMessage CONTAINS[c] "power"))' \
+            2>&1 | awk '!/INTERFACE ADDED EVENT|role=awdl/' | squash_repeats | headtail 600 1200 || true
+        echo
+        echo "=== Wi-Fi Userspace Daemons (last 30m, de-spammed) ==="
+        lshow 20 --last 30m --style compact --predicate \
             'process == "airportd" OR process == "WiFiAgent" OR process == "wifip2pd" OR process == "wifivelocityd" OR subsystem == "com.apple.wifi" OR (process == "kernelmanagerd" AND (eventMessage CONTAINS[c] "mtk" OR eventMessage CONTAINS[c] "airport" OR eventMessage CONTAINS[c] "80211"))' \
-            2>&1 | squash_repeats | headtail 1200 1200 || true
+            2>&1 | awk '!/(\[GET INTF NAME\]|APPLE80211_M_RSSI_CHANGED|Per-MLO link stats|Incoming QoS|INTERFACE ADDED EVENT|role=awdl)/' | squash_repeats | headtail 800 1600 || true
     fi
 } > "$ROOT_DIR/06-wifi-userspace-logs.txt" 2>&1
 redact_file_inplace "$ROOT_DIR/06-wifi-userspace-logs.txt"
 
 # --- Section 7: Previous Boot Kernel Log (Full Mode + Root) ---
-if [ "$MODE" = "full" ] && [ -z "$FIXTURE_DIR" ]; then
+if [ "$MODE" = "full" ] || { [ -n "$FIXTURE_DIR" ] && [ -f "$FIXTURE_DIR/prev_boot_log.txt" ]; }; then
     progress "Collecting previous-boot kernel logs..."
     {
-        if [ "$(id -u)" -eq 0 ] && [ -n "$BOOT_SEC" ]; then
-            echo "=== Previous Boot Kernel Log (before $(date -r "$BOOT_SEC" '+%Y-%m-%d %H:%M:%S')) ==="
-            lshow 25 --start "$(date -r $((BOOT_SEC - 43200)) '+%Y-%m-%d %H:%M:%S')" \
+        if [ -n "$FIXTURE_DIR" ] && [ -f "$FIXTURE_DIR/prev_boot_log.txt" ]; then
+            echo "=== Previous Boot Kernel Log (fixture, tail-preserved) ==="
+            cat "$FIXTURE_DIR/prev_boot_log.txt" | squash_repeats | headtail 800 2200
+        elif [ -z "$FIXTURE_DIR" ] && [ "$(id -u)" -eq 0 ] && [ -n "$BOOT_SEC" ]; then
+            echo "=== Previous Boot Focused Driver, Panic & Shutdown Cause (last 2h before $(date -r "$BOOT_SEC" '+%Y-%m-%d %H:%M:%S')) ==="
+            lshow 20 --start "$(date -r $((BOOT_SEC - 7200)) '+%Y-%m-%d %H:%M:%S')" \
                      --end "$(date -r "$BOOT_SEC" '+%Y-%m-%d %H:%M:%S')" \
-                     --style compact --predicate 'process == "kernel" AND (eventMessage CONTAINS[c] "mtk" OR eventMessage CONTAINS[c] "mwx" OR eventMessage CONTAINS[c] "airport" OR eventMessage CONTAINS[c] "itlwm" OR eventMessage CONTAINS[c] "80211" OR eventMessage CONTAINS[c] "skywalk" OR eventMessage CONTAINS[c] "panic")' 2>&1 \
-                | head -n 3000 || true
+                     --style compact --predicate '(process == "kernel" AND (eventMessage CONTAINS[c] "mtk" OR eventMessage CONTAINS[c] "mwx" OR eventMessage CONTAINS[c] "AirportMtk" OR eventMessage CONTAINS[c] "SimpleMtk" OR eventMessage CONTAINS[c] "AirportItlwm" OR eventMessage CONTAINS[c] "itlwm" OR eventMessage CONTAINS[c] "WCL" OR eventMessage CONTAINS[c] "panic" OR eventMessage CONTAINS[c] "shutdown cause" OR eventMessage CONTAINS[c] "Debugger" OR eventMessage CONTAINS[c] "backtrace" OR sender CONTAINS[c] "Mtk")) OR (process == "kernelmanagerd" AND (eventMessage CONTAINS[c] "mtk" OR eventMessage CONTAINS[c] "airport" OR eventMessage CONTAINS[c] "fail" OR eventMessage CONTAINS[c] "error" OR eventMessage CONTAINS[c] "load"))' 2>&1 \
+                | squash_repeats | headtail 800 1500 || true
+            echo
+            echo "=== Previous Boot Wi-Fi Stack Kernel Log Tail (last 4h before $(date -r "$BOOT_SEC" '+%Y-%m-%d %H:%M:%S')) ==="
+            lshow 25 --start "$(date -r $((BOOT_SEC - 14400)) '+%Y-%m-%d %H:%M:%S')" \
+                     --end "$(date -r "$BOOT_SEC" '+%Y-%m-%d %H:%M:%S')" \
+                     --style compact --predicate 'process == "kernel" AND (eventMessage CONTAINS[c] "mtk" OR eventMessage CONTAINS[c] "mwx" OR eventMessage CONTAINS[c] "airport" OR eventMessage CONTAINS[c] "itlwm" OR eventMessage CONTAINS[c] "80211" OR eventMessage CONTAINS[c] "skywalk" OR eventMessage CONTAINS[c] "panic" OR eventMessage CONTAINS[c] "shutdown cause")' 2>&1 \
+                | squash_repeats | headtail 800 2200 || true
         else
             echo "(skipped: previous-boot query requires Full Logs with administrator privileges)"
         fi
@@ -710,18 +741,38 @@ redact_file_inplace "$ROOT_DIR/08-efi-opencore/disks-efi-scan.txt"
 progress "Checking recent panic and Wi-Fi daemon crash logs..."
 PANIC_COUNT=0
 CRASH_COUNT=0
-diag_dirs=("/Library/Logs/DiagnosticReports" "/Library/Logs/DiagnosticReports/Retired")
-[ -n "$TARGET_HOME" ] && diag_dirs+=("$TARGET_HOME/Library/Logs/DiagnosticReports")
+mkdir -p "$ROOT_DIR/09-crashes-panics"
+diag_dirs=(
+    "/Library/Logs/DiagnosticReports"
+    "/Library/Logs/DiagnosticReports/Retired"
+    "/private/var/db/PanicReporter"
+)
+if [ -n "$TARGET_HOME" ]; then
+    diag_dirs+=(
+        "$TARGET_HOME/Library/Logs/DiagnosticReports"
+        "$TARGET_HOME/Library/Logs/DiagnosticReports/Retired"
+    )
+fi
 if [ -n "$FIXTURE_DIR" ] && [ -d "$FIXTURE_DIR/DiagnosticReports" ]; then
     diag_dirs=("$FIXTURE_DIR/DiagnosticReports")
+    [ -d "$FIXTURE_DIR/PanicReporter" ] && diag_dirs+=("$FIXTURE_DIR/PanicReporter")
 fi
 
 collect_recent_into() {
     local prefix=$1 limit=$2
     shift 2
-    local recent=() f i count=0 dst
+    local recent=() seen=() f i dup existing count=0 dst
     for f in "$@"; do
         [ -f "$f" ] && [ ! -L "$f" ] || continue
+        dup=0
+        for existing in ${seen[@]+"${seen[@]}"}; do
+            if [ "$existing" = "$f" ]; then
+                dup=1
+                break
+            fi
+        done
+        [ "$dup" -eq 0 ] || continue
+        seen+=("$f")
         i=0
         while [ "$i" -lt "${#recent[@]}" ] && [ ! "$f" -nt "${recent[$i]}" ]; do
             i=$((i + 1))
@@ -738,20 +789,94 @@ collect_recent_into() {
     printf '%s' "$count"
 }
 
+add_panic_matches_in_dir() {
+    local dir=$1
+    for f in "$dir"/.contents.panic "$dir"/*.panic "$dir"/*.contents.panic "$dir"/panic*.ips "$dir"/*Panic*.ips "$dir"/Kernel-*.ips; do
+        panic_candidates+=("$f")
+    done
+}
+
 shopt -s nullglob
 panic_candidates=()
 crash_candidates=()
 for d in "${diag_dirs[@]}"; do
     [ -d "$d" ] || continue
-    for f in "$d"/*.panic; do panic_candidates+=("$f"); done
-    for f in "$d"/airportd*.ips "$d"/WiFiAgent*.ips "$d"/wifip2pd*.ips "$d"/wifivelocityd*.ips "$d"/AirportMtkWlan*.ips "$d"/airportd*.crash; do
+    add_panic_matches_in_dir "$d"
+    for sub in "$d"/*; do
+        [ -d "$sub" ] && [ ! -L "$sub" ] || continue
+        add_panic_matches_in_dir "$sub"
+    done
+    for f in "$d"/airportd*.ips "$d"/WiFiAgent*.ips "$d"/wifip2pd*.ips "$d"/wifivelocityd*.ips "$d"/AirportMtkWlan*.ips "$d"/SimpleMtkWlan*.ips "$d"/kernelmanagerd*.ips "$d"/wifid*.ips "$d"/airportd*.crash "$d"/kernelmanagerd*.crash "$d"/SimpleMtkWlan*.crash; do
         crash_candidates+=("$f")
     done
 done
 shopt -u nullglob
 
-PANIC_COUNT=$(collect_recent_into "panic" 3 ${panic_candidates[@]+"${panic_candidates[@]}"})
-CRASH_COUNT=$(collect_recent_into "crash" 4 ${crash_candidates[@]+"${crash_candidates[@]}"})
+if [ -n "$FIXTURE_DIR" ] && [ -f "$FIXTURE_DIR/panic.log" ]; then
+    panic_candidates+=("$FIXTURE_DIR/panic.log")
+elif [ -z "$FIXTURE_DIR" ] && [ -f "/private/var/log/panic.log" ]; then
+    panic_candidates+=("/private/var/log/panic.log")
+fi
+
+PANIC_COUNT=$(collect_recent_into "panic" 5 ${panic_candidates[@]+"${panic_candidates[@]}"})
+CRASH_COUNT=$(collect_recent_into "crash" 6 ${crash_candidates[@]+"${crash_candidates[@]}"})
+
+PANIC_CHECK_FILE="$ROOT_DIR/09-crashes-panics/00-panic-and-shutdown-check.txt"
+{
+    echo "=== Panic, Kernel & Wi-Fi Diagnostic Reports Inventory ==="
+    for d in "${diag_dirs[@]}"; do
+        echo "-- $d --"
+        if [ -d "$d" ]; then
+            matches=$(find "$d" -maxdepth 2 -type f \( -iname '*panic*' -o -iname '*kernel*' -o -iname '*airport*' -o -iname '*wifi*' -o -iname '*mtk*' -o -iname '*itlwm*' -o -iname '*shutdown*' \) -exec ls -ld {} + 2>/dev/null || true)
+            if [ -n "$matches" ]; then
+                printf '%s\n' "$matches"
+            else
+                echo "(no matching panic/kernel/wifi/shutdown files)"
+            fi
+        else
+            echo "(not present)"
+        fi
+    done
+    echo
+    echo "=== NVRAM Panic & Wake-Failure Indicators ==="
+    if [ -n "$FIXTURE_DIR" ] && [ -f "$FIXTURE_DIR/nvram_panic.txt" ]; then
+        cat "$FIXTURE_DIR/nvram_panic.txt"
+    elif [ -n "$FIXTURE_DIR" ]; then
+        echo "(no fixture nvram_panic)"
+    else
+        for k in aapl,panic-info panic-info 7C436110-AB2A-4BBB-A880-FE41995C9F82:wake-failure; do
+            printf '%s: ' "$k"
+            nvram "$k" 2>&1 | head -c 4096 || true
+            echo
+        done
+        nvram -p 2>/dev/null | awk 'tolower($0) ~ /panic|wake-failure/ { print $1, substr($0, length($1)+1, 200) }' || echo "(nvram -p unreadable)"
+    fi
+    echo
+    echo "=== Previous Shutdown Cause (boot log) ==="
+    if [ -n "$FIXTURE_DIR" ] && [ -f "$FIXTURE_DIR/shutdown_cause.txt" ]; then
+        cat "$FIXTURE_DIR/shutdown_cause.txt"
+    elif [ -n "$FIXTURE_DIR" ]; then
+        echo "(no fixture shutdown_cause)"
+    else
+        boot_sc=$(grep -i 'shutdown cause:' "$ROOT_DIR/05-kernel-log-boot.txt" 2>/dev/null | tail -n 5 || true)
+        if [ -n "$boot_sc" ]; then
+            printf '%s\n' "$boot_sc"
+        elif [ -n "$BOOT_SEC" ]; then
+            lshow 10 --start "$(date -r "$BOOT_SEC" '+%Y-%m-%d %H:%M:%S')" \
+                     --end "$(date -r $((BOOT_SEC + 300)) '+%Y-%m-%d %H:%M:%S')" \
+                     --style compact --predicate 'process == "kernel" AND (eventMessage CONTAINS[c] "Previous shutdown cause" OR eventMessage CONTAINS[c] "shutdown cause")' 2>&1 || true
+        else
+            lshow 10 --last 30m --style compact --predicate 'process == "kernel" AND (eventMessage CONTAINS[c] "Previous shutdown cause" OR eventMessage CONTAINS[c] "shutdown cause")' 2>&1 || true
+        fi
+    fi
+} > "$PANIC_CHECK_FILE" 2>&1
+redact_file_inplace "$PANIC_CHECK_FILE"
+LOCAL_HOST=$(scutil --get LocalHostName 2>/dev/null || true)
+if [ -n "$LOCAL_HOST" ] && [ "${#LOCAL_HOST}" -ge 3 ]; then
+    LOCAL_HOST_ENV="$LOCAL_HOST" /usr/bin/perl -i -pe 'my $h = $ENV{LOCAL_HOST_ENV}; s/\Q$h\E/<HOST>/gi if defined $h && length($h) >= 3;' "$PANIC_CHECK_FILE" 2>/dev/null || true
+fi
+LAST_SHUTDOWN_CAUSE=$(grep -i 'Previous shutdown cause:' "$PANIC_CHECK_FILE" 2>/dev/null | tail -n 1 | sed -E 's/.*[Pp]revious shutdown cause:[[:space:]]*//' | tr -s ' ' | cut -c1-40 || true)
+[ -n "$LAST_SHUTDOWN_CAUSE" ] || LAST_SHUTDOWN_CAUSE="unknown"
 
 # --- Section 10: Installer / UI Session Log ---
 if [ -n "$SESSION_LOG" ] && [ -f "$SESSION_LOG" ] && [ ! -L "$SESSION_LOG" ]; then
@@ -809,6 +934,7 @@ WIFI_PWR=$(grep -m1 'Wi-Fi Power' "$ROOT_DIR/04-network-wifi-state.txt" 2>/dev/n
     echo "diag: wifi-power $WIFI_PWR"
     echo "diag: mtkdebuglog-lines $MTK_DBG_LINES"
     echo "diag: panics-found $PANIC_COUNT crashes-found $CRASH_COUNT"
+    echo "diag: last-shutdown-cause $LAST_SHUTDOWN_CAUSE"
     echo "diag: redaction complete (keys, SSIDs, BSSID/MAC suffixes, serials, UUIDs, usernames, hostnames, and IPs stripped)"
     echo
     echo "Files in this archive:"

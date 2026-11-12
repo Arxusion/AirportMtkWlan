@@ -18,7 +18,7 @@ FX="$TMP/fixture"
 mkdir -p "$FX/DiagnosticReports"
 
 cat > "$FX/kmutil.txt" <<'EOF'
-  142    0 0xffffff7f95a00000 0x185000   0x185000   com.flxxxxddd.AirportMtkWlan (2.1.1) ABC123 <45 12 8 6 3 1>
+  142    0 0xffffff7f95a00000 0x185000   0x185000   com.flxxxxddd.AirportMtkWlan (2.1.2) ABC123 <45 12 8 6 3 1>
   141    2 0xffffff7f95800000 0x92000    0x92000    com.apple.iokit.IO80211FamilyLegacy (1200.13.1) DEF456 <12 8 6 3 1>
 EOF
 
@@ -86,7 +86,7 @@ Wi-Fi:
       Interfaces:
         en2:
           Card Type: Wi-Fi  (0x14C3, 0x7961)
-          Firmware Version: itlwm: 2.1.1 fw: MT7921
+          Firmware Version: itlwm: 2.1.2 fw: MT7921
           MAC Address: 12:34:56:ab:cd:ef
           Country Code: US
           Current Network Information:
@@ -149,9 +149,59 @@ cat > "$FX/DiagnosticReports/Kernel-mock.panic" <<'EOF'
 {"panicString":"panic(cpu 0): test panic C02CRASH99","crashReporterKey":"crash-key-secret-123","serialNumber":"C02CRASH99"}
 EOF
 
+cat > "$FX/DiagnosticReports/.contents.panic" <<'EOF'
+panic(cpu 1 caller 0xffffff8000123456): hidden contents panic
+Serial Number: SN-PANIC-DUMP-999
+EOF
+
+cat > "$FX/DiagnosticReports/panic-full-mock.ips" <<'EOF'
+{"incident":"INC-PANIC-SECRET","systemID":"SYSID-SECRET-999","panicString":"panic-full-sentinel"}
+EOF
+
+mkdir -p "$FX/PanicReporter/Sub1"
+cat > "$FX/PanicReporter/Sub1/Kernel-Panic-mock.ips" <<'EOF'
+{"incident":"INC-SUBPANIC-1","machineSerialNumber":"MACH-SN-SECRET-888","panicString":"nested-panic-sentinel"}
+EOF
+
 cat > "$FX/DiagnosticReports/airportd-mock.ips" <<'EOF'
 {"incident":"INC-SECRET-1","crashReporterKey":"crash-key-secret-123","userID":"secretuser","procName":"airportd"}
 EOF
+
+cat > "$FX/DiagnosticReports/kernelmanagerd-mock.ips" <<'EOF'
+{"incident":"INC-KM-SECRET-1","deviceID":"DEVID-SECRET-777","procName":"kernelmanagerd"}
+EOF
+
+touch -t 202611121149.40 "$FX/DiagnosticReports/Kernel-mock.panic"
+touch -t 202611121149.30 "$FX/DiagnosticReports/.contents.panic"
+touch -t 202611121149.20 "$FX/DiagnosticReports/panic-full-mock.ips"
+touch -t 202611121149.10 "$FX/PanicReporter/Sub1/Kernel-Panic-mock.ips"
+touch -t 202611121149.40 "$FX/DiagnosticReports/airportd-mock.ips"
+touch -t 202611121149.30 "$FX/DiagnosticReports/kernelmanagerd-mock.ips"
+
+cat > "$FX/last_reboot.txt" <<'EOF'
+reboot    ~                         Thu Nov 12 11:48
+shutdown  ~                         Thu Nov 12 11:40
+EOF
+
+cat > "$FX/nvram_panic.txt" <<'EOF'
+aapl,panic-info: Error getting variable - 'aapl,panic-info': (iokit/common) data was not found
+wake-failure: %00%00%00%00
+EOF
+
+cat > "$FX/shutdown_cause.txt" <<'EOF'
+2026-11-12 11:48:02 kernel: (AppleSMC) Previous shutdown cause: -128
+EOF
+
+awk 'BEGIN {
+    chars = "abcdefghijklmnop"
+    for (i = 1; i <= 3200; i++) {
+        a = substr(chars, ((i - 1) % 16) + 1, 1)
+        b = substr(chars, (int((i - 1) / 16) % 16) + 1, 1)
+        c = substr(chars, (int((i - 1) / 256) % 16) + 1, 1)
+        printf "2026-11-12 11:05:00 kernel: (IO80211Family) filler-%s%s%s\n", c, b, a
+    }
+    print "2026-11-12 11:47:59 kernel: panic(cpu 2): PRE-CRASH-SENTINEL-MTK"
+}' > "$FX/prev_boot_log.txt"
 
 cat > "$FX/session.log" <<EOF
 [19:00:00] Deployed AirportMtkWlan.kext from /Users/${USER:-tester}/Downloads
@@ -182,8 +232,13 @@ for rel in \
     05-kernel-log-boot.txt \
     06-wifi-userspace-logs.txt \
     08-efi-opencore/fixture-config.plist.xml \
+    09-crashes-panics/00-panic-and-shutdown-check.txt \
     09-crashes-panics/panic-1-Kernel-mock.panic \
+    09-crashes-panics/panic-2-.contents.panic \
+    09-crashes-panics/panic-3-panic-full-mock.ips \
+    09-crashes-panics/panic-4-Kernel-Panic-mock.ips \
     09-crashes-panics/crash-1-airportd-mock.ips \
+    09-crashes-panics/crash-2-kernelmanagerd-mock.ips \
     10-installer-session.log; do
     [ -f "$BUNDLE/$rel" ] || { echo "FAIL: missing archive file $rel"; exit 1; }
 done
@@ -225,8 +280,18 @@ done
 
 # 3. Assert essential telemetry & structure are preserved
 grep -q "diag: mtk-pci-count 1" "$BUNDLE/00-summary.txt"
-grep -q "diag: kext-loaded com.flxxxxddd.AirportMtkWlan(2.1.1)" "$BUNDLE/00-summary.txt"
-grep -q "diag: panics-found 1 crashes-found 1" "$BUNDLE/00-summary.txt"
+grep -q "diag: kext-loaded com.flxxxxddd.AirportMtkWlan(2.1.2)" "$BUNDLE/00-summary.txt"
+grep -q "diag: panics-found 4 crashes-found 2" "$BUNDLE/00-summary.txt"
+grep -q "diag: last-shutdown-cause -128" "$BUNDLE/00-summary.txt"
+grep -q "Recent Boot & Shutdown History" "$BUNDLE/01-system-boot.txt"
+grep -q "Previous shutdown cause: -128" "$BUNDLE/09-crashes-panics/00-panic-and-shutdown-check.txt"
+grep -q "PRE-CRASH-SENTINEL-MTK" "$BUNDLE/07-previous-boot-kernel-log.txt"
+grep -q "lines omitted" "$BUNDLE/07-previous-boot-kernel-log.txt"
+grep -rq "hidden contents panic" "$BUNDLE/09-crashes-panics/"
+grep -rq "panic-full-sentinel" "$BUNDLE/09-crashes-panics/"
+grep -rq "nested-panic-sentinel" "$BUNDLE/09-crashes-panics/"
+grep -rq "kernelmanagerd" "$BUNDLE/09-crashes-panics/"
+! grep -rqE "SN-PANIC-DUMP-999|SYSID-SECRET-999|MACH-SN-SECRET-888|DEVID-SECRET-777" "$BUNDLE"
 grep -q "pci14c3,7961" "$BUNDLE/02-hardware-pci-ioreg.txt"
 grep -q "<KEY_REDACTED>" "$BUNDLE/03-mtk-debug-log.txt"
 if grep -qE "IOPCIEjectable|DO_NOT_LEAK|CCLogStream|PadProp|Broken pipe|write error" "$BUNDLE/03-mtk-debug-log.txt"; then
