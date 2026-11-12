@@ -55,6 +55,9 @@ public:
     void resume() override;
     IOReturn setCountryCode(const char *cc) override;
     IOReturn setMulticastList(IOEthernetAddress *addr, int count) override;
+#ifdef AIRPORT_WCL
+    IOReturn setScanHomeAwayTime(uint32_t timeMs) override;
+#endif
 
     static bool mwx_match(IOPCIDevice *device);
 

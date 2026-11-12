@@ -7,7 +7,7 @@ set -u
 set -o pipefail
 umask 077
 
-TOOL_VERSION="2.1.0"
+TOOL_VERSION="2.1.1"
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
 
@@ -484,7 +484,30 @@ redact_file_inplace "$ROOT_DIR/02-hardware-pci-ioreg.txt"
 progress "Collecting MtkDebugLog ring buffer..."
 {
     echo "=== MtkDebugLog Ring Buffer ==="
-    MTK_DBG=$(printf '%s\n' "$IOREG_PCI" | awk '/"MtkDebugLog" = "/{f=1} f{ if (n++ && /^ *"[A-Za-z0-9_-]+" = /) exit; print }')
+    # Drain stdin without exiting early to prevent SIGPIPE/Broken pipe from printf.
+    MTK_DBG=$(printf '%s\n' "$IOREG_PCI" | awk '
+        !done && /"MtkDebugLog" = "/ {
+            f = 1
+            print
+            if (/"MtkDebugLog" = "([^"\\]|\\.)*"$/) {
+                f = 0
+                done = 1
+            }
+            next
+        }
+        f {
+            if (/^[| ]*(\+-o |\}|"[A-Za-z0-9_.-]+" = )/) {
+                f = 0
+                done = 1
+                next
+            }
+            print
+            if (/^[[:space:]]*"$/) {
+                f = 0
+                done = 1
+            }
+        }
+    ')
     if [ -n "$MTK_DBG" ]; then
         printf '%s\n' "$MTK_DBG"
     else
@@ -667,7 +690,9 @@ progress "Inspecting OpenCore config and kext inventory..."
                                     fi
                                 done
                             fi
-                            for lf in $(ls -t "$cur_mp"/opencore-*.txt "$cur_mp"/panic-*.txt 2>/dev/null | head -n 4); do
+                            find "$cur_mp" -maxdepth 1 -type f \( -name 'opencore-*.txt' -o -name 'panic-*.txt' \) -exec stat -f '%m %N' {} + 2>/dev/null \
+                                | sort -rn | head -n 4 | cut -d' ' -f2- | while IFS= read -r lf; do
+                                [ -n "$lf" ] || continue
                                 safe_lf=$(printf '%s' "$(basename "$lf")" | tr -c 'A-Za-z0-9._-' '_')
                                 head -c 262144 "$lf" > "$ROOT_DIR/08-efi-opencore/${bpart}-${safe_lf}" 2>/dev/null && redact_file_inplace "$ROOT_DIR/08-efi-opencore/${bpart}-${safe_lf}" || true
                             done

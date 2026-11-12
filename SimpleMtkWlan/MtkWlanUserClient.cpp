@@ -158,7 +158,7 @@ sSTA_INFO(OSObject* target, void* data, bool isSet)
             break;
     }
     st->rssi = -(0 - kMtkMinDbm - ic_bss->ni_rssi);
-    st->noise = that->fDriver->fHalService->getDriverInfo()->getBSSNoise();
+    st->noise = -that->fDriver->fHalService->getDriverInfo()->getBSSNoise();
     sgi = ieee80211_node_supports_sgi(ic_bss);
     if (ic->ic_curmode == IEEE80211_MODE_11AC) {
         if (sgi) {

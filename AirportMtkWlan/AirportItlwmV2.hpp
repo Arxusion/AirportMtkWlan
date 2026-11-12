@@ -173,6 +173,7 @@ public:
     uint32_t roleChecks;
     void watchdogAction(IOTimerEventSource *timer);
     static IOReturn halDebugPollGated(OSObject *, void *, void *, void *, void *);
+    uint32_t watchdogBusyCount = 0;
     
     virtual SInt32 enableFeature(IO80211FeatureCode, void*) override;
     virtual bool isCommandProhibited(int command) override {

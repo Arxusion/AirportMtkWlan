@@ -18,7 +18,7 @@ FX="$TMP/fixture"
 mkdir -p "$FX/DiagnosticReports"
 
 cat > "$FX/kmutil.txt" <<'EOF'
-  142    0 0xffffff7f95a00000 0x185000   0x185000   com.flxxxxddd.AirportMtkWlan (2.1.0) ABC123 <45 12 8 6 3 1>
+  142    0 0xffffff7f95a00000 0x185000   0x185000   com.flxxxxddd.AirportMtkWlan (2.1.1) ABC123 <45 12 8 6 3 1>
   141    2 0xffffff7f95800000 0x92000    0x92000    com.apple.iokit.IO80211FamilyLegacy (1200.13.1) DEF456 <12 8 6 3 1>
 EOF
 
@@ -34,7 +34,12 @@ cat > "$FX/ioreg_pci.txt" <<'EOF'
 [2.000] AirportMtkWlan: Set key request: len=32 cipher_type=4 flags=0 index=0 key=0123456789abcdef0123456789abcdef rsc=abcdef0102030405 ea=de:ad:be:ef:ca:fe
 [3.000] AirportMtkWlan: PSK key check a5
 "
+      |   "IOPCIEjectable" = Yes
+      |   "IOServiceLeakTest" = "DO_NOT_LEAK"
+      | +-o CCLogStream  <class CCLogStream, id 0x100000999>
 EOF
+# Pad trailing ioreg output beyond pipe buffer (>70 KB) to catch SIGPIPE/Broken pipe regressions.
+awk 'BEGIN { for (i = 0; i < 1200; i++) printf "      |   \"PadProp%d\" = \"trailing_ioreg_data_%04d\"\n", i, i }' >> "$FX/ioreg_pci.txt"
 cp "$FX/ioreg_pci.txt" "$FX/ioreg.txt"
 
 {
@@ -81,7 +86,7 @@ Wi-Fi:
       Interfaces:
         en2:
           Card Type: Wi-Fi  (0x14C3, 0x7961)
-          Firmware Version: itlwm: 2.1.0 fw: MT7921
+          Firmware Version: itlwm: 2.1.1 fw: MT7921
           MAC Address: 12:34:56:ab:cd:ef
           Country Code: US
           Current Network Information:
@@ -220,10 +225,15 @@ done
 
 # 3. Assert essential telemetry & structure are preserved
 grep -q "diag: mtk-pci-count 1" "$BUNDLE/00-summary.txt"
-grep -q "diag: kext-loaded com.flxxxxddd.AirportMtkWlan(2.1.0)" "$BUNDLE/00-summary.txt"
+grep -q "diag: kext-loaded com.flxxxxddd.AirportMtkWlan(2.1.1)" "$BUNDLE/00-summary.txt"
 grep -q "diag: panics-found 1 crashes-found 1" "$BUNDLE/00-summary.txt"
 grep -q "pci14c3,7961" "$BUNDLE/02-hardware-pci-ioreg.txt"
 grep -q "<KEY_REDACTED>" "$BUNDLE/03-mtk-debug-log.txt"
+if grep -qE "IOPCIEjectable|DO_NOT_LEAK|CCLogStream|PadProp|Broken pipe|write error" "$BUNDLE/03-mtk-debug-log.txt"; then
+    echo "FAIL: MtkDebugLog extraction leaked sibling ioreg nodes or pipe error"
+    cat "$BUNDLE/03-mtk-debug-log.txt"
+    exit 1
+fi
 grep -q "<RFC1918_LAN_IP>" "$BUNDLE/04-network-wifi-state.txt"
 grep -q "169.254.<LINK_LOCAL>" "$BUNDLE/04-network-wifi-state.txt"
 grep -q "<IPv4_REDACTED>" "$BUNDLE/04-network-wifi-state.txt"
@@ -232,5 +242,22 @@ grep -q "NEARBY_NETWORKS_REDACTED count=2" "$BUNDLE/04-network-wifi-state.txt"
 grep -q "ff:ff:ff:ff:ff:ff" "$BUNDLE/06-wifi-userspace-logs.txt"
 grep -q "similar lines omitted" "$BUNDLE/05-kernel-log-boot.txt"
 grep -q "AirportMtkWlan.kext" "$BUNDLE/08-efi-opencore/fixture-config.plist.xml"
+
+# 4. Assert OpenCore/panic log globbing tolerates spaces in mount paths and filenames
+SPACE_EFI="$TMP/EFI Partition With Spaces"
+mkdir -p "$SPACE_EFI"
+printf 'oc-space-ok\n' > "$SPACE_EFI/opencore-2026-11-11 01.txt"
+printf 'panic-space-ok\n' > "$SPACE_EFI/panic-2026-11-11 02.txt"
+COPIED=0
+OUT_SPACE="$TMP/space-efi-out"
+mkdir -p "$OUT_SPACE"
+find "$SPACE_EFI" -maxdepth 1 -type f \( -name 'opencore-*.txt' -o -name 'panic-*.txt' \) -exec stat -f '%m %N' {} + 2>/dev/null \
+    | sort -rn | head -n 4 | cut -d' ' -f2- | while IFS= read -r lf; do
+    [ -n "$lf" ] || continue
+    safe_lf=$(printf '%s' "$(basename "$lf")" | tr -c 'A-Za-z0-9._-' '_')
+    head -c 262144 "$lf" > "$OUT_SPACE/disk0s1-${safe_lf}"
+done
+grep -q "oc-space-ok" "$OUT_SPACE/disk0s1-opencore-2026-11-11_01.txt_" || grep -q "oc-space-ok" "$OUT_SPACE"/disk0s1-opencore-*
+grep -q "panic-space-ok" "$OUT_SPACE"/disk0s1-panic-*
 
 echo "PASS: grab-logs-test verified collection, verdicts, repeat squashing, and secret redaction"

@@ -235,6 +235,27 @@ IOReturn AirportItlwmSkywalkInterface::setWCL_LEAVE_NETWORK(apple80211_leave_net
     return _fCommandGate->runAction(wclCommand, this, reinterpret_cast<void *>(3));
 }
 
+void AirportItlwmSkywalkInterface::replayWCLCachedScan(const AirportWCL::ScanRequest &scan)
+{
+    ieee80211com *ic = fHalService->get80211Controller();
+    struct ieee80211_node *ni;
+    bool restrictChan = scan.channelCount != 0;
+    bool filterSsid = scan.type != 2 && scan.ssidLength != 0;
+
+    RB_FOREACH(ni, ieee80211_tree, &ic->ic_tree) {
+        if (!ni->ni_chan || ni->ni_chan == IEEE80211_CHAN_ANYC ||
+            !ni->ni_rsnie_tlv || !ni->ni_rsnie_tlv_len)
+            continue;
+        unsigned ch = ieee80211_chan2ieee(ic, ni->ni_chan);
+        if (!ch || !AirportWCL::scanChannelSelected(scan.channels, restrictChan, ch))
+            continue;
+        if (filterSsid && (ni->ni_esslen != scan.ssidLength ||
+            memcmp(ni->ni_essid, scan.ssid, scan.ssidLength) != 0))
+            continue;
+        publishWCLBeacon(ni, ni->ni_rsnie_tlv, ni->ni_rsnie_tlv_len);
+    }
+}
+
 IOReturn AirportItlwmSkywalkInterface::beginWCLScan(apple80211ScanRequest *request)
 {
     AirportWCL::ScanRequest scan;
@@ -271,8 +292,14 @@ IOReturn AirportItlwmSkywalkInterface::beginWCLScan(apple80211ScanRequest *reque
     if (ic->ic_state == IEEE80211_S_RUN) {
         ieee80211_begin_cache_bgscan(&ic->ic_if);
         if (!(ic->ic_flags & IEEE80211_F_BGSCAN)) {
-            scanPending = false;
             ic->ic_wcl_scan_requested = false;
+            if (!RB_EMPTY(&ic->ic_tree)) {
+                replayWCLCachedScan(scan);
+                scanCompleted = true;
+                scanSource->setTimeoutMS(1);
+                return kIOReturnSuccess;
+            }
+            scanPending = false;
             scanSource->cancelTimeout();
             return kIOReturnBusy;
         }
@@ -589,6 +616,8 @@ IOReturn AirportItlwmSkywalkInterface::startWCLJoin(AirportWCL::JoinRequest &joi
     joinPending = true;
     assocNotified = firstBeaconNotified = portAuthorized = false;
     wclAssociatedBeacons = 0;
+    wclLqmBeacons = 0;
+    wclLqmReportedBeacons = 0;
     bzero(wclBeaconInfo, sizeof(wclBeaconInfo));
     disassocIsVoluntary = false;
     joinTimer->setTimeoutMS(15000);
@@ -670,6 +699,8 @@ IOReturn AirportItlwmSkywalkInterface::leaveWCLNetwork()
     joinTimer->cancelTimeout();
     ic->ic_wcl_join_requested = false;
     wclAssociatedBeacons = 0;
+    wclLqmBeacons = 0;
+    wclLqmReportedBeacons = 0;
     wclBssValid = false;
     disassocIsVoluntary = true;
     ic->ic_deauth_reason = IEEE80211_REASON_AUTH_LEAVE;
@@ -802,9 +833,16 @@ void AirportItlwmSkywalkInterface::handleWCLEvent(int code, void *data)
                             &update, sizeof(update), true);
                     }
 #else
+                    int32_t rssiDbm = -70;
+                    apple80211_rssi_data rssi = {};
+                    if (getRSSI(&rssi) == kIOReturnSuccess)
+                        rssiDbm = rssi.aggregate_rssi;
+                    int16_t noiseDbm = -fHalService->getDriverInfo()->getBSSNoise();
+                    if (noiseDbm >= 0)
+                        noiseDbm = -95;
                     AirportWCL::LqmBeaconUpdate update;
                     if (AirportWCL::makeBeaconUpdate(
-                            wclLqmBeacons - wclLqmReportedBeacons, update)) {
+                            wclLqmBeacons - wclLqmReportedBeacons, rssiDbm, noiseDbm, update)) {
                         instance->postMessage(this, AirportWCL::LqmUpdate,
                             &update, sizeof(update), true);
                         wclLqmReportedBeacons = wclLqmBeacons;

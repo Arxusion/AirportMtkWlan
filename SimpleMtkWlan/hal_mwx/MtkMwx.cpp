@@ -587,6 +587,7 @@ struct mwx_softc {
 		uint32_t	 mcu_int;
 	}			sc_mcu_wait[16];
 	uint8_t			sc_scan_seq_num;
+	uint64_t		sc_last_bgscan_ns;
 
 	/* phy / hw */
 	struct mwx_hw_capa	sc_capa;
@@ -1209,6 +1210,7 @@ mwx_stop(struct ifnet *ifp)
 	ic->ic_wcl_scan_active = false;
 	ic->ic_wcl_scan_ssid_length = 0;
 	ic->ic_wcl_scan_idle = false;
+	sc->sc_last_bgscan_ns = 0;
 	if (ic->ic_event_handler)
 		ic->ic_event_handler(ic, IEEE80211_EVT_DRIVER_STOPPED, NULL);
 #endif
@@ -1649,21 +1651,24 @@ mwx_bgscan(struct ieee80211com *ic)
 	 * one background scan per 2 minutes while in RUN.
 	 */
 	if (ic->ic_state == IEEE80211_S_RUN) {
-		static uint64_t last_bgscan_ns;
 		uint64_t now_ns, min_ns = 120ULL * 1000000000ULL;
 
 #ifdef AIRPORT_WCL
 		/*
-		 * macOS asks for a few channels at a time (well under a second
-		 * off channel); only full sweeps get the 2 minute limit.
+		 * macOS WCL dispatches multi-phase channel batches and explicit
+		 * UI scans while associated; never stall restricted batches
+		 * behind an earlier scan, and cap full WCL sweeps at 10 s.
 		 */
-		if (ic->ic_wcl_scan_requested && ic->ic_wcl_scan_restricted)
-			min_ns = 10ULL * 1000000000ULL;
+		if (ic->ic_wcl_scan_requested)
+			min_ns = ic->ic_wcl_scan_restricted ? 0ULL : (10ULL * 1000000000ULL);
 #endif
-		absolutetime_to_nanoseconds(mach_absolute_time(), &now_ns);
-		if (last_bgscan_ns != 0 && now_ns - last_bgscan_ns < min_ns)
-			return EBUSY;
-		last_bgscan_ns = now_ns;
+		if (min_ns > 0) {
+			absolutetime_to_nanoseconds(mach_absolute_time(), &now_ns);
+			if (sc->sc_last_bgscan_ns != 0 &&
+			    now_ns - sc->sc_last_bgscan_ns < min_ns)
+				return EBUSY;
+			sc->sc_last_bgscan_ns = now_ns;
+		}
 	}
 
 	err = mt7921_mcu_hw_scan(sc, 1);
@@ -4105,7 +4110,9 @@ mwx_mcu_rx_event(struct mwx_softc *sc, struct mbuf *m)
 	case 0x6:
 		printf("%s: MAGIC COMMAND\n", DEVNAME(sc));
 	default:
-		if (rxd_seq == 0 || rxd_seq >= nitems(sc->sc_mcu_wait)) {
+		if (rxd_seq == 0)
+			break;
+		if (rxd_seq >= nitems(sc->sc_mcu_wait)) {
 			printf("%s: mcu rx bad seq %x\n", DEVNAME(sc),
 			    rxd_seq);
 			break;
@@ -7802,7 +7809,8 @@ MtkMwx::getFirmwareVersion()
 int16_t
 MtkMwx::getBSSNoise()
 {
-	return 0;
+	/* Caller negates this magnitude to dBm; return a -95 dBm baseline floor. */
+	return 95;
 }
 
 bool
@@ -7914,6 +7922,17 @@ MtkMwx::setMulticastList(IOEthernetAddress *addr, int count)
 {
 	return kIOReturnSuccess;
 }
+
+#ifdef AIRPORT_WCL
+IOReturn
+MtkMwx::setScanHomeAwayTime(uint32_t timeMs)
+{
+	if (com == NULL)
+		return kIOReturnNotReady;
+	com->sc_ic.ic_wcl_scan_away_time_ms = timeMs;
+	return kIOReturnSuccess;
+}
+#endif
 
 void
 MtkMwx::releaseAll()

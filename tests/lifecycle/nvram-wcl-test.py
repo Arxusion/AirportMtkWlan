@@ -91,7 +91,18 @@ int main() {{
     assert(!AirportWCL::scanChannelSelected(chans, true, 36));
     assert(AirportWCL::scanChannelSelected(chans, false, 36));
 
-    puts("PASS: MtkNvramHelper + AirportWCL auth/cipher/scan unit checks.");
+    // LQM beacon update layout & Tahoe watchdog/RSSI/SNR/noise population
+    AirportWCL::LqmBeaconUpdate lqm;
+    assert(AirportWCL::makeBeaconUpdate(8, -58, -95, lqm));
+    assert(lqm.rssiValid == 1 && lqm.rssi == -58);
+    assert(lqm.core0Rssi == -58 && lqm.core1Rssi == -58);
+    assert(lqm.snrValid == 1 && lqm.snr == 37);
+    assert(lqm.noiseValid == 1 && lqm.noise == -95);
+    assert(lqm.receivedDelta == 8 && lqm.scheduledDelta == 8);
+    assert(lqm.beaconValid == 1 && lqm.snapshotValid == 1 && lqm.countersValid == 1);
+    assert(!AirportWCL::makeBeaconUpdate(0, -58, -95, lqm));
+
+    puts("PASS: MtkNvramHelper + AirportWCL auth/cipher/scan/LQM unit checks.");
     return 0;
 }}
 '''

@@ -140,21 +140,28 @@ eventHandler(struct ieee80211com *ic, int msgCode, void *data)
 IOReturn AirportItlwm::halDebugPollGated(OSObject *owner, void *, void *, void *, void *)
 {
     auto self = static_cast<AirportItlwm *>(owner);
-    if (self->fHalService)
+    if (self->fHalService) {
+        struct ieee80211com *ic = self->fHalService->get80211Controller();
+        if (ic && ic->ic_ac.ac_if.if_watchdog)
+            (*ic->ic_ac.ac_if.if_watchdog)(&ic->ic_ac.ac_if);
         self->fHalService->debugPoll();
+    }
     return kIOReturnSuccess;
 }
 
 void AirportItlwm::watchdogAction(IOTimerEventSource *timer)
 {
-    struct _ifnet *ifp = &fHalService->get80211Controller()->ic_ac.ac_if;
-    (*ifp->if_watchdog)(ifp);
     /*
-     * MediaTek HAL housekeeping on the main work loop: AUTH/ASSOC
-     * retransmission, DMA stall recovery (firmware reload), stats lines.
+     * Synchronize net80211's if_watchdog alongside debugPoll on _fCommandGate so
+     * timer housekeeping cannot race RX/TX workloop callbacks, and only warn
+     * when contention persists across multiple ticks.
      */
-    if (_fCommandGate && _fCommandGate->attemptAction(halDebugPollGated) != kIOReturnSuccess)
-        XYLog("watchdog: main work loop busy, poll skipped\n");
+    if (_fCommandGate && _fCommandGate->attemptAction(halDebugPollGated) != kIOReturnSuccess) {
+        if (++watchdogBusyCount >= 5 && (watchdogBusyCount % 5) == 0)
+            XYLog("watchdog: main work loop busy, poll skipped (%u)\n", watchdogBusyCount);
+    } else {
+        watchdogBusyCount = 0;
+    }
 
     watchdogTimer->setTimeoutMS(kWatchDogTimerPeriod);
 }

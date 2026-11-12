@@ -77,31 +77,76 @@ struct SequoiaLqmUpdate {
 static_assert(sizeof(SequoiaLqmUpdate) == 0x150, "Sequoia LQM size");
 static_assert(offsetof(SequoiaLqmUpdate, rssi) == 4, "Sequoia LQM RSSI offset");
 
-// WCLNetManager::handleLqmUpdate consumes this 0x1dc snapshot.
-// Only beacon reception is valid; unavailable radio measurements stay invalid.
+// WCLNetManager::handleLqmUpdate & reportDataPathEvents consume this 0x1dc snapshot.
+// Keeping snapshotValid + countersValid + beacon/RSSI/SNR/noise populated avoids
+// 60 s <missed beacons timeout> disconnects and IOC_NOISE (0x66) failures on Tahoe.
 struct LqmBeaconUpdate {
-    uint8_t prefix[0x28];
+    uint8_t rssiValid;
+    uint8_t pad0[3];
+    int32_t rssi;
+    uint8_t pad1;
+    int8_t core0Rssi;
+    int8_t core1Rssi;
+    uint8_t snrValid;
+    int16_t snr;
+    uint8_t noiseValid;
+    uint8_t pad2;
+    int16_t noise;
+    uint8_t reserved0[0x28 - 0x12];
     uint32_t receivedDelta;
     uint32_t scheduledDelta;
     uint8_t beaconValid;
-    uint8_t reserved[0x1d8 - 0x31];
+    uint8_t reserved1[0x1d8 - 0x31];
     uint8_t snapshotValid;
     uint8_t countersValid;
     uint8_t tail[2];
 };
 static_assert(sizeof(LqmBeaconUpdate) == 0x1dc, "WCL LQM update size");
+static_assert(offsetof(LqmBeaconUpdate, rssiValid) == 0x00, "WCL RSSI valid offset");
+static_assert(offsetof(LqmBeaconUpdate, rssi) == 0x04, "WCL RSSI offset");
+static_assert(offsetof(LqmBeaconUpdate, core0Rssi) == 0x09, "WCL core0 RSSI offset");
+static_assert(offsetof(LqmBeaconUpdate, core1Rssi) == 0x0a, "WCL core1 RSSI offset");
+static_assert(offsetof(LqmBeaconUpdate, snrValid) == 0x0b, "WCL SNR valid offset");
+static_assert(offsetof(LqmBeaconUpdate, snr) == 0x0c, "WCL SNR offset");
+static_assert(offsetof(LqmBeaconUpdate, noiseValid) == 0x0e, "WCL noise valid offset");
+static_assert(offsetof(LqmBeaconUpdate, noise) == 0x10, "WCL noise offset");
 static_assert(offsetof(LqmBeaconUpdate, receivedDelta) == 0x28, "WCL beacon delta offset");
+static_assert(offsetof(LqmBeaconUpdate, scheduledDelta) == 0x2c, "WCL scheduled delta offset");
 static_assert(offsetof(LqmBeaconUpdate, beaconValid) == 0x30, "WCL beacon valid offset");
 static_assert(offsetof(LqmBeaconUpdate, snapshotValid) == 0x1d8, "WCL snapshot valid offset");
-inline bool makeBeaconUpdate(uint32_t receivedDelta, LqmBeaconUpdate &out)
+static_assert(offsetof(LqmBeaconUpdate, countersValid) == 0x1d9, "WCL counters valid offset");
+inline int8_t clampCoreRssi(int32_t rssi)
+{
+    if (rssi < -127)
+        return -127;
+    if (rssi > 127)
+        return 127;
+    return static_cast<int8_t>(rssi);
+}
+inline bool makeBeaconUpdate(uint32_t receivedDelta, int32_t rssiDbm, int16_t noiseDbm,
+    LqmBeaconUpdate &out)
 {
     out = {};
     if (!receivedDelta)
         return false;
+    int16_t snr = 0;
+    if (noiseDbm < 0 && rssiDbm > noiseDbm) {
+        int32_t diff = rssiDbm - noiseDbm;
+        snr = static_cast<int16_t>(diff > 100 ? 100 : diff);
+    }
+    out.rssiValid = 1;
+    out.rssi = rssiDbm;
+    out.core0Rssi = clampCoreRssi(rssiDbm);
+    out.core1Rssi = clampCoreRssi(rssiDbm);
+    out.snrValid = noiseDbm < 0 ? 1 : 0;
+    out.snr = snr;
+    out.noiseValid = noiseDbm < 0 ? 1 : 0;
+    out.noise = noiseDbm;
     out.receivedDelta = receivedDelta;
+    out.scheduledDelta = receivedDelta;
     out.beaconValid = 1;
-    out.snapshotValid = 0;
-    out.countersValid = 0;
+    out.snapshotValid = 1;
+    out.countersValid = 1;
     return true;
 }
 
