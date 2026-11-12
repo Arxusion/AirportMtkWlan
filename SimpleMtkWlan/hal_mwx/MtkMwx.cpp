@@ -588,6 +588,12 @@ struct mwx_softc {
 	}			sc_mcu_wait[16];
 	uint8_t			sc_scan_seq_num;
 	uint64_t		sc_last_bgscan_ns;
+	uint64_t		sc_last_active_traffic_ns;
+	uint64_t		sc_last_traffic_pkts;
+	uint64_t		sc_last_traffic_check_ns;
+	struct task		sc_edca_task;
+	CTimeout		*sc_intr_to;
+	uint32_t		sc_intr_pending;
 
 	/* phy / hw */
 	struct mwx_hw_capa	sc_capa;
@@ -739,6 +745,8 @@ int	mwx_bgscan(struct ieee80211com *);
 void	mwx_bgscan_done(struct ieee80211com *,
 	    struct ieee80211_node_switch_bss_arg *, size_t);
 void	mwx_bgscan_done_task(void *);
+void	mwx_updateedca(struct ieee80211com *);
+void	mwx_edca_task(void *);
 int	mwx_set_key(struct ieee80211com *, struct ieee80211_node *,
 	    struct ieee80211_key *);
 void	mwx_delete_key(struct ieee80211com *, struct ieee80211_node *,
@@ -749,6 +757,8 @@ int	mwx_tx(struct mwx_softc *, struct mbuf *, struct ieee80211_node *);
 void	mwx_rx(struct mwx_softc *, struct mbuf *, struct mbuf_list *);
 int	mwx_count_nodes(struct ieee80211com *);
 int	mwx_intr(void *);
+void	mwx_intr_timeout(void *);
+void	mwx_update_stream_caps(struct mwx_softc *);
 int	mwx_preinit(struct mwx_softc *);
 void	mwx_attach_hook(struct device *);
 bool	mwx_attach(struct device *, struct device *, void *);
@@ -779,8 +789,8 @@ void	mwx_dma_tx_cleanup(struct mwx_softc *, struct mwx_queue *);
 void	mwx_dma_tx_done(struct mwx_softc *);
 void	mwx_dma_rx_process(struct mwx_softc *, struct mbuf_list *);
 void	mwx_dma_rx_dequeue(struct mwx_softc *, struct mwx_queue *,
-	    struct mbuf_list *);
-void	mwx_dma_rx_done(struct mwx_softc *, struct mwx_queue *);
+	    struct mbuf_list *, int, bool *);
+bool	mwx_dma_rx_done(struct mwx_softc *, struct mwx_queue *);
 
 struct mbuf	*mwx_mcu_alloc_msg(size_t);
 void	mwx_mcu_set_len(struct mbuf *, void *);
@@ -1177,6 +1187,10 @@ mwx_stop(struct ifnet *ifp)
 	}
 	task_del(systq, &sc->sc_scan_task);
 	timeout_del(&sc->sc_reset_to);
+	timeout_del(&sc->sc_intr_to);
+	sc->sc_intr_pending = 0;
+	if (sc->sc_nswq != NULL)
+		task_del(sc->sc_nswq, &sc->sc_edca_task);
 
 	ifp->if_timer = 0;
 	ifp->if_flags &= ~IFF_RUNNING;
@@ -1619,6 +1633,7 @@ mwx_newstate_task(void *ptr)
 			}
 		}
 		mt7921_mac_set_timing(sc);
+		mt7921_mcu_set_tx(sc, &sc->sc_vif);
 		rv = mt7921_mcu_set_associated_bss(sc, 1);
 		if (!rv)
 			rv = mt7921_mcu_set_associated_peer(sc);
@@ -1635,6 +1650,53 @@ mwx_newstate_task(void *ptr)
 	splx(s);
 }
 
+static bool
+mwx_traffic_active(struct mwx_softc *sc, uint64_t now_ns)
+{
+	struct ifnet *ifp = &sc->sc_ic.ic_if;
+
+	if (ifp->netStat != NULL) {
+		uint64_t pkts = ifp->netStat->inputPackets +
+		    ifp->netStat->outputPackets;
+		if (sc->sc_last_traffic_check_ns == 0 ||
+		    pkts < sc->sc_last_traffic_pkts) {
+			sc->sc_last_traffic_pkts = pkts;
+			sc->sc_last_traffic_check_ns = now_ns;
+		} else {
+			uint64_t elapsed = now_ns - sc->sc_last_traffic_check_ns;
+			if (elapsed >= 500000000ULL) {
+				uint64_t delta = pkts - sc->sc_last_traffic_pkts;
+				if ((delta * 1000000000ULL) / elapsed >= 200ULL)
+					sc->sc_last_active_traffic_ns = now_ns;
+				sc->sc_last_traffic_pkts = pkts;
+				sc->sc_last_traffic_check_ns = now_ns;
+			}
+		}
+	}
+	return sc->sc_last_active_traffic_ns != 0 &&
+	    now_ns - sc->sc_last_active_traffic_ns < 3ULL * 1000000000ULL;
+}
+
+void
+mwx_updateedca(struct ieee80211com *ic)
+{
+	struct mwx_softc *sc = (struct mwx_softc *)ic->ic_softc;
+
+	if (!sc->sc_detaching && sc->sc_nswq != NULL)
+		task_add(sc->sc_nswq, &sc->sc_edca_task);
+}
+
+void
+mwx_edca_task(void *arg)
+{
+	struct mwx_softc *sc = (struct mwx_softc *)arg;
+
+	if (sc->sc_detaching || sc->sc_suspended ||
+	    sc->sc_ic.ic_state != IEEE80211_S_RUN)
+		return;
+	mt7921_mcu_set_tx(sc, &sc->sc_vif);
+}
+
 int
 mwx_bgscan(struct ieee80211com *ic)
 {
@@ -1646,24 +1708,31 @@ mwx_bgscan(struct ieee80211com *ic)
 
 	/*
 	 * While associated, a full hardware scan keeps the radio off the
-	 * home channel for ~11 s. The client asks for one every ~20 s to
-	 * refresh its network list, which halved throughput. Allow at most
-	 * one background scan per 2 minutes while in RUN.
+	 * home channel for seconds. Defer background sweeps while active
+	 * data traffic is streaming (WCL replays cached scan results instead),
+	 * unless looking for an explicit SSID.
 	 */
 	if (ic->ic_state == IEEE80211_S_RUN) {
 		uint64_t now_ns, min_ns = 120ULL * 1000000000ULL;
+		bool explicit_ssid = false;
 
+		absolutetime_to_nanoseconds(mach_absolute_time(), &now_ns);
 #ifdef AIRPORT_WCL
 		/*
 		 * macOS WCL dispatches multi-phase channel batches and explicit
 		 * UI scans while associated; never stall restricted batches
 		 * behind an earlier scan, and cap full WCL sweeps at 10 s.
 		 */
-		if (ic->ic_wcl_scan_requested)
-			min_ns = ic->ic_wcl_scan_restricted ? 0ULL : (10ULL * 1000000000ULL);
+		if (ic->ic_wcl_scan_requested) {
+			explicit_ssid = ic->ic_wcl_scan_ssid_length > 0;
+			min_ns = ic->ic_wcl_scan_restricted ? 0ULL :
+			    (10ULL * 1000000000ULL);
+		}
 #endif
+		if (!explicit_ssid && mwx_traffic_active(sc, now_ns))
+			return EBUSY;
+
 		if (min_ns > 0) {
-			absolutetime_to_nanoseconds(mach_absolute_time(), &now_ns);
 			if (sc->sc_last_bgscan_ns != 0 &&
 			    now_ns - sc->sc_last_bgscan_ns < min_ns)
 				return EBUSY;
@@ -2197,12 +2266,24 @@ mwx_count_nodes(struct ieee80211com *ic)
  */
 static uint32_t mwx_intr_calls;
 
+void
+mwx_intr_timeout(void *arg)
+{
+	struct mwx_softc *sc = (struct mwx_softc *)arg;
+
+	if (sc->sc_detaching || sc->sc_suspended || !sc->sc_memh)
+		return;
+	mwx_intr(sc);
+}
+
 int
 mwx_intr(void *arg)
 {
 	struct mwx_softc *sc = (struct mwx_softc *)arg;
-	uint32_t intr, intr_sw;
+	uint32_t intr, intr_sw, forced;
 	uint32_t mask = sc->sc_intr_mask;
+	const int max_passes = 8;
+	uint32_t work_remaining = 0;
 	static uint32_t intr_log_count;
 	static uint32_t intr_unhandled_log_count;
 
@@ -2217,12 +2298,24 @@ mwx_intr(void *arg)
 		return 0;
 
 	mwx_write(sc, MT_WFDMA0_HOST_INT_ENA, 0);
+	forced = sc->sc_intr_pending;
+	sc->sc_intr_pending = 0;
 	intr = mwx_read(sc, MT_WFDMA0_HOST_INT_STA);
 	if (intr == 0xffffffff)
 		return 0;
-	if (intr == 0) {
+	intr |= forced;
+	if ((intr & mask) == 0) {
+		if (intr != 0 && intr_unhandled_log_count < 16) {
+			printf("%s: unhandled interrupt %08x\n", DEVNAME(sc),
+			    intr & ~mask);
+			intr_unhandled_log_count++;
+		}
 		mwx_write(sc, MT_WFDMA0_HOST_INT_ENA, mask);
-		return 0;
+		(void)mwx_read(sc, MT_WFDMA0_HOST_INT_ENA);
+		intr = mwx_read(sc, MT_WFDMA0_HOST_INT_STA) & mask;
+		if (intr == 0)
+			return 0;
+		mwx_write(sc, MT_WFDMA0_HOST_INT_ENA, 0);
 	}
 
 	/* TODO power management */
@@ -2234,7 +2327,7 @@ mwx_intr(void *arg)
 		intr_log_count++;
 	}
 
-	if (intr & ~mask && intr_unhandled_log_count < 16) {
+	if ((intr & ~mask) != 0 && intr_unhandled_log_count < 16) {
 		printf("%s: unhandled interrupt %08x\n", DEVNAME(sc),
 		    intr & ~mask);
 		intr_unhandled_log_count++;
@@ -2254,41 +2347,99 @@ mwx_intr(void *arg)
 	}
 
 	for (int pass = 0; ; pass++) {
+		uint32_t rx_more = 0;
+
 		if (intr & MT_INT_TX_DONE_ALL)
 			mwx_dma_tx_done(sc);
 
-		if (intr & MT_INT_RX_DONE_WM)
-			mwx_dma_rx_done(sc, &sc->sc_rxfwdlq);
-		if (intr & MT_INT_RX_DONE_WM2)
-			mwx_dma_rx_done(sc, &sc->sc_rxmcuq);
-		if (intr & MT_INT_RX_DONE_DATA)
-			mwx_dma_rx_done(sc, &sc->sc_rxq);
-
-		/*
-		 * MSI is edge triggered: events that arrived while the host
-		 * interrupt enable was cleared do not raise a new message, so
-		 * drain them here before re-enabling.
-		 */
-		if (pass >= 8)
-			break;
-		intr = mwx_read(sc, MT_WFDMA0_HOST_INT_STA) & mask;
-		if (intr == 0)
-			break;
-		mwx_write(sc, MT_WFDMA0_HOST_INT_STA, intr);
-		if (intr & MT_INT_MCU_CMD) {
-			intr_sw = mwx_read(sc, MT_MCU_CMD);
-			mwx_write(sc, MT_MCU_CMD, intr_sw);
-			if (intr_sw & MT_MCU_CMD_WAKE_RX_PCIE)
-				intr |= MT_INT_RX_DONE_DATA;
+		if (intr & MT_INT_RX_DONE_WM) {
+			if (mwx_dma_rx_done(sc, &sc->sc_rxfwdlq))
+				rx_more |= MT_INT_RX_DONE_WM;
 		}
+		if (intr & MT_INT_RX_DONE_WM2) {
+			if (mwx_dma_rx_done(sc, &sc->sc_rxmcuq))
+				rx_more |= MT_INT_RX_DONE_WM2;
+		}
+		if (intr & MT_INT_RX_DONE_DATA) {
+			if (mwx_dma_rx_done(sc, &sc->sc_rxq))
+				rx_more |= MT_INT_RX_DONE_DATA;
+		}
+
+		if (pass + 1 >= max_passes) {
+			work_remaining = rx_more;
+			break;
+		}
+
+		intr = mwx_read(sc, MT_WFDMA0_HOST_INT_STA) & mask;
+		if (intr == 0 && rx_more == 0) {
+			/*
+			 * MSI is edge triggered: restore HOST_INT_ENA, flush
+			 * the posted write, and recheck STA & mask so events
+			 * raised while masked cannot strand for 1000ms.
+			 */
+			mwx_write(sc, MT_WFDMA0_HOST_INT_ENA, mask);
+			(void)mwx_read(sc, MT_WFDMA0_HOST_INT_ENA);
+			intr = mwx_read(sc, MT_WFDMA0_HOST_INT_STA) & mask;
+			if (intr == 0)
+				return 1;
+			mwx_write(sc, MT_WFDMA0_HOST_INT_ENA, 0);
+		}
+		if (intr != 0) {
+			mwx_write(sc, MT_WFDMA0_HOST_INT_STA, intr);
+			if (intr & MT_INT_MCU_CMD) {
+				intr_sw = mwx_read(sc, MT_MCU_CMD);
+				mwx_write(sc, MT_MCU_CMD, intr_sw);
+				if (intr_sw & MT_MCU_CMD_WAKE_RX_PCIE)
+					intr |= MT_INT_RX_DONE_DATA;
+			}
+		}
+		intr |= rx_more;
 	}
 
 	/* TODO power management */
 //	mt76_connac_pm_unref(&dev->mphy, &dev->pm);
 
 	mwx_write(sc, MT_WFDMA0_HOST_INT_ENA, mask);
+	(void)mwx_read(sc, MT_WFDMA0_HOST_INT_ENA);
+	if ((mwx_read(sc, MT_WFDMA0_HOST_INT_STA) & mask) != 0 ||
+	    work_remaining != 0) {
+		sc->sc_intr_pending |= work_remaining;
+		if (!sc->sc_detaching && !sc->sc_suspended &&
+		    sc->sc_intr_to != NULL)
+			timeout_add_msec(&sc->sc_intr_to, 1);
+	}
 
 	return 1;
+}
+
+void
+mwx_update_stream_caps(struct mwx_softc *sc)
+{
+	struct ieee80211com *ic = &sc->sc_ic;
+	/* 2 bits per NSS: 2 = MCS 0-9 (0-11 for HE), 3 = not supported */
+	uint16_t mcs_map_2ss = (sc->sc_capa.num_streams >= 2) ? 0xfffa : 0xfffe;
+	bool enable_160 = (ic->ic_vhtcaps &
+	    IEEE80211_VHTCAP_SUPP_CHAN_WIDTH_160MHZ) != 0;
+
+	/* HT MCS set: MCS 0-7 per spatial stream. */
+	memset(ic->ic_sup_mcs, 0, sizeof(ic->ic_sup_mcs));
+	ic->ic_sup_mcs[0] = 0xff;
+	if (sc->sc_capa.num_streams >= 2)
+		ic->ic_sup_mcs[1] = 0xff;
+	ic->ic_tx_mcs_set = IEEE80211_TX_MCS_SET_DEFINED;
+
+	/* VHT & HE MCS maps (must refresh once firmware fills sc_capa). */
+	ic->ic_vht_rx_mcs_map = mcs_map_2ss;
+	ic->ic_vht_tx_mcs_map = mcs_map_2ss;
+	ic->ic_he_mcs_nss_supp.rx_mcs_80 = htole16(mcs_map_2ss);
+	ic->ic_he_mcs_nss_supp.tx_mcs_80 = htole16(mcs_map_2ss);
+	if (enable_160) {
+		ic->ic_he_mcs_nss_supp.rx_mcs_160 = htole16(mcs_map_2ss);
+		ic->ic_he_mcs_nss_supp.tx_mcs_160 = htole16(mcs_map_2ss);
+	} else {
+		ic->ic_he_mcs_nss_supp.rx_mcs_160 = htole16(0xffff);
+		ic->ic_he_mcs_nss_supp.tx_mcs_160 = htole16(0xffff);
+	}
 }
 
 int
@@ -2380,12 +2531,8 @@ mwx_preinit(struct mwx_softc *sc)
 	}
 #endif
 
-	/* HT MCS set: MCS 0-7 per spatial stream. */
-	memset(ic->ic_sup_mcs, 0, sizeof(ic->ic_sup_mcs));
-	ic->ic_sup_mcs[0] = 0xff;
-	if (sc->sc_capa.num_streams >= 2)
-		ic->ic_sup_mcs[1] = 0xff;
-	ic->ic_tx_mcs_set = IEEE80211_TX_MCS_SET_DEFINED;
+	/* Update HT, VHT, and HE spatial-stream capabilities from firmware info. */
+	mwx_update_stream_caps(sc);
 
 	/* Configure channel information obtained from firmware. */
 	ieee80211_channel_init(ifp);
@@ -2658,10 +2805,6 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 			ic->ic_vhtcaps |= IEEE80211_VHTCAP_SHORT_GI_160 |
 			    IEEE80211_VHTCAP_SUPP_CHAN_WIDTH_160MHZ;
 		}
-		/* 2 bits per NSS: 2 = MCS 0-9, 3 = not supported */
-		uint16_t mcs_map_2ss = (sc->sc_capa.num_streams >= 2) ? 0xfffa : 0xfffe;
-		ic->ic_vht_rx_mcs_map = mcs_map_2ss;
-		ic->ic_vht_tx_mcs_map = mcs_map_2ss;
 		ic->ic_vht_rx_highest = 0;
 		ic->ic_vht_tx_highest = 0;
 
@@ -2716,8 +2859,6 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 		    IEEE80211_HE_PHY_CAP9_RX_FULL_BW_SU_USING_MU_WITH_NON_COMP_SIGB |
 		    IEEE80211_HE_PHY_CAP9_NOMIMAL_PKT_PADDING_16US;
 
-		ic->ic_he_mcs_nss_supp.rx_mcs_80 = htole16(mcs_map_2ss);
-		ic->ic_he_mcs_nss_supp.tx_mcs_80 = htole16(mcs_map_2ss);
 		if (enable_160) {
 			ic->ic_he_cap_elem.phy_cap_info[0] |=
 			    IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_160MHZ_IN_5G;
@@ -2728,14 +2869,10 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 			ic->ic_he_cap_elem.phy_cap_info[8] |=
 			    IEEE80211_HE_PHY_CAP8_20MHZ_IN_160MHZ_HE_PPDU |
 			    IEEE80211_HE_PHY_CAP8_80MHZ_IN_160MHZ_HE_PPDU;
-			ic->ic_he_mcs_nss_supp.rx_mcs_160 = htole16(mcs_map_2ss);
-			ic->ic_he_mcs_nss_supp.tx_mcs_160 = htole16(mcs_map_2ss);
-		} else {
-			ic->ic_he_mcs_nss_supp.rx_mcs_160 = htole16(0xffff);
-			ic->ic_he_mcs_nss_supp.tx_mcs_160 = htole16(0xffff);
 		}
 		ic->ic_he_mcs_nss_supp.rx_mcs_80p80 = htole16(0xffff);
 		ic->ic_he_mcs_nss_supp.tx_mcs_80p80 = htole16(0xffff);
+		mwx_update_stream_caps(sc);
 	}
 
 #if NOTYET
@@ -2780,6 +2917,7 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 #endif
 	ic->ic_bgscan_start = mwx_bgscan;
 	ic->ic_bgscan_done = mwx_bgscan_done;
+	ic->ic_updateedca = mwx_updateedca;
 	ic->ic_set_key = mwx_set_key;
 	ic->ic_ampdu_rx_start = mwx_ampdu_rx_start;
 	ic->ic_ampdu_rx_stop = mwx_ampdu_rx_stop;
@@ -2799,10 +2937,12 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 
 	task_set(&sc->sc_newstate_task, mwx_newstate_task, sc, "mwx_newstate");
 	task_set(&sc->sc_bgscan_done_task, mwx_bgscan_done_task, sc, "mwx_bgscan");
+	task_set(&sc->sc_edca_task, mwx_edca_task, sc, "mwx_edca");
 	task_set(&sc->sc_setkey_task, mwx_setkey_task, sc, "mwx_setkey");
 	task_set(&sc->sc_reset_task, mwx_reset_task, sc, "mwx_reset");
 	task_set(&sc->sc_scan_task, mwx_end_scan_task, sc, "mwx_scan");
 	timeout_set(&sc->sc_reset_to, mwx_reset_timeo, sc);
+	timeout_set(&sc->sc_intr_to, mwx_intr_timeout, sc);
 
 	/*
 	 * We cannot read the MAC address without loading the
@@ -3738,12 +3878,16 @@ mwx_dma_rx_process(struct mwx_softc *sc, struct mbuf_list *ml)
 
 void
 mwx_dma_rx_dequeue(struct mwx_softc *sc, struct mwx_queue *q,
-    struct mbuf_list *ml)
+    struct mbuf_list *ml, int budget, bool *morep)
 {
 	struct mwx_queue_data *md;
 	struct mwx_desc *desc;
 	struct mbuf *m, *m0 = NULL, *mtail = NULL;
-	int idx, last;
+	int idx, last, frames = 0;
+	bool broken = false;
+
+	if (morep != NULL)
+		*morep = false;
 
 	idx = q->mq_cons;
 	last = mwx_read(sc, q->mq_regbase + MT_DMA_DMA_IDX);
@@ -3776,6 +3920,7 @@ mwx_dma_rx_dequeue(struct mwx_softc *sc, struct mwx_queue *q,
 				MWX_DEV_LOG(sc, "rx slot %d without buffer (dma idx %d)\n",
 				    idx, last);
 			mwx_reset(sc);
+			broken = true;
 			break;
 		}
 		md->md_mbuf = NULL;
@@ -3800,17 +3945,12 @@ mwx_dma_rx_dequeue(struct mwx_softc *sc, struct mwx_queue *q,
 			ml_enqueue(ml, m0);
 			m0 = NULL;
 			mtail = NULL;
+			frames++;
 		}
 
 		idx = (idx + 1) % q->mq_count;
-
-		/* check if more data made it in */
-		/* XXX should we actually do that? */
-		if (idx == last) {
-			last = mwx_read(sc, q->mq_regbase + MT_DMA_DMA_IDX);
-			if (last < 0 || last >= q->mq_count)
-				last = idx;
-		}
+		if (budget > 0 && frames >= budget && m0 == NULL)
+			break;
 	}
 
 	/* a chain cut short by the out-of-sync check above */
@@ -3825,21 +3965,34 @@ mwx_dma_rx_dequeue(struct mwx_softc *sc, struct mwx_queue *q,
 	    BUS_DMASYNC_POSTREAD);
 
 	q->mq_cons = idx;
+	if (morep != NULL && !broken && idx != last)
+		*morep = true;
 }
 
-void
+bool
 mwx_dma_rx_done(struct mwx_softc *sc, struct mwx_queue *q)
 {
-	struct mbuf_list ml = MBUF_LIST_INITIALIZER();
+	const int batch = 64;
+	const int max_chunks = 4;
+	bool more = false;
 
-	mwx_dma_rx_dequeue(sc, q, &ml);
+	for (int chunk = 0; chunk < max_chunks; chunk++) {
+		struct mbuf_list ml = MBUF_LIST_INITIALIZER();
 
-	if (ml_empty(&ml))
-		return;
+		more = false;
+		mwx_dma_rx_dequeue(sc, q, &ml, batch, &more);
+		if (ml_empty(&ml) && !more)
+			break;
 
-	mwx_queue_fill(sc, q);	/* TODO what if it fails, run timer? */
+		if (!ml_empty(&ml)) {
+			mwx_queue_fill(sc, q);	/* TODO what if it fails, run timer? */
+			mwx_dma_rx_process(sc, &ml);
+		}
+		if (!more)
+			break;
+	}
 
-	mwx_dma_rx_process(sc, &ml);
+	return more;
 }
 
 struct mbuf *
@@ -6111,7 +6264,7 @@ mt7921_mcu_set_tx(struct mwx_softc *sc, struct mwx_vif *mvif)
 		uint8_t		pad;
 	} __packed req = {
 		.bss_idx = mvif->idx,
-		.qos = /* vif->bss_conf.qos */ 0,
+		.qos = (uint8_t)((sc->sc_ic.ic_flags & IEEE80211_F_QOS) ? 1 : 0),
 		.wmm_idx = mvif->wmm_idx,
 	};
 #ifdef NOTYET
@@ -6139,29 +6292,32 @@ mt7921_mcu_set_tx(struct mwx_softc *sc, struct mwx_vif *mvif)
 		.wmm_idx = mvif->mt76.wmm_idx,
 	};
 #endif
-	static const int to_aci[] = { 1, 0, 2, 3 };
+	/*
+	 * OpenBSD EDCA_AC_* (0=BE, 1=BK, 2=VI, 3=VO) -> MT7921 MCU edca[]
+	 * indices (0=VI, 1=VO, 2=BE, 3=BK).
+	 */
+	static const int to_aci[IEEE80211_NUM_ACS] = { 2, 3, 0, 1 };
+	struct ieee80211com *ic = &sc->sc_ic;
+	bool qos = (ic->ic_flags & IEEE80211_F_QOS) != 0;
 	int ac, rv;
 
 	for (ac = 0; ac < IEEE80211_NUM_ACS; ac++) {
-		//struct ieee80211_tx_queue_params *q = &mvif->queue_params[ac];
+		const struct ieee80211_edca_ac_params *q =
+		    &ic->ic_edca_ac[ac];
 		struct edca *e = &req.edca[to_aci[ac]];
 
-		e->aifs = htole16(/* q->aifs */ 2);
-		e->txop = htole16(/* q->txop */ 0);
-
-#ifdef NOTYET
-		if (q->cw_min)
-			e->cw_min = htole16(q->cw_min);
-		else
-#endif
+		if (qos && q->ac_aifsn != 0) {
+			e->aifs = htole16(q->ac_aifsn);
+			e->txop = htole16(q->ac_txoplimit);
+			e->cw_min = htole16(q->ac_ecwmin ? q->ac_ecwmin : 5);
+			e->cw_max = htole16(q->ac_ecwmax ? q->ac_ecwmax : 10);
+			e->acm = q->ac_acm;
+		} else {
+			e->aifs = htole16(2);
+			e->txop = htole16(0);
 			e->cw_min = htole16(5);
-
-#ifdef NOTYET
-		if ( q->cw_max)
-			e->cw_max = htole16(q->cw_max);
-		else
-#endif
 			e->cw_max = htole16(10);
+		}
 	}
 
 	rv = mwx_mcu_send_msg(sc, MCU_CE_CMD_SET_EDCA_PARMS, &req,
@@ -7686,11 +7842,13 @@ MtkMwx::detach(IOPCIDevice *device)
     struct ifnet *ifp = &com->sc_ic.ic_if;
     com->sc_detaching = true;
     timeout_del(&com->sc_reset_to);
+    timeout_del(&com->sc_intr_to);
     /* Keep interrupts alive while in-flight MCU requests finish. */
     taskq_quiesce(com->sc_nswq);
     if (taskQueueOwned) taskq_quiesce(systq);
     if (ifp->if_flags & IFF_RUNNING) mwx_stop(ifp);
     timeout_free(&com->sc_reset_to);
+    timeout_free(&com->sc_intr_to);
     /* No interrupt callback may access buffers during their destruction. */
     if (com->sc_ih) {
         pci_intr_disestablish(pci->pa_pc, com->sc_ih);
@@ -7895,7 +8053,7 @@ MtkMwx::setCountryCode(const char *cc)
 uint32_t
 MtkMwx::getTxQueueSize()
 {
-	return 256;
+	return 1024;
 }
 
 uint32_t
@@ -8517,6 +8675,11 @@ MtkMwx::debugPoll()
 
 	sta = mwx_read(sc, MT_WFDMA0_HOST_INT_STA);
 	ena = mwx_read(sc, MT_WFDMA0_HOST_INT_ENA);
+	{
+		uint64_t now_ns = 0;
+		absolutetime_to_nanoseconds(mach_absolute_time(), &now_ns);
+		(void)mwx_traffic_active(sc, now_ns);
+	}
 	lp = mwx_read(sc, MT_CONN_ON_LPCTL);
 	mcu = mwx_read(sc, MT_MCU_CMD);
 	tq_cpu = mwx_read(sc, sc->sc_txq.mq_regbase + MT_DMA_CPU_IDX);

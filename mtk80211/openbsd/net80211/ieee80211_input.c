@@ -856,6 +856,37 @@ ieee80211_defrag_timeout(void *arg)
 #endif
 
 /*
+ * Rearm the Block Ack inactivity timer at most every 250ms (or half the
+ * negotiated timeout when shorter) so per-packet RX does not bounce
+ * _fCommandGate->runAction(setTimeoutMS) on the main IOWorkLoop.
+ */
+#define IEEE80211_BA_TO_REARM_NS	(250ULL * 1000000ULL)
+
+static void
+ieee80211_input_ba_rearm_timeout(struct ieee80211_rx_ba *ba)
+{
+    uint64_t uptime = 0, now_ns = 0;
+    uint64_t half_timeout_ns, min_rearm_ns;
+
+    if (ba->ba_timeout_val == 0)
+        return;
+
+    clock_get_uptime(&uptime);
+    absolutetime_to_nanoseconds(uptime, &now_ns);
+
+    half_timeout_ns = ((uint64_t)ba->ba_timeout_val * 1000ULL) / 2;
+    min_rearm_ns = (half_timeout_ns < IEEE80211_BA_TO_REARM_NS) ?
+        half_timeout_ns : IEEE80211_BA_TO_REARM_NS;
+
+    if (ba->ba_to_last_ns != 0 &&
+        now_ns - ba->ba_to_last_ns < min_rearm_ns)
+        return;
+
+    ba->ba_to_last_ns = now_ns;
+    timeout_add_usec(&ba->ba_to, ba->ba_timeout_val);
+}
+
+/*
  * Process a received data MPDU related to a specific HT-immediate Block Ack
  * agreement (see 9.10.7.6).
  */
@@ -874,8 +905,7 @@ ieee80211_input_ba(struct ieee80211com *ic, mbuf_t m,
     sn = letoh16(*(u_int16_t *)wh->i_seq) >> IEEE80211_SEQ_SEQ_SHIFT;
     
     /* reset Block Ack inactivity timer */
-    if (ba->ba_timeout_val != 0)
-        timeout_add_usec(&ba->ba_to, ba->ba_timeout_val);
+    ieee80211_input_ba_rearm_timeout(ba);
     
     if (SEQ_LT(sn, ba->ba_winstart)) {	/* SN < WinStartB */
         ic->ic_stats.is_ht_rx_frame_below_ba_winstart++;
@@ -3178,6 +3208,7 @@ ieee80211_recv_addba_req(struct ieee80211com *ic, mbuf_t m,
     /* setup Block Ack agreement */
     ba->ba_state = IEEE80211_BA_REQUESTED;
     ba->ba_timeout_val = timeout * IEEE80211_DUR_TU;
+    ba->ba_to_last_ns = 0;
     ba->ba_ni = ni;
     ba->ba_token = token;
     timeout_set(&ba->ba_to, ieee80211_rx_ba_timeout, ba);
@@ -3230,8 +3261,8 @@ ieee80211_addba_req_accept(struct ieee80211com *ic, struct ieee80211_node *ni,
     ba->ba_state = IEEE80211_BA_AGREED;
     ic->ic_stats.is_ht_rx_ba_agreements++;
     /* start Block Ack inactivity timer */
-    if (ba->ba_timeout_val != 0)
-        timeout_add_usec(&ba->ba_to, ba->ba_timeout_val);
+    ba->ba_to_last_ns = 0;
+    ieee80211_input_ba_rearm_timeout(ba);
     
     /* MLME-ADDBA.response */
     IEEE80211_SEND_ACTION(ic, ni, IEEE80211_CATEG_BA,

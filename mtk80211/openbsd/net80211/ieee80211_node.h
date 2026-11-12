@@ -327,6 +327,8 @@ struct ieee80211_rx_ba {
 #define IEEE80211_BA_MAX_WINMISS	8
 
 	uint8_t			ba_token;
+	/* Monotonic timestamp (ns) of last ba_to rearm to throttle workloop churn. */
+	uint64_t		ba_to_last_ns;
 };
 
 /*

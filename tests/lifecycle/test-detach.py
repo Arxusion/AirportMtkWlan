@@ -15,7 +15,7 @@ pre=r'''
 struct IOPCIDevice {};
 struct ifnet { int if_flags=0; };
 struct IC { ifnet ic_if; };
-struct Soft { IC sc_ic; bool sc_detaching=false,sc_net_attached=false; void *sc_reset_to=nullptr,*sc_nswq=nullptr,*sc_ih=nullptr; int sc_memh=0,sc_st=0,sc_mems=0; };
+struct Soft { IC sc_ic; bool sc_detaching=false,sc_net_attached=false; void *sc_reset_to=nullptr,*sc_intr_to=nullptr,*sc_nswq=nullptr,*sc_ih=nullptr; int sc_memh=0,sc_st=0,sc_mems=0; };
 struct PCI { int pa_pc=0; };
 std::vector<int> events; void *systq=(void*)1;
 void taskq_destroy(void *q) { if(q) events.push_back(8); }
