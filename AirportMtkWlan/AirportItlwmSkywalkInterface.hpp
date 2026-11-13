@@ -177,7 +177,7 @@ public:
     virtual IOReturn getPRIVATE_MAC(apple80211_private_mac_data *) AIRPORT_SKYWALK_OVERRIDE { return kIOReturnUnsupported; }
     virtual IOReturn getRANGING_ENABLE(apple80211_ranging_enable_request_t *) AIRPORT_SKYWALK_OVERRIDE { return kIOReturnUnsupported; }
     virtual IOReturn getRANGING_START(apple80211_ranging_start_request_t *) AIRPORT_SKYWALK_OVERRIDE { return kIOReturnUnsupported; }
-    virtual IOReturn getAWDL_RSDB_CAPS(apple80211_rsdb_capability *) AIRPORT_SKYWALK_OVERRIDE { return kIOReturnUnsupported; }
+    IOReturn getAWDL_RSDB_CAPS(apple80211_rsdb_capability *) override;
     virtual IOReturn getTKO_PARAMS(apple80211_tko_params *) AIRPORT_SKYWALK_OVERRIDE { return kIOReturnUnsupported; }
     virtual IOReturn getTKO_DUMP(apple80211_tko_dump *) AIRPORT_SKYWALK_OVERRIDE { return kIOReturnUnsupported; }
 #ifdef AIRPORT_WCL
@@ -301,7 +301,7 @@ public:
     virtual IOReturn setIE(apple80211_ie_data *) AIRPORT_SKYWALK_OVERRIDE { return kIOReturnUnsupported; }
     virtual IOReturn setWOW_TEST(apple80211_wow_test_data *) AIRPORT_SKYWALK_OVERRIDE { return kIOReturnUnsupported; }
     virtual IOReturn setSCANCACHE_CLEAR(void *) AIRPORT_SKYWALK_OVERRIDE;
-    virtual IOReturn setVIRTUAL_IF_CREATE(apple80211_virt_if_create_data *) AIRPORT_SKYWALK_OVERRIDE { return kIOReturnUnsupported; }
+    IOReturn setVIRTUAL_IF_CREATE(apple80211_virt_if_create_data *) override;
     virtual IOReturn setBT_COEX_FLAGS(apple80211_state_data *) AIRPORT_SKYWALK_OVERRIDE { return kIOReturnUnsupported; }
     virtual IOReturn setROAM(apple80211_sta_roam_data *) AIRPORT_SKYWALK_OVERRIDE { return kIOReturnUnsupported; }
     virtual IOReturn setHT_CAPABILITY(apple80211_ht_capability *) AIRPORT_SKYWALK_OVERRIDE { return kIOReturnUnsupported; }

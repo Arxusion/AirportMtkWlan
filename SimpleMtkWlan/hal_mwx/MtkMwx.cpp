@@ -2149,8 +2149,7 @@ mwx_amsdu_flush(struct mwx_softc *sc, struct mbuf_list *ml)
 	u_int hl = sc->sc_amsdu_hdrlen;
 	size_t total, off;
 	struct mbuf *nm = NULL;
-	u_int32_t chunks = 1;
-	uint8_t *dst;
+	unsigned int chunks = 0;
 
 	if (n == 0)
 		return;
@@ -2163,34 +2162,73 @@ mwx_amsdu_flush(struct mwx_softc *sc, struct mbuf_list *ml)
 	total = hl;
 	for (i = 0; i < n; i++)
 		total += i < n - 1 ? ((sc->sc_amsdu_len[i] + 3) & ~3U) : sc->sc_amsdu_len[i];
-	if (mbuf_allocpacket(MBUF_DONTWAIT, total, &chunks, &nm) != 0 || nm == NULL ||
-	    mbuf_next(nm) != NULL) {	/* chunks = 1: one buffer of >= total bytes */
-		if (nm != NULL)
-			m_freem(nm);
-		for (i = 0; i < n; i++) {
+
+	if (mbuf_allocpacket(MBUF_DONTWAIT, total, &chunks, &nm) != 0 || nm == NULL) {
+		/* If allocation failed under memory pressure, deliver subframe 0 directly */
+		mwx_rx_deliver(sc, sc->sc_amsdu_sub[0], &sc->sc_amsdu_rxi, ml);
+		sc->sc_amsdu_sub[0] = NULL;
+		for (i = 1; i < n; i++) {
 			m_freem(sc->sc_amsdu_sub[i]);
 			sc->sc_amsdu_sub[i] = NULL;
 		}
 		return;
 	}
-	mbuf_setlen(nm, total);
-	mbuf_pkthdr_setlen(nm, total);
-	dst = mtod(nm, uint8_t *);
-	memcpy(dst, mtod(sc->sc_amsdu_sub[0], uint8_t *), hl);
-	off = hl;
-	for (i = 0; i < n; i++) {
-		struct mbuf *sm = sc->sc_amsdu_sub[i];
-		u_int len = sc->sc_amsdu_len[i];
 
-		mbuf_copydata(sm, hl, len, dst + off);
-		off += len;
-		if (i < n - 1) {
-			u_int pad = ((len + 3) & ~3U) - len;
-			memset(dst + off, 0, pad);
-			off += pad;
+	mbuf_pkthdr_setlen(nm, total);
+
+	if (mbuf_next(nm) == NULL) {
+		uint8_t *dst = mtod(nm, uint8_t *);
+		mbuf_setlen(nm, total);
+		memcpy(dst, mtod(sc->sc_amsdu_sub[0], uint8_t *), hl);
+		off = hl;
+		for (i = 0; i < n; i++) {
+			struct mbuf *sm = sc->sc_amsdu_sub[i];
+			u_int len = sc->sc_amsdu_len[i];
+
+			mbuf_copydata(sm, hl, len, dst + off);
+			off += len;
+			if (i < n - 1) {
+				u_int pad = ((len + 3) & ~3U) - len;
+				memset(dst + off, 0, pad);
+				off += pad;
+			}
+			m_freem(sm);
+			sc->sc_amsdu_sub[i] = NULL;
 		}
-		m_freem(sm);
-		sc->sc_amsdu_sub[i] = NULL;
+	} else {
+		static const uint8_t zero_pad[4] = { 0, 0, 0, 0 };
+		mbuf_copyback(nm, 0, hl, mtod(sc->sc_amsdu_sub[0], uint8_t *), MBUF_DONTWAIT);
+		off = hl;
+		for (i = 0; i < n; i++) {
+			struct mbuf *sm = sc->sc_amsdu_sub[i];
+			u_int len = sc->sc_amsdu_len[i];
+			uint8_t smbuf[2048];
+
+			if (len <= sizeof(smbuf)) {
+				mbuf_copydata(sm, hl, len, smbuf);
+				mbuf_copyback(nm, off, len, smbuf, MBUF_DONTWAIT);
+			} else {
+				size_t copied = 0;
+				while (copied < len) {
+					size_t cur = len - copied;
+					if (cur > sizeof(smbuf))
+						cur = sizeof(smbuf);
+					mbuf_copydata(sm, hl + copied, cur, smbuf);
+					mbuf_copyback(nm, off + copied, cur, smbuf, MBUF_DONTWAIT);
+					copied += cur;
+				}
+			}
+			off += len;
+			if (i < n - 1) {
+				u_int pad = ((len + 3) & ~3U) - len;
+				if (pad > 0) {
+					mbuf_copyback(nm, off, pad, zero_pad, MBUF_DONTWAIT);
+					off += pad;
+				}
+			}
+			m_freem(sm);
+			sc->sc_amsdu_sub[i] = NULL;
+		}
 	}
 	mwx_rx_deliver(sc, nm, &sc->sc_amsdu_rxi, ml);
 }
@@ -2352,8 +2390,8 @@ mwx_intr(void *arg)
 	struct mwx_softc *sc = (struct mwx_softc *)arg;
 	uint32_t intr, intr_sw, forced;
 	uint32_t mask = sc->sc_intr_mask;
-	/* Yield _fWorkloop between short bursts so output/WCL/watchdog aren't starved. */
-	const int max_passes = 2;
+	/* Drain budget: up to 4 passes per interrupt (draining up to 2048 packets). */
+	const int max_passes = 4;
 	uint32_t work_remaining = 0;
 	static uint32_t intr_log_count;
 	static uint32_t intr_unhandled_log_count;
@@ -2478,6 +2516,11 @@ mwx_intr(void *arg)
 		if (!sc->sc_detaching && !sc->sc_suspended &&
 		    sc->sc_intr_to != NULL)
 			timeout_add_msec(&sc->sc_intr_to, 1);
+#ifndef TEST_HARNESS
+		pci_intr_handle_t ih = (pci_intr_handle_t)sc->sc_ih;
+		if (ih && ih->intr)
+			ih->intr->interruptOccurred(0, 0, 0);
+#endif
 	}
 
 	return 1;
@@ -3937,8 +3980,12 @@ mwx_dma_rx_process(struct mwx_softc *sc, struct mbuf_list *ml)
 		sc->sc_rx_process_events++;
 	}
 
-	if (sc->sc_amsdu_n > 0)
-		sc->sc_amsdu_idle++;
+	if (sc->sc_amsdu_n > 0) {
+		if (++sc->sc_amsdu_idle >= 2) {
+			mwx_amsdu_flush(sc, &mlout);
+			sc->sc_amsdu_idle = 0;
+		}
+	}
 	if_input(&sc->sc_ic.ic_if, &mlout);
 }
 
@@ -4038,8 +4085,8 @@ mwx_dma_rx_dequeue(struct mwx_softc *sc, struct mwx_queue *q,
 bool
 mwx_dma_rx_done(struct mwx_softc *sc, struct mwx_queue *q)
 {
-	const int batch = 64;
-	const int max_chunks = 2;
+	const int batch = 128;
+	const int max_chunks = 4;
 	bool more = false;
 
 	for (int chunk = 0; chunk < max_chunks; chunk++) {
@@ -8523,11 +8570,12 @@ mwx_ampdu_rx_start(struct ieee80211com *ic, struct ieee80211_node *ni,
 {
 	struct mwx_softc *sc = (struct mwx_softc *)ic->ic_softc;
 	struct ieee80211_rx_ba *ba = &ni->ni_rx_ba[tid];
+	int amsdu = (ba->ba_params & IEEE80211_ADDBA_AMSDU) ? 1 : 0;
 	int rv;
 
-	rv = mwx_mcu_sta_ba(sc, ni, tid, ba->ba_winstart, ba->ba_winsize, 1, 0, 0);
-	MWX_DEV_LOG(sc, "rx BA start tid=%u ssn=%u win=%u rv=%d\n", tid,
-	    ba->ba_winstart, ba->ba_winsize, rv);
+	rv = mwx_mcu_sta_ba(sc, ni, tid, ba->ba_winstart, ba->ba_winsize, 1, 0, amsdu);
+	MWX_DEV_LOG(sc, "rx BA start tid=%u ssn=%u win=%u amsdu=%d rv=%d\n", tid,
+	    ba->ba_winstart, ba->ba_winsize, amsdu, rv);
 	return rv;
 }
 

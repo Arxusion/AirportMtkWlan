@@ -31,6 +31,7 @@ fn_rx = extract_fn(mwx_src, "mwx_rx(struct mwx_softc *sc, struct mbuf *m, struct
 fn_rearm = extract_fn(inp_src, "ieee80211_input_ba_rearm_timeout(struct ieee80211_rx_ba *ba)\n{")
 
 harness = r'''
+#define TEST_HARNESS 1
 #include <cassert>
 #include <cerrno>
 #include <cstdint>
@@ -449,43 +450,39 @@ static void test_intr_and_rx_budget() {
     assert(g_reg_ena == sc.sc_intr_mask);
     assert(g_intr_to_calls.empty());
 
-    // Bounded RX chunking: 600 descriptors = 300 packets (2 descs per pkt).
-    // One mwx_dma_rx_done call processes 2 chunks * 64 = 128 packets, refills 2 times,
+    // Bounded RX chunking: 1400 descriptors = 700 packets (2 descs per pkt).
+    // One mwx_dma_rx_done call processes 4 chunks * 128 = 512 packets, refills 4 times,
     // never breaks a multi-desc chain, only reads DMA_IDX once per chunk, and sets more=true.
-    setup_rx_ring(sc.sc_rxq, 1024, 600);
-    g_rxq_dma_idx = 600;
+    setup_rx_ring(sc.sc_rxq, 2048, 1400);
+    g_rxq_dma_idx = 1400;
     g_rxq_dma_reads = g_fill_calls = g_process_calls = g_processed_pkts = 0;
     bool more = mwx_dma_rx_done(&sc, &sc.sc_rxq);
     assert(more == true);
-    assert(g_processed_pkts == 128);
-    assert(g_fill_calls == 2 && g_process_calls == 2);
-    assert(g_rxq_dma_reads == 2);
-    assert(sc.sc_rxq.mq_cons == 256);
-    // Drain the next 128 -> still 44 left (more == true), then last 44 -> more == false.
-    more = mwx_dma_rx_done(&sc, &sc.sc_rxq);
-    assert(more == true);
-    assert(g_processed_pkts == 256);
-    assert(sc.sc_rxq.mq_cons == 512);
+    assert(g_processed_pkts == 512);
+    assert(g_fill_calls == 4 && g_process_calls == 4);
+    assert(g_rxq_dma_reads == 4);
+    assert(sc.sc_rxq.mq_cons == 1024);
+    // Drain the next 188 packets (376 descs) -> more == false.
     more = mwx_dma_rx_done(&sc, &sc.sc_rxq);
     assert(more == false);
-    assert(g_processed_pkts == 300);
-    assert(sc.sc_rxq.mq_cons == 600);
+    assert(g_processed_pkts == 700);
+    assert(sc.sc_rxq.mq_cons == 1400);
     free_rx_ring(sc.sc_rxq);
 
     // Budget exhaustion under sustained interrupts schedules 1ms timer yield without losing STA bits.
     g_reg_sta = MT_INT_RX_DONE_DATA;
-    setup_rx_ring(sc.sc_rxq, 1024, 800); // 400 packets: 2 passes * 128 = 256 -> remaining -> yield!
-    g_rxq_dma_idx = 800;
+    setup_rx_ring(sc.sc_rxq, 8192, 5000); // 2500 packets: 4 passes * 512 = 2048 pkts (4096 descs) -> yield!
+    g_rxq_dma_idx = 5000;
     g_intr_to_calls.clear();
     g_race_on_ena_restore.clear();
     assert(mwx_intr(&sc) == 1);
-    assert(sc.sc_rxq.mq_cons == 512);
+    assert(sc.sc_rxq.mq_cons == 4096);
     assert(g_intr_to_calls.size() == 1 && g_intr_to_calls[0] == 1);
     assert(sc.sc_intr_pending == MT_INT_RX_DONE_DATA);
     assert(g_reg_ena == sc.sc_intr_mask);
     // Next call (from timeout) drains the rest:
     assert(mwx_intr(&sc) == 1);
-    assert(sc.sc_rxq.mq_cons == 800);
+    assert(sc.sc_rxq.mq_cons == 5000);
     assert(sc.sc_intr_pending == 0);
     free_rx_ring(sc.sc_rxq);
 }

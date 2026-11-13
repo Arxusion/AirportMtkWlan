@@ -26,6 +26,7 @@ struct packet_info_tx;
 
 class IO80211VirtualInterface : public IOService {
     OSDeclareDefaultStructors(IO80211VirtualInterface)
+    friend class AirportItlwm;
     
 public:
     virtual void free(void) APPLE_KEXT_OVERRIDE;
