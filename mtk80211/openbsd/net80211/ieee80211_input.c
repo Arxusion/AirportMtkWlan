@@ -923,26 +923,12 @@ ieee80211_input_ba(struct ieee80211com *ic, mbuf_t m,
         ic->ic_stats.is_ht_rx_frame_above_ba_winend++;
         count = (sn - ba->ba_winend) & 0xfff;
         if (count > ba->ba_winsize) {
-            /*
-             * Check whether we're consistently behind the window,
-             * and let the window move forward if neccessary.
-             */
-            if (ba->ba_winmiss < IEEE80211_BA_MAX_WINMISS) {
-                if (ba->ba_missedsn == ((sn - 1) & 0xfff))
-                    ba->ba_winmiss++;
-                else
-                    ba->ba_winmiss = 0;
-                ba->ba_missedsn = sn;
-                ifp->netStat->inputErrors++;
-                mbuf_freem(m);	/* discard the MPDU */
-                return;
-            }
-            
-            /* It appears the window has moved for real. */
+            /* Standard 802.11-2016 adaptive window slide without dropping frames */
+            uint16_t new_winstart = (sn - ba->ba_winsize + 1) & 0xfff;
             ic->ic_stats.is_ht_rx_ba_window_jump++;
             ba->ba_winmiss = 0;
             ba->ba_missedsn = 0;
-            ieee80211_ba_move_window(ic, ni, tid, sn, ml);
+            ieee80211_ba_move_window(ic, ni, tid, new_winstart, ml);
         } else {
             ic->ic_stats.is_ht_rx_ba_window_slide++;
             ieee80211_input_ba_seq(ic, ni, tid,
@@ -1258,9 +1244,12 @@ ieee80211_decap(struct ieee80211com *ic, mbuf_t m,
     if (llc->llc_dsap == LLC_SNAP_LSAP &&
         llc->llc_ssap == LLC_SNAP_LSAP &&
         llc->llc_control == LLC_UI &&
-        llc->llc_snap.org_code[0] == 0 &&
-        llc->llc_snap.org_code[1] == 0 &&
-        llc->llc_snap.org_code[2] == 0) {
+        ((llc->llc_snap.org_code[0] == 0 &&
+          llc->llc_snap.org_code[1] == 0 &&
+          llc->llc_snap.org_code[2] == 0) ||
+         (llc->llc_snap.org_code[0] == 0x00 &&
+          llc->llc_snap.org_code[1] == 0x17 &&
+          llc->llc_snap.org_code[2] == 0xf2))) {
         eh.ether_type = llc->llc_snap.ether_type;
         mbuf_adj(m, hdrlen + LLC_SNAPFRAMELEN - ETHER_HDR_LEN);
     } else {
@@ -1361,13 +1350,16 @@ ieee80211_amsdu_decap(struct ieee80211com *ic, mbuf_t m,
             return;
         }
         llc = (struct llc *)&eh[1];
-        /* Examine the 802.2 LLC header after the A-MSDU header. */
+        /* Examine the 802.2 LLC header after the A-MSDU header. Supports RFC1042 and Apple SNAP. */
         if (llc->llc_dsap == LLC_SNAP_LSAP &&
             llc->llc_ssap == LLC_SNAP_LSAP &&
             llc->llc_control == LLC_UI &&
-            llc->llc_snap.org_code[0] == 0 &&
-            llc->llc_snap.org_code[1] == 0 &&
-            llc->llc_snap.org_code[2] == 0) {
+            ((llc->llc_snap.org_code[0] == 0 &&
+              llc->llc_snap.org_code[1] == 0 &&
+              llc->llc_snap.org_code[2] == 0) ||
+             (llc->llc_snap.org_code[0] == 0x00 &&
+              llc->llc_snap.org_code[1] == 0x17 &&
+              llc->llc_snap.org_code[2] == 0xf2))) {
             /* convert to Ethernet II header */
             eh->ether_type = llc->llc_snap.ether_type;
             /* strip LLC+SNAP headers */
@@ -3130,11 +3122,14 @@ ieee80211_recv_addba_req(struct ieee80211com *ic, mbuf_t m,
     u_int8_t token, tid;
     int err = 0;
     
-    /* Ignore if we are not ready to receive data frames. */
+    /* Ignore if we are not ready to receive data frames (only enforce port_valid for infrastructure AP). */
     if (ic->ic_state != IEEE80211_S_RUN ||
-        ((ic->ic_flags & IEEE80211_F_RSNON) && !ni->ni_port_valid))
+        ((ic->ic_flags & IEEE80211_F_RSNON) && ni == ic->ic_bss && !ni->ni_port_valid))
         return;
     
+    if (!(ni->ni_flags & IEEE80211_NODE_HT) && (ic->ic_caps & IEEE80211_C_TX_AMPDU)) {
+        ni->ni_flags |= IEEE80211_NODE_HT;
+    }
     if (!(ni->ni_flags & IEEE80211_NODE_HT)) {
         DPRINTF(("received ADDBA req from non-HT STA %s\n",
                  ether_sprintf(ni->ni_macaddr)));

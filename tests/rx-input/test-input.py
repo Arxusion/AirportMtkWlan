@@ -11,15 +11,20 @@ pre=r'''
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <vector>
+#include <net/ethernet.h>
 using UInt32=unsigned; using IOReturn=int; struct OSObject{};
 constexpr int kIOReturnSuccess=0;
 #define XYLog(...) ((void)0)
 #define panic(...) abort()
-struct Packet { Packet* next; unsigned id; };
+#define mtod(m, t) ((t)((m)->raw))
+#define MBUF_DONTWAIT 0
+struct Packet { Packet* next; unsigned id; uint8_t raw[64]; Packet(Packet* n, unsigned i) : next(n), id(i) { memset(raw, 0, sizeof(raw)); } };
 using mbuf_t=Packet*;
 mbuf_t mbuf_nextpkt(mbuf_t m){return m->next;}
 void mbuf_setnextpkt(mbuf_t m,mbuf_t n){m->next=n;}
+static inline int mbuf_dup(mbuf_t m, int, mbuf_t* out) { *out = nullptr; return 1; }
 struct mbuf_list {mbuf_t ml_head=nullptr,ml_tail=nullptr;unsigned ml_len=0;};
 #define MBUF_LIST_FOREACH(ml,m) for(m=(ml)->ml_head;m;m=mbuf_nextpkt(m))
 struct Stats {unsigned inputPackets=0;};
@@ -33,7 +38,13 @@ struct IONetworkInterface {
  }
  unsigned flushInputQueue(){++flushes;return received.size();}
 };
-struct _ifnet {IONetworkInterface* iface;Stats* netStat;};
+struct _ifnet {
+    IONetworkInterface* iface;
+    Stats* netStat;
+    IONetworkInterface* if_awdl_iface = nullptr;
+    uint8_t if_awdl_mac[6] = {0};
+    bool if_awdl_enabled = false;
+};
 '''
 main=r'''
 int main(){

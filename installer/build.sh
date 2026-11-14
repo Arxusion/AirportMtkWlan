@@ -41,13 +41,19 @@ echo "[3/4] Embedding release drivers into application resources..."
 ditto "$REPO_ROOT/build/Release/tahoe/AirportMtkWlan.kext" "$APP_BUNDLE/Contents/Resources/kexts/tahoe/AirportMtkWlan.kext"
 ditto "$REPO_ROOT/build/Release/sequoia/AirportMtkWlan.kext" "$APP_BUNDLE/Contents/Resources/kexts/sequoia/AirportMtkWlan.kext"
 ditto "$REPO_ROOT/build/Release/SimpleMtkWlan.kext" "$APP_BUNDLE/Contents/Resources/kexts/SimpleMtkWlan.kext"
+if [ -d "$REPO_ROOT/build/Release/AirportMtkBtPatcher.kext" ]; then
+    ditto "$REPO_ROOT/build/Release/AirportMtkBtPatcher.kext" "$APP_BUNDLE/Contents/Resources/kexts/AirportMtkBtPatcher.kext"
+fi
+if [ -d "$REPO_ROOT/build/Release/AirportMtkBtFw.kext" ]; then
+    ditto "$REPO_ROOT/build/Release/AirportMtkBtFw.kext" "$APP_BUNDLE/Contents/Resources/kexts/AirportMtkBtFw.kext"
+fi
 
 # Sign
 codesign -s - --force --deep "$APP_BUNDLE" >/dev/null 2>&1 || true
 
 # 4. Package distribution zip
 echo "[4/4] Creating distribution archive..."
-VERSION="${1:-2.2.0}"
+VERSION="${1:-2.2.1}"
 ZIP_NAME="AirportMtkWlan-Installer-v${VERSION}.zip"
 ditto -c -k --keepParent "$APP_BUNDLE" "$DIST_DIR/$ZIP_NAME"
 

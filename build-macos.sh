@@ -121,3 +121,6 @@ if [[ "$product" == all || "$product" == AirportMtkWlan ]] && [[ -d "$here/Airpo
 		-DAIRPORT -DAIRPORT_WCL "-D__IO80211_TARGET=$target" -DIO80211FAMILY_V2 -- "${common_sources[@]}" \
 		$(cd "$here" && ls AirportMtkWlan/*.cpp AirportMtkWlan/WCL/*.cpp 2>/dev/null)
 fi
+if [[ "$product" == all || "$product" == bluetooth ]] && [[ -f "$here/bluetooth/build-bluetooth.sh" ]]; then
+	"$here/bluetooth/build-bluetooth.sh"
+fi

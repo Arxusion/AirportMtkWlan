@@ -208,9 +208,40 @@ public class EFIManager {
     
     // MARK: - Install Driver
     
+    public func findBluetoothKexts() -> (patcher: URL?, fw: URL?) {
+        let fm = FileManager.default
+        let patcherName = "AirportMtkBtPatcher.kext"
+        let fwName = "AirportMtkBtFw.kext"
+        
+        var patcherURL: URL? = nil
+        var fwURL: URL? = nil
+        
+        let searchDirs = [
+            Bundle.main.resourceURL?.appendingPathComponent("kexts"),
+            Bundle.main.resourceURL?.appendingPathComponent("kexts/bluetooth"),
+            URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("build/Release"),
+            URL(fileURLWithPath: "/Volumes/MacExtended/Developer/projects/AirportMtkWlan/build/Release"),
+            URL(fileURLWithPath: "/Users/yash/Desktop/EFI/OC/Kexts"),
+            URL(fileURLWithPath: "/Volumes/MacExtended/EFI/OC/Kexts")
+        ].compactMap { $0 }
+        
+        for dir in searchDirs {
+            let p = dir.appendingPathComponent(patcherName)
+            if patcherURL == nil && fm.fileExists(atPath: p.path) {
+                patcherURL = p
+            }
+            let f = dir.appendingPathComponent(fwName)
+            if fwURL == nil && fm.fileExists(atPath: f.path) {
+                fwURL = f
+            }
+        }
+        return (patcherURL, fwURL)
+    }
+
     public func install(
         flavor: DriverFlavor,
         destination: EFIDestination,
+        installBluetooth: Bool = true,
         autoConfig: Bool,
         backupPlist: Bool,
         logger: @escaping (String) -> Void
@@ -258,6 +289,35 @@ public class EFIManager {
         } catch {
             logger("ERROR: Failed to copy kext: \(error.localizedDescription)")
             return false
+        }
+
+        // Install Bluetooth companion drivers if requested
+        if installBluetooth {
+            let (btPatcher, btFw) = findBluetoothKexts()
+            if let btPatcher = btPatcher {
+                let targetPatcher = kextsURL.appendingPathComponent("AirportMtkBtPatcher.kext")
+                try? fm.removeItem(at: targetPatcher)
+                try? copyDirectory(from: btPatcher, to: targetPatcher)
+                logger("Installed AirportMtkBtPatcher.kext to Kexts/")
+            } else {
+                logger("NOTE: AirportMtkBtPatcher.kext not found in bundle, skipping BT patcher.")
+            }
+            if let btFw = btFw {
+                let targetFw = kextsURL.appendingPathComponent("AirportMtkBtFw.kext")
+                try? fm.removeItem(at: targetFw)
+                try? copyDirectory(from: btFw, to: targetFw)
+                logger("Installed AirportMtkBtFw.kext to Kexts/")
+            } else {
+                logger("NOTE: AirportMtkBtFw.kext not found in bundle, skipping BT firmware.")
+            }
+            // Remove legacy SimpleMtkBt kexts if present
+            for old in ["SimpleMtkBtPatcher.kext", "SimpleMtkBtFw.kext"] {
+                let oldURL = kextsURL.appendingPathComponent(old)
+                if fm.fileExists(atPath: oldURL.path) {
+                    try? fm.removeItem(at: oldURL)
+                    logger("Purged obsolete \(old) from Kexts/")
+                }
+            }
         }
         
         // 4. Update config.plist if requested
@@ -323,6 +383,36 @@ public class EFIManager {
                         }
                     }
                 }
+
+                // Add or update Bluetooth entries in Kernel -> Add
+                if installBluetooth {
+                    add.removeAll { item in
+                        let b = item["BundlePath"] as? String ?? ""
+                        return b == "AirportMtkBtPatcher.kext" || b == "AirportMtkBtFw.kext" ||
+                               b == "SimpleMtkBtPatcher.kext" || b == "SimpleMtkBtFw.kext"
+                    }
+                    add.append([
+                        "Arch": "x86_64",
+                        "BundlePath": "AirportMtkBtPatcher.kext",
+                        "Comment": "MediaTek Bluetooth Patcher",
+                        "Enabled": true,
+                        "ExecutablePath": "Contents/MacOS/AirportMtkBtPatcher",
+                        "MaxKernel": "",
+                        "MinKernel": "",
+                        "PlistPath": "Contents/Info.plist"
+                    ])
+                    add.append([
+                        "Arch": "x86_64",
+                        "BundlePath": "AirportMtkBtFw.kext",
+                        "Comment": "MediaTek Bluetooth Firmware",
+                        "Enabled": true,
+                        "ExecutablePath": "Contents/MacOS/AirportMtkBtFw",
+                        "MaxKernel": "",
+                        "MinKernel": "",
+                        "PlistPath": "Contents/Info.plist"
+                    ])
+                    logger("Configured AirportMtkBtPatcher and AirportMtkBtFw in config.plist")
+                }
                 
                 kernel["Add"] = add
                 
@@ -357,7 +447,14 @@ public class EFIManager {
         logger("Starting driver uninstallation...")
         
         // Remove kexts
-        for name in ["AirportMtkWlan.kext", "SimpleMtkWlan.kext"] {
+        for name in [
+            "AirportMtkWlan.kext",
+            "SimpleMtkWlan.kext",
+            "AirportMtkBtPatcher.kext",
+            "AirportMtkBtFw.kext",
+            "SimpleMtkBtPatcher.kext",
+            "SimpleMtkBtFw.kext"
+        ] {
             let path = kextsURL.appendingPathComponent(name)
             if fm.fileExists(atPath: path.path) {
                 try? fm.removeItem(at: path)
@@ -375,7 +472,9 @@ public class EFIManager {
                        var add = kernel["Add"] as? [[String: Any]] {
                         for i in 0..<add.count {
                             let b = add[i]["BundlePath"] as? String ?? ""
-                            if b == "AirportMtkWlan.kext" || b == "SimpleMtkWlan.kext" {
+                            if b == "AirportMtkWlan.kext" || b == "SimpleMtkWlan.kext" ||
+                               b == "AirportMtkBtPatcher.kext" || b == "AirportMtkBtFw.kext" ||
+                               b == "SimpleMtkBtPatcher.kext" || b == "SimpleMtkBtFw.kext" {
                                 add[i]["Enabled"] = false
                             }
                         }
@@ -383,7 +482,7 @@ public class EFIManager {
                         plist["Kernel"] = kernel
                         let outData = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
                         try outData.write(to: plistURL)
-                        logger("Disabled Wi-Fi kexts in config.plist.")
+                        logger("Disabled wireless and Bluetooth kexts in config.plist.")
                     }
                 }
             } catch {
@@ -393,6 +492,33 @@ public class EFIManager {
         
         logger("Uninstallation complete.")
         return true
+    }
+
+    public func revertLatestBackup(destination: EFIDestination, logger: @escaping (String) -> Void) -> Bool {
+        let fm = FileManager.default
+        let ocURL = URL(fileURLWithPath: destination.ocPath)
+        let plistURL = ocURL.appendingPathComponent("config.plist")
+        guard let files = try? fm.contentsOfDirectory(atPath: ocURL.path) else {
+            logger("ERROR: Cannot read directory \(ocURL.path)")
+            return false
+        }
+        let backups = files.filter { $0.hasPrefix("config.plist.backup-") }.sorted().reversed()
+        guard let latestBackup = backups.first else {
+            logger("No backup files (config.plist.backup-*) found in EFI.")
+            return false
+        }
+        let backupURL = ocURL.appendingPathComponent(latestBackup)
+        do {
+            if fm.fileExists(atPath: plistURL.path) {
+                try fm.removeItem(at: plistURL)
+            }
+            try fm.copyItem(at: backupURL, to: plistURL)
+            logger("SUCCESS: Restored config.plist from \(latestBackup)")
+            return true
+        } catch {
+            logger("ERROR: Failed to restore backup: \(error.localizedDescription)")
+            return false
+        }
     }
     
     // MARK: - Driver Loaded Check
@@ -408,9 +534,9 @@ public class EFIManager {
         
         let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         if output.contains("AirportMtkWlan") {
-            return DriverStatus(isLoaded: true, loadedVersion: "2.2.0", kextIdentifier: "com.flxxxxddd.AirportMtkWlan")
+            return DriverStatus(isLoaded: true, loadedVersion: "2.2.1", kextIdentifier: "com.arxusion.AirportMtkWlan")
         } else if output.contains("SimpleMtkWlan") {
-            return DriverStatus(isLoaded: true, loadedVersion: "2.2.0", kextIdentifier: "com.laobamac.SimpleMtkWlan")
+            return DriverStatus(isLoaded: true, loadedVersion: "2.2.1", kextIdentifier: "com.arxusion.SimpleMtkWlan")
         }
         return DriverStatus(isLoaded: false, loadedVersion: nil, kextIdentifier: nil)
     }

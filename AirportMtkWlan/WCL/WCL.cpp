@@ -667,6 +667,9 @@ void AirportItlwmSkywalkInterface::finishWCLJoin(uint16_t status, uint16_t reaso
     joinDeferred = false;
     explicit_bzero(&deferredJoin, sizeof(deferredJoin));
     joinTimer->cancelTimeout();
+    if (instance && instance->getAwdlInterface()) {
+        instance->enableVirtualInterface(instance->getAwdlInterface());
+    }
     instance->postMessage(this, AirportWCL::ConnectComplete, &event, sizeof(event), true);
     if (status) {
         portAuthorized = false;

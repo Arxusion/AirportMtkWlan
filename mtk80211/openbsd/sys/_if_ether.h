@@ -168,6 +168,9 @@ struct ether_multi {
 struct _ifnet {                /* and the entries */
     IOEthernetInterface *iface;
     IOEthernetController* controller;
+    IOEthernetInterface *if_awdl_iface;
+    uint8_t if_awdl_mac[6];
+    bool if_awdl_enabled;
     int if_link_state;
     void *if_softc;
 //    struct    refcnt if_refcnt;

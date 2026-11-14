@@ -54,18 +54,20 @@ The repository builds two front-ends:
 ## Installation Guide (OpenCore)
 
 ### Option A: Graphical OpenCore Installer (Recommended)
-Download **`AirportMtkWlan-Installer-v2.2.0.zip`** from [Releases](https://github.com/Arxusion/AirportMtkWlan/releases).
+Download **`AirportMtkWlan-Installer-v2.2.1.zip`** from [Releases](https://github.com/Arxusion/AirportMtkWlan/releases).
 - Launch `AirportMtkWlan Installer.app`
 - Select your target OpenCore EFI partition (or click Browse to locate your EFI folder)
 - Choose your OS flavor (`macOS 26 Tahoe` or `macOS 15 Sequoia`)
-- Click **Deploy Driver to EFI** — the app copies the driver into `EFI/OC/Kexts`, sets `DisableIoMapper = true`, and registers the kext in `config.plist`.
+- Check the option to install companion Bluetooth drivers (`AirportMtkBtPatcher` & `AirportMtkBtFw`)
+- Click **Deploy Unified Suite to EFI** — the app installs Wi-Fi, Bluetooth, and AWDL all at once, streams live logs to the console, enables `DisableIoMapper`, and configures OpenCore `config.plist`.
 
 ### Option B: Manual Installation
 
 1. Download the latest release package matching your macOS version from [Releases](https://github.com/Arxusion/AirportMtkWlan/releases):
-   * `AirportMtkWlan-Sequoia-v2.2.0-RELEASE.zip` for **macOS 15 Sequoia (15.2+)**
-   * `AirportMtkWlan-Tahoe-v2.2.0-RELEASE.zip` for **macOS 26 Tahoe**
-   * *For macOS 14 Sonoma, 13 Ventura, or earlier*: Native AirPort Skywalk is not compatible; download `SimpleMtkWlan.kext` and use [SimpleMTK](https://github.com/laobamac/SimpleMTKClient) (HeliPort).
+   * `AirportMtkWlan-Tahoe-v2.2.1-RELEASE.zip` for **macOS 26 Tahoe**
+   * `AirportMtkWlan-Sequoia-v2.2.1-RELEASE.zip` for **macOS 15 Sequoia (15.2+)**
+   * `AirportMtkBt-v2.2.1-COMPANION.zip` for **MediaTek Bluetooth** (`AirportMtkBtPatcher.kext` & `AirportMtkBtFw.kext`)
+   * *For macOS 14 Sonoma, 13 Ventura, or earlier*: Native AirPort Skywalk is not compatible; download `SimpleMtkWlan-v2.2.1-RELEASE.zip` and use [SimpleMTK](https://github.com/laobamac/SimpleMTKClient) (HeliPort).
 2. Extract and place `AirportMtkWlan.kext` into your EFI directory: `EFI/OC/Kexts/`.
 3. Add the kernel extension entry to your `config.plist` under `Kernel -> Add`:
 

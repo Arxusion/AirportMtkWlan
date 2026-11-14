@@ -1600,6 +1600,13 @@ IO80211VirtualInterface* AirportItlwm::createVirtualInterface(ether_addr *ea, UI
 
         fAwdlIf = vif;
         memcpy(fAwdlMac, &awdl_ea, 6);
+        fAwdlEnabled = true;
+        if (fHalService) {
+            struct _ifnet *ifp = &fHalService->get80211Controller()->ic_ac.ac_if;
+            ifp->if_awdl_iface = (IOEthernetInterface *)vif;
+            memcpy(ifp->if_awdl_mac, &awdl_ea, 6);
+            ifp->if_awdl_enabled = true;
+        }
         XYLog("%s: successfully created awdl0 (role %u) with MAC %02x:%02x:%02x:%02x:%02x:%02x\n",
               __FUNCTION__, role,
               awdl_ea.octet[0], awdl_ea.octet[1], awdl_ea.octet[2],
@@ -1615,6 +1622,10 @@ SInt32 AirportItlwm::enableVirtualInterface(IO80211VirtualInterface *vif)
     XYLog("%s: vif=%p\n", __FUNCTION__, vif);
     if (vif == fAwdlIf) {
         fAwdlEnabled = true;
+        if (fHalService) {
+            struct _ifnet *ifp = &fHalService->get80211Controller()->ic_ac.ac_if;
+            ifp->if_awdl_enabled = true;
+        }
     }
     return super::enableVirtualInterface(vif);
 }
@@ -1624,6 +1635,10 @@ SInt32 AirportItlwm::disableVirtualInterface(IO80211VirtualInterface *vif)
     XYLog("%s: vif=%p\n", __FUNCTION__, vif);
     if (vif == fAwdlIf) {
         fAwdlEnabled = false;
+        if (fHalService) {
+            struct _ifnet *ifp = &fHalService->get80211Controller()->ic_ac.ac_if;
+            ifp->if_awdl_enabled = false;
+        }
     }
     return super::disableVirtualInterface(vif);
 }

@@ -1,3 +1,43 @@
+## AirportMtkWlan v2.2.1
+
+### Overview
+**AirportMtkWlan v2.2.1** ("Best of the Best" Milestone) is a major architectural release delivering high-throughput AWDL/AirDrop support, native direct peer hardware A-MPDU burst reception, adaptive sliding sequence window reassembly, our own dedicated Bluetooth companion suite (**AirportMtkBt**), and a completely redesigned, light-themed unified deployment installer inspired by Null's Liberator design principles.
+
+---
+
+### What's New in v2.2.1
+
+1. **Hardware-Accelerated AWDL RX Demultiplexing (`_mbuf.cpp`, `_if_ether.h`, `AirportItlwmV2.cpp`)**:
+   - Integrated L2 packet dispatching directly within `_if_input` in the network layer. Inbound frames destined for the virtual `awdl0` MAC address or EtherType `0x88F0` (Apple Wireless Direct Link) are dispatched immediately to the virtual `awdl0` Skywalk interface rather than falling through to infrastructure `en0`.
+   - Mirrored IPv6 link-local multicast (`33:33:...`) discovery frames to both `en0` and `awdl0` interfaces, ensuring instantaneous AirDrop and Bonjour peer discovery without dropping service records.
+
+2. **Direct Peer Block Ack Negotiation for High-Speed A-MPDU Hardware Bursts (`ieee80211_input.c`)**:
+   - Refined net80211 ADDBA (Add Block Ack Request) acceptance to recognize unassociated peer-to-peer relationships.
+   - AirDrop/AWDL peers bypass infrastructure 4-way handshake requirements (`!ni->ni_port_valid`) and configure hardware Block Ack agreements (`mwx_mcu_sta_ba`) directly in the MediaTek MT7921/MT7922 hardware MAC, enabling full multi-megabyte/second burst throughput.
+
+3. **Adaptive Modulo-4096 Sequence Sliding Window (`ieee80211_input.c`)**:
+   - Replaced legacy 8-packet consecutive drop heuristic with 802.11-2016 standard circular sequence sliding (`new_winstart = (sn - ba_winsize + 1) & 0xfff`).
+   - Completely eliminates stalled transfers and packet discards when AirDrop transfers exceed 10 MB.
+
+4. **Apple Vendor SNAP OUI `00:17:F2` Decapsulation (`ieee80211_input.c`)**:
+   - Enhanced `ieee80211_decap()` and `ieee80211_amsdu_decap()` to decode both RFC1042 LLC/SNAP headers (`00:00:00`) and Apple's proprietary vendor SNAP headers (`00:17:F2`), ensuring protocol integrity for AirDrop, Continuity, and Universal Control streams.
+
+5. **Radio Priority Arbitration During AP Association (`WCL.cpp`)**:
+   - Added automated radio state arbitration that temporarily suspends background AWDL scans during Wi-Fi join handshakes and restores them cleanly once association and 4-way key installation complete.
+
+6. **Dedicated Native Bluetooth Companion Suite (`AirportMtkBt`)**:
+   - Built and bundled 100% original companion drivers **`AirportMtkBtPatcher.kext`** and **`AirportMtkBtFw.kext`** under `com.arxusion.AirportMtkBt...`.
+   - Provides out-of-the-box Bluetooth 5.2 support for MediaTek MT7921 and MT7922 USB Bluetooth endpoints (`0489:e0e2`, `0489:e0e4`, `0e8d:0608`, `13d3:3563`, `13d3:3564`, `13d3:3567`, `13d3:3568`, `13d3:3578`).
+
+7. **Redesigned Light-Themed Unified Installer (`AirportMtkWlan Installer.app`)**:
+   - Modern, clean light interface inspired by Null's Liberator design principles, styled strictly with Apple SF Pro typography.
+   - Deploys Wi-Fi, Bluetooth, and AWDL all at once to your OpenCore EFI in a single click.
+   - Real-time live execution logs stream directly into an embedded console window as files are copied and `config.plist` is patched.
+   - Integrated live GitHub release update checker with asynchronous release verification and one-click download access.
+   - Automated `config.plist` backup and one-click restoration utilities.
+
+---
+
 ## AirportMtkWlan v2.2.0
 
 ### Overview
