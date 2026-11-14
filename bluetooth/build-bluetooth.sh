@@ -91,6 +91,7 @@ rm -rf "$patch_obj" "$patch_bundle"
 mkdir -p "$patch_obj" "$patch_bundle/Contents/MacOS"
 
 patch_sources=(
+    bluetooth/AirportMtkBtPatcher/plugin_start.cpp
     bluetooth/AirportMtkBtPatcher/AirportMtkBtPatcher.cpp
 )
 

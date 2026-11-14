@@ -202,6 +202,7 @@ IOReturn AirportItlwmSkywalkInterface::wclCommand(OSObject *, void *a0, void *a1
         case 4:
             self->finishWCLScan(kIOReturnAborted);
             return kIOReturnSuccess;
+        case 16: return self->beginWCLReassoc(a2);
     }
     return kIOReturnUnsupported;
 }
@@ -233,6 +234,29 @@ IOReturn AirportItlwmSkywalkInterface::setWCL_JOIN_ABORT(apple80211_wcl_abort_jo
 IOReturn AirportItlwmSkywalkInterface::setWCL_LEAVE_NETWORK(apple80211_leave_network *)
 {
     return _fCommandGate->runAction(wclCommand, this, reinterpret_cast<void *>(3));
+}
+
+IOReturn AirportItlwmSkywalkInterface::setWCL_REASSOC(apple80211_reassoc *request)
+{
+    return _fCommandGate->runAction(wclCommand, this, reinterpret_cast<void *>(16), request);
+}
+
+IOReturn AirportItlwmSkywalkInterface::beginWCLReassoc(void *)
+{
+    ieee80211com *ic = fHalService->get80211Controller();
+    if (!ic || !(ic->ic_if.if_flags & IFF_RUNNING))
+        return kIOReturnNotReady;
+    if (ic->ic_if.if_awdl_enabled) {
+        XYLog("WCL roam postponed: AWDL session active\n");
+        return kIOReturnBusy;
+    }
+    if (ic->ic_state == IEEE80211_S_RUN && ic->ic_bss != nullptr) {
+        XYLog("WCL executing same-SSID fast re-association to BSSID %s\n",
+              ether_sprintf(ic->ic_bss->ni_bssid));
+        IEEE80211_SEND_MGMT(ic, ic->ic_bss, IEEE80211_FC0_SUBTYPE_REASSOC_REQ, 0);
+        return kIOReturnSuccess;
+    }
+    return kIOReturnNotReady;
 }
 
 void AirportItlwmSkywalkInterface::replayWCLCachedScan(const AirportWCL::ScanRequest &scan)

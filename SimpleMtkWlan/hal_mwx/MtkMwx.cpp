@@ -2673,6 +2673,9 @@ mwx_preinit(struct mwx_softc *sc)
 			    IEEE80211_CHAN_HT20 | IEEE80211_CHAN_HT40 |
 			    IEEE80211_CHAN_VHT20 |
 			    IEEE80211_CHAN_VHT40 | IEEE80211_CHAN_VHT80;
+			if (chan >= 52 && chan <= 144) {
+				ic->ic_channels[chan].ic_flags |= IEEE80211_CHAN_DFS | IEEE80211_CHAN_PASSIVE;
+			}
 			int no_160 = 0;
 			if ((sc->sc_hwtype == MWX_HW_MT7922) &&
 			    !PE_parse_boot_argn("-no160", &no_160, sizeof(no_160)) &&

@@ -360,7 +360,11 @@ public:
 #else
     virtual IOReturn setWCL_LEAVE_NETWORK(apple80211_leave_network *) AIRPORT_SKYWALK_OVERRIDE { return kIOReturnUnsupported; }
 #endif
+#ifdef AIRPORT_WCL
+    IOReturn setWCL_REASSOC(apple80211_reassoc *) override;
+#else
     virtual IOReturn setWCL_REASSOC(apple80211_reassoc *) AIRPORT_SKYWALK_OVERRIDE { return kIOReturnUnsupported; }
+#endif
     virtual IOReturn setWCL_SET_ROAM_LOCK(apple80211_set_roam_lock *) AIRPORT_SKYWALK_OVERRIDE { return kIOReturnUnsupported; }
     virtual IOReturn setWCL_ROAM_PROFILE_CONFIG(apple80211_roam_profile_config *) AIRPORT_SKYWALK_OVERRIDE { return kIOReturnUnsupported; }
     virtual IOReturn setWCL_ROAM_PROFILE_CONFIGV1(apple80211_roam_profile_configV1 *) AIRPORT_SKYWALK_OVERRIDE { return kIOReturnUnsupported; }
@@ -437,6 +441,7 @@ private:
     IOReturn installWCLKey(apple80211_key *);
     IOReturn accessWCLRSN(apple80211_rsn_ie_data *, bool);
     IOReturn beginWCLJoin(apple80211AssocCandidates *);
+    IOReturn beginWCLReassoc(void *);
     IOReturn startWCLJoin(AirportWCL::JoinRequest &);
     void resumeWCLJoin();
     IOReturn abortWCLJoin();

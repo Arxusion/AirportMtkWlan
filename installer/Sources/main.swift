@@ -24,8 +24,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.minSize = NSSize(width: 880, height: 600)
         window.title = "AirportMtkWlan Deployment Suite v2.2.1"
         window.titleVisibility = .visible
-        window.titlebarAppearsTransparent = true
-        window.backgroundColor = NSColor(red: 0.965, green: 0.955, blue: 0.94, alpha: 1.0)
+        window.titlebarAppearsTransparent = false
+        window.backgroundColor = NSColor.white
         window.appearance = NSAppearance(named: .aqua)
         window.isReleasedWhenClosed = false
         window.contentView = NSHostingView(rootView: contentView)

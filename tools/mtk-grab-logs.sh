@@ -15,6 +15,7 @@ SCRIPT_NAME=$(basename "$0")
 MODE="full"
 NO_EFI=0
 QUIET=0
+LAST_3_BOOTS=0
 BUDGET_SECS=150
 OUT_PATH=""
 SESSION_LOG=""
@@ -30,6 +31,7 @@ Options:
   --out <path.tar.gz>     Output archive path (default: ~/Desktop/AirportMtkWlan-Logs-<ts>.tar.gz)
   --session-log <path>    Include installer/UI session log file
   --timeout <seconds>     Overall collection deadline in seconds (default: 150)
+  --last-3-boots          Specifically extract multi-boot logs across current + last 2 boots
   --quick                 Fast pass (skip previous-boot log query and unmounted EFI scan)
   --no-efi                Do not mount unmounted EFI partitions (still checks mounted volumes)
   --quiet                 Minimal stdout (still prints OUTPUT <path> on success)
@@ -48,6 +50,8 @@ while [ "$#" -gt 0 ]; do
         --timeout)
             [ "$#" -ge 2 ] || { echo "Missing argument for --timeout" >&2; exit 2; }
             BUDGET_SECS=$2; shift 2 ;;
+        --last-3-boots)
+            LAST_3_BOOTS=1; shift ;;
         --quick)
             MODE="quick"; shift ;;
         --no-efi)
@@ -631,30 +635,60 @@ progress "Collecting airportd, WiFiAgent, and kernelmanagerd logs..."
 } > "$ROOT_DIR/06-wifi-userspace-logs.txt" 2>&1
 redact_file_inplace "$ROOT_DIR/06-wifi-userspace-logs.txt"
 
-# --- Section 7: Previous Boot Kernel Log (Full Mode + Root) ---
-if [ "$MODE" = "full" ] || { [ -n "$FIXTURE_DIR" ] && [ -f "$FIXTURE_DIR/prev_boot_log.txt" ]; }; then
-    progress "Collecting previous-boot kernel logs..."
+# --- Section 7: Previous Boot & Last 3 Boots Kernel Logs ---
+if [ "$MODE" = "full" ] || [ "$LAST_3_BOOTS" -eq 1 ] || { [ -n "$FIXTURE_DIR" ] && [ -f "$FIXTURE_DIR/prev_boot_log.txt" ]; }; then
+    progress "Collecting multi-boot kernel logs (last 3 boots)..."
+    
+    BOOT_LOGS_DIR="$ROOT_DIR/07-last-3-boot-logs"
+    mkdir -p "$BOOT_LOGS_DIR/boot-0-current" "$BOOT_LOGS_DIR/boot-1-previous" "$BOOT_LOGS_DIR/boot-2-prior"
+
+    if [ -f "$ROOT_DIR/05-kernel-log-boot.txt" ]; then
+        cp "$ROOT_DIR/05-kernel-log-boot.txt" "$BOOT_LOGS_DIR/boot-0-current/01-kernel-driver-telemetry.txt"
+    fi
+
+    PRED_MULTI_BOOT='(process == "kernel" AND (eventMessage CONTAINS[c] "mtk" OR eventMessage CONTAINS[c] "mwx" OR eventMessage CONTAINS[c] "AirportMtk" OR eventMessage CONTAINS[c] "AirportMtkBt" OR eventMessage CONTAINS[c] "SimpleMtk" OR eventMessage CONTAINS[c] "AirportItlwm" OR eventMessage CONTAINS[c] "itlwm" OR eventMessage CONTAINS[c] "WCL" OR eventMessage CONTAINS[c] "panic" OR eventMessage CONTAINS[c] "shutdown cause" OR eventMessage CONTAINS[c] "outside of kext range" OR eventMessage CONTAINS[c] "Debugger" OR eventMessage CONTAINS[c] "backtrace" OR sender CONTAINS[c] "Mtk" OR sender CONTAINS[c] "AirportMtkBt")) OR (process == "kernelmanagerd" AND (eventMessage CONTAINS[c] "mtk" OR eventMessage CONTAINS[c] "airport" OR eventMessage CONTAINS[c] "fail" OR eventMessage CONTAINS[c] "error" OR eventMessage CONTAINS[c] "load" OR eventMessage CONTAINS[c] "IOVersatile" OR eventMessage CONTAINS[c] "dependencies"))'
+
+    # Boot 1 (Previous Boot)
     {
         if [ -n "$FIXTURE_DIR" ] && [ -f "$FIXTURE_DIR/prev_boot_log.txt" ]; then
             echo "=== Previous Boot Kernel Log (fixture, tail-preserved) ==="
             cat "$FIXTURE_DIR/prev_boot_log.txt" | squash_repeats | headtail 800 2200
-        elif [ -z "$FIXTURE_DIR" ] && [ "$(id -u)" -eq 0 ] && [ -n "$BOOT_SEC" ]; then
+        elif [ -z "$FIXTURE_DIR" ] && [ -n "$BOOT_SEC" ]; then
             echo "=== Previous Boot Focused Driver, Panic & Shutdown Cause (last 2h before $(date -r "$BOOT_SEC" '+%Y-%m-%d %H:%M:%S')) ==="
             lshow 20 --start "$(date -r $((BOOT_SEC - 7200)) '+%Y-%m-%d %H:%M:%S')" \
                      --end "$(date -r "$BOOT_SEC" '+%Y-%m-%d %H:%M:%S')" \
-                     --style compact --predicate '(process == "kernel" AND (eventMessage CONTAINS[c] "mtk" OR eventMessage CONTAINS[c] "mwx" OR eventMessage CONTAINS[c] "AirportMtk" OR eventMessage CONTAINS[c] "SimpleMtk" OR eventMessage CONTAINS[c] "AirportItlwm" OR eventMessage CONTAINS[c] "itlwm" OR eventMessage CONTAINS[c] "WCL" OR eventMessage CONTAINS[c] "panic" OR eventMessage CONTAINS[c] "shutdown cause" OR eventMessage CONTAINS[c] "Debugger" OR eventMessage CONTAINS[c] "backtrace" OR sender CONTAINS[c] "Mtk")) OR (process == "kernelmanagerd" AND (eventMessage CONTAINS[c] "mtk" OR eventMessage CONTAINS[c] "airport" OR eventMessage CONTAINS[c] "fail" OR eventMessage CONTAINS[c] "error" OR eventMessage CONTAINS[c] "load"))' 2>&1 \
+                     --style compact --predicate "$PRED_MULTI_BOOT" 2>&1 \
                 | squash_repeats | headtail 800 1500 || true
             echo
             echo "=== Previous Boot Wi-Fi Stack Kernel Log Tail (last 4h before $(date -r "$BOOT_SEC" '+%Y-%m-%d %H:%M:%S')) ==="
             lshow 25 --start "$(date -r $((BOOT_SEC - 14400)) '+%Y-%m-%d %H:%M:%S')" \
                      --end "$(date -r "$BOOT_SEC" '+%Y-%m-%d %H:%M:%S')" \
-                     --style compact --predicate 'process == "kernel" AND (eventMessage CONTAINS[c] "mtk" OR eventMessage CONTAINS[c] "mwx" OR eventMessage CONTAINS[c] "airport" OR eventMessage CONTAINS[c] "itlwm" OR eventMessage CONTAINS[c] "80211" OR eventMessage CONTAINS[c] "skywalk" OR eventMessage CONTAINS[c] "panic" OR eventMessage CONTAINS[c] "shutdown cause")' 2>&1 \
+                     --style compact --predicate 'process == "kernel" AND (eventMessage CONTAINS[c] "mtk" OR eventMessage CONTAINS[c] "mwx" OR eventMessage CONTAINS[c] "airport" OR eventMessage CONTAINS[c] "itlwm" OR eventMessage CONTAINS[c] "80211" OR eventMessage CONTAINS[c] "skywalk" OR eventMessage CONTAINS[c] "panic" OR eventMessage CONTAINS[c] "shutdown cause" OR eventMessage CONTAINS[c] "outside of kext range")' 2>&1 \
                 | squash_repeats | headtail 800 2200 || true
         else
-            echo "(skipped: previous-boot query requires Full Logs with administrator privileges)"
+            echo "(skipped: boottime not available)"
         fi
     } > "$ROOT_DIR/07-previous-boot-kernel-log.txt" 2>&1
     redact_file_inplace "$ROOT_DIR/07-previous-boot-kernel-log.txt"
+    cp "$ROOT_DIR/07-previous-boot-kernel-log.txt" "$BOOT_LOGS_DIR/boot-1-previous/01-kernel-driver-tail.txt"
+
+    # Boot 2 (Prior Boot)
+    {
+        if [ -n "$FIXTURE_DIR" ] && [ -f "$FIXTURE_DIR/prev_boot_log.txt" ]; then
+            echo "=== Prior Boot Kernel Log (fixture mock) ==="
+            head -n 50 "$FIXTURE_DIR/prev_boot_log.txt" | squash_repeats
+        elif [ -z "$FIXTURE_DIR" ] && [ -n "$BOOT_SEC" ]; then
+            echo "=== Prior Boot (2 boots ago) Focused Driver & Kernel Log (6h to 2h before $(date -r "$BOOT_SEC" '+%Y-%m-%d %H:%M:%S')) ==="
+            lshow 20 --start "$(date -r $((BOOT_SEC - 21600)) '+%Y-%m-%d %H:%M:%S')" \
+                     --end "$(date -r $((BOOT_SEC - 7200)) '+%Y-%m-%d %H:%M:%S')" \
+                     --style compact --predicate "$PRED_MULTI_BOOT" 2>&1 \
+                | squash_repeats | headtail 800 1500 || true
+        else
+            echo "(skipped: boottime not available)"
+        fi
+    } > "$ROOT_DIR/07b-prior-boot-kernel-log.txt" 2>&1
+    redact_file_inplace "$ROOT_DIR/07b-prior-boot-kernel-log.txt"
+    cp "$ROOT_DIR/07b-prior-boot-kernel-log.txt" "$BOOT_LOGS_DIR/boot-2-prior/01-kernel-driver-tail.txt"
 fi
 
 # --- Section 8: OpenCore EFI Config & Logs ---
@@ -684,7 +718,7 @@ progress "Inspecting OpenCore config and kext inventory..."
                 if [ -d "$cand/Kexts" ]; then
                     echo "  Kexts/ listing:"
                     ls -la "$cand/Kexts" 2>/dev/null | sed 's/^/    /'
-                    for k in AirportMtkWlan.kext SimpleMtkWlan.kext itlwm.kext; do
+                    for k in AirportMtkWlan.kext SimpleMtkWlan.kext itlwm.kext AirportMtkBtPatcher.kext AirportMtkBtFw.kext; do
                         if [ -d "$cand/Kexts/$k" ]; then
                             ver=$(plutil -extract CFBundleShortVersionString raw -o - "$cand/Kexts/$k/Contents/Info.plist" 2>/dev/null || echo "?")
                             bin="$cand/Kexts/$k/Contents/MacOS/${k%.kext}"
@@ -693,6 +727,12 @@ progress "Inspecting OpenCore config and kext inventory..."
                         fi
                     done
                 fi
+                find "$vol" -maxdepth 2 -type f \( -name 'opencore-*.txt' -o -name 'boot*.log' -o -name 'panic-*.txt' \) -exec stat -f '%m %N' {} + 2>/dev/null \
+                    | sort -rn | head -n 4 | cut -d' ' -f2- | while IFS= read -r lf; do
+                    [ -n "$lf" ] || continue
+                    safe_lf=$(printf '%s' "$(basename "$lf")" | tr -c 'A-Za-z0-9._-' '_')
+                    head -c 262144 "$lf" > "$ROOT_DIR/08-efi-opencore/${safe_v}-${safe_lf}" 2>/dev/null && redact_file_inplace "$ROOT_DIR/08-efi-opencore/${safe_v}-${safe_lf}" || true
+                done
             done
         done
         # If running as root without --no-efi and not in quick mode, check OpenCore boot-path ESP if unmounted
@@ -712,7 +752,7 @@ progress "Inspecting OpenCore config and kext inventory..."
                             sanitize_config_plist "$cur_mp/$ocrel/config.plist" "$ROOT_DIR/08-efi-opencore/${bpart}-config.plist.xml" || true
                             if [ -d "$cur_mp/$ocrel/Kexts" ]; then
                                 ls -la "$cur_mp/$ocrel/Kexts" 2>/dev/null | sed 's/^/    /'
-                                for k in AirportMtkWlan.kext SimpleMtkWlan.kext itlwm.kext; do
+                                for k in AirportMtkWlan.kext SimpleMtkWlan.kext itlwm.kext AirportMtkBtPatcher.kext AirportMtkBtFw.kext; do
                                     if [ -d "$cur_mp/$ocrel/Kexts/$k" ]; then
                                         ver=$(plutil -extract CFBundleShortVersionString raw -o - "$cur_mp/$ocrel/Kexts/$k/Contents/Info.plist" 2>/dev/null || echo "?")
                                         bin="$cur_mp/$ocrel/Kexts/$k/Contents/MacOS/${k%.kext}"

@@ -591,6 +591,7 @@ public class EFIManager {
         privileged: Bool,
         sessionLogs: [String],
         outputURL: URL,
+        last3Boots: Bool = false,
         logger: @escaping (String) -> Void
     ) -> DiagnosticGrabResult {
         guard let scriptURL = findLogGrabberScript() else {
@@ -605,13 +606,14 @@ public class EFIManager {
         try? sessionBody.write(to: sessionURL, atomically: true, encoding: .utf8)
         defer { try? fm.removeItem(at: sessionURL) }
 
-        logger(privileged ? "Starting full diagnostic log grab (admin privileges requested)..." : "Starting quick diagnostic log grab (standard user scope)...")
+        let extraFlag = last3Boots ? " --last-3-boots" : ""
+        logger(privileged ? "Starting full diagnostic log grab (admin privileges requested)..." : (last3Boots ? "Starting Last 3 Boots log extraction..." : "Starting quick diagnostic log grab (standard user scope)..."))
 
         var rawOutput = ""
         var succeeded = false
 
         if privileged {
-            let cmd = "MTK_TARGET_USER=\(shellQuote(NSUserName())) /bin/bash \(shellQuote(scriptURL.path)) --out \(shellQuote(outputURL.path)) --session-log \(shellQuote(sessionURL.path)) 2>&1"
+            let cmd = "MTK_TARGET_USER=\(shellQuote(NSUserName())) /bin/bash \(shellQuote(scriptURL.path)) --out \(shellQuote(outputURL.path)) --session-log \(shellQuote(sessionURL.path))\(extraFlag) 2>&1"
             let escapedForAS = cmd.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
             let appleScriptSource = "do shell script \"\(escapedForAS)\" with administrator privileges"
             var error: NSDictionary?
@@ -628,11 +630,15 @@ public class EFIManager {
         } else {
             let task = Process()
             task.executableURL = URL(fileURLWithPath: "/bin/bash")
-            task.arguments = [
+            var args = [
                 scriptURL.path,
                 "--out", outputURL.path,
                 "--session-log", sessionURL.path
             ]
+            if last3Boots {
+                args.append("--last-3-boots")
+            }
+            task.arguments = args
             let pipe = Pipe()
             task.standardOutput = pipe
             task.standardError = pipe
