@@ -627,7 +627,8 @@ struct mwx_softc {
 	uint16_t		 sc_amsdu_seq;
 	uint8_t			 sc_amsdu_ta[IEEE80211_ADDR_LEN];
 	struct ieee80211_rxinfo	 sc_amsdu_rxi;
-	int			 sc_amsdu_idle;	/* RX batches / polls without a new subframe */
+	CTimeout		*sc_amsdu_to;
+	uint64_t		 sc_amsdu_last_ticks;
 
 };
 
@@ -728,6 +729,8 @@ pkt_hex_dump(struct mbuf *m)
 int	mwx_init(struct ifnet *);
 int	mwx_init_hw(struct ifnet *);
 void	mwx_stop(struct ifnet *);
+static void mwx_amsdu_purge(struct mwx_softc *);
+static void mwx_amsdu_timeout(void *);
 void	mwx_watchdog(struct ifnet *);
 void	mwx_start(struct ifnet *);
 int	mwx_ioctl(struct ifnet *, u_long, caddr_t);
@@ -1211,6 +1214,7 @@ mwx_stop(struct ifnet *ifp)
 
 	ifp->if_timer = 0;
 	ifp->if_flags &= ~IFF_RUNNING;
+	mwx_amsdu_purge(sc);
 	ifq_clr_oactive(&ifp->if_snd);
 
 	if (was_running) {
@@ -1579,6 +1583,8 @@ mwx_newstate(struct ieee80211com *ic, enum ieee80211_state nstate, int arg)
 		/* cancel other tasks here */
 	}
 
+	if (nstate != IEEE80211_S_RUN)
+		mwx_amsdu_purge(sc);
 	sc->sc_ns_state = nstate;
 	sc->sc_ns_arg = arg;
 
@@ -2206,18 +2212,36 @@ mwx_amsdu_flush(struct mwx_softc *sc, struct mbuf_list *ml)
 		return;
 	}
 
+	/*
+	 * mbuf_allocpacket reserves capacity but leaves each segment length at zero.
+	 * copyback only grows the tail, so initialize lengths throughout the chain
+	 * before copying. Otherwise, net80211 rejects the empty head as a short frame
+	 * before BA reordering. See Apple XNU bsd/kern/kpi_mbuf.c::mbuf_copyback
+	 * at commit f6217f891ac0bb64f3d375211650a4c1ff8ca1ea.
+	 */
+	{
+		size_t remaining = total;
+		for (struct mbuf *seg = nm; seg != NULL; seg = mbuf_next(seg)) {
+			size_t capacity = mbuf_len(seg) + mbuf_trailingspace(seg);
+			size_t used = remaining < capacity ? remaining : capacity;
+			mbuf_setlen(seg, used);
+			remaining -= used;
+		}
+		if (remaining != 0 || mbuf_len(nm) < hl)
+			goto copy_failed;
+	}
 	mbuf_pkthdr_setlen(nm, total);
 
 	if (mbuf_next(nm) == NULL) {
 		uint8_t *dst = mtod(nm, uint8_t *);
-		mbuf_setlen(nm, total);
 		memcpy(dst, mtod(sc->sc_amsdu_sub[0], uint8_t *), hl);
 		off = hl;
 		for (i = 0; i < n; i++) {
 			struct mbuf *sm = sc->sc_amsdu_sub[i];
 			u_int len = sc->sc_amsdu_len[i];
 
-			mbuf_copydata(sm, hl, len, dst + off);
+			if (mbuf_copydata(sm, hl, len, dst + off) != 0)
+				goto copy_failed;
 			off += len;
 			if (i < n - 1) {
 				u_int pad = ((len + 3) & ~3U) - len;
@@ -2229,7 +2253,8 @@ mwx_amsdu_flush(struct mwx_softc *sc, struct mbuf_list *ml)
 		}
 	} else {
 		static const uint8_t zero_pad[4] = { 0, 0, 0, 0 };
-		mbuf_copyback(nm, 0, hl, mtod(sc->sc_amsdu_sub[0], uint8_t *), MBUF_DONTWAIT);
+		if (mbuf_copyback(nm, 0, hl, mtod(sc->sc_amsdu_sub[0], uint8_t *), MBUF_DONTWAIT) != 0)
+			goto copy_failed;
 		off = hl;
 		for (i = 0; i < n; i++) {
 			struct mbuf *sm = sc->sc_amsdu_sub[i];
@@ -2237,16 +2262,18 @@ mwx_amsdu_flush(struct mwx_softc *sc, struct mbuf_list *ml)
 			uint8_t smbuf[2048];
 
 			if (len <= sizeof(smbuf)) {
-				mbuf_copydata(sm, hl, len, smbuf);
-				mbuf_copyback(nm, off, len, smbuf, MBUF_DONTWAIT);
+				if (mbuf_copydata(sm, hl, len, smbuf) != 0 ||
+				    mbuf_copyback(nm, off, len, smbuf, MBUF_DONTWAIT) != 0)
+					goto copy_failed;
 			} else {
 				size_t copied = 0;
 				while (copied < len) {
 					size_t cur = len - copied;
 					if (cur > sizeof(smbuf))
 						cur = sizeof(smbuf);
-					mbuf_copydata(sm, hl + copied, cur, smbuf);
-					mbuf_copyback(nm, off + copied, cur, smbuf, MBUF_DONTWAIT);
+					if (mbuf_copydata(sm, hl + copied, cur, smbuf) != 0 ||
+					    mbuf_copyback(nm, off + copied, cur, smbuf, MBUF_DONTWAIT) != 0)
+						goto copy_failed;
 					copied += cur;
 				}
 			}
@@ -2254,7 +2281,8 @@ mwx_amsdu_flush(struct mwx_softc *sc, struct mbuf_list *ml)
 			if (i < n - 1) {
 				u_int pad = ((len + 3) & ~3U) - len;
 				if (pad > 0) {
-					mbuf_copyback(nm, off, pad, zero_pad, MBUF_DONTWAIT);
+					if (mbuf_copyback(nm, off, pad, zero_pad, MBUF_DONTWAIT) != 0)
+						goto copy_failed;
 					off += pad;
 				}
 			}
@@ -2263,6 +2291,84 @@ mwx_amsdu_flush(struct mwx_softc *sc, struct mbuf_list *ml)
 		}
 	}
 	mwx_rx_deliver(sc, nm, &sc->sc_amsdu_rxi, ml);
+	return;
+
+copy_failed:
+	m_freem(nm);
+	for (i = 0; i < n; i++) {
+		if (sc->sc_amsdu_sub[i] != NULL)
+			m_freem(sc->sc_amsdu_sub[i]);
+		sc->sc_amsdu_sub[i] = NULL;
+	}
+}
+
+/* Wait for subframes across batches using elapsed time, independent of MCU/TX events.
+ * The timer and RX processing share the main workloop gate. Arm at batch end
+ * as needed; stale callbacks are harmless after completion, and a new aggregate
+ * gets its full wait from the last subframe timestamp. The 2 ms threshold is a
+ * minimum wait for incomplete aggregates; gate contention can delay callbacks.
+ */
+#define MWX_AMSDU_TIMEOUT_MS 2
+
+static void
+mwx_amsdu_purge(struct mwx_softc *sc)
+{
+	timeout_del(&sc->sc_amsdu_to);
+	for (int i = 0; i < sc->sc_amsdu_n; i++) {
+		m_freem(sc->sc_amsdu_sub[i]);
+		sc->sc_amsdu_sub[i] = NULL;
+	}
+	sc->sc_amsdu_n = 0;
+	sc->sc_amsdu_last_ticks = 0;
+}
+
+static void
+mwx_amsdu_arm(struct mwx_softc *sc, struct mbuf_list *ml, int msec)
+{
+	if (!timeout_add_msec(&sc->sc_amsdu_to, msec)) {
+		/* If scheduling fails, deliver the partial aggregate rather than hold it indefinitely. */
+		mwx_amsdu_flush(sc, ml);
+	}
+}
+
+static void
+mwx_amsdu_schedule(struct mwx_softc *sc, struct mbuf_list *ml)
+{
+	if (sc->sc_detaching || sc->sc_suspended ||
+		!(sc->sc_ic.ic_if.if_flags & IFF_RUNNING)) {
+		mwx_amsdu_purge(sc);
+		return;
+	}
+	if (sc->sc_amsdu_n == 0)
+		return;
+	if (!timeout_pending(&sc->sc_amsdu_to))
+		mwx_amsdu_arm(sc, ml, MWX_AMSDU_TIMEOUT_MS);
+}
+
+static void
+mwx_amsdu_timeout(void *arg)
+{
+	struct mwx_softc *sc = (struct mwx_softc *)arg;
+	struct mbuf_list ml = MBUF_LIST_INITIALIZER();
+	uint64_t elapsed_ns = 0;
+	const uint64_t limit_ns = MWX_AMSDU_TIMEOUT_MS * 1000000ULL;
+
+	if (sc->sc_detaching || sc->sc_suspended ||
+		!(sc->sc_ic.ic_if.if_flags & IFF_RUNNING)) {
+		mwx_amsdu_purge(sc);
+		return;
+	}
+	if (sc->sc_amsdu_n == 0)
+		return;
+	absolutetime_to_nanoseconds(mach_absolute_time() - sc->sc_amsdu_last_ticks,
+		&elapsed_ns);
+	if (elapsed_ns < limit_ns) {
+		mwx_amsdu_arm(sc, &ml, (int)((limit_ns - elapsed_ns + 999999) / 1000000));
+	} else {
+		mwx_amsdu_flush(sc, &ml);
+	}
+	if (!ml_empty(&ml))
+		if_input(&sc->sc_ic.ic_if, &ml);
 }
 
 /* RX A-MSDU: collect one hardware-split subframe (see fill_rx). */
@@ -2284,7 +2390,7 @@ mwx_amsdu_add(struct mwx_softc *sc, struct mbuf *m, struct ieee80211_rxinfo *rxi
 	if (sc->sc_amsdu_n == MWX_AMSDU_MAX_SUB) {
 		mwx_amsdu_flush(sc, ml);
 	}
-	sc->sc_amsdu_idle = 0;
+	sc->sc_amsdu_last_ticks = mach_absolute_time();
 	if (sc->sc_amsdu_n == 0) {
 		sc->sc_amsdu_seq = seq;
 		sc->sc_amsdu_hdrlen = hl;
@@ -3081,6 +3187,7 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 	task_set(&sc->sc_scan_task, mwx_end_scan_task, sc, "mwx_scan");
 	timeout_set(&sc->sc_reset_to, mwx_reset_timeo, sc);
 	timeout_set(&sc->sc_intr_to, mwx_intr_timeout, sc);
+	timeout_set(&sc->sc_amsdu_to, mwx_amsdu_timeout, sc);
 
 	/*
 	 * We cannot read the MAC address without loading the
@@ -4015,12 +4122,7 @@ mwx_dma_rx_process(struct mwx_softc *sc, struct mbuf_list *ml)
 		sc->sc_rx_process_events++;
 	}
 
-	if (sc->sc_amsdu_n > 0) {
-		if (++sc->sc_amsdu_idle >= 2) {
-			mwx_amsdu_flush(sc, &mlout);
-			sc->sc_amsdu_idle = 0;
-		}
-	}
+	mwx_amsdu_schedule(sc, &mlout);
 	if_input(&sc->sc_ic.ic_if, &mlout);
 }
 
@@ -8117,6 +8219,7 @@ MtkMwx::detach(IOPCIDevice *device)
     }
     struct ifnet *ifp = &com->sc_ic.ic_if;
     com->sc_detaching = true;
+    timeout_del(&com->sc_amsdu_to);
     timeout_del(&com->sc_reset_to);
     timeout_del(&com->sc_intr_to);
     /* Keep interrupts alive while in-flight MCU requests finish. */
@@ -8130,6 +8233,8 @@ MtkMwx::detach(IOPCIDevice *device)
         pci_intr_disestablish(pci->pa_pc, com->sc_ih);
         com->sc_ih = NULL;
     }
+    mwx_amsdu_purge(com);
+    timeout_free(&com->sc_amsdu_to);
     if (com->sc_memh) {
         mwx_write(com, MT_WFDMA0_HOST_INT_ENA, 0);
         mwx_dma_disable(com, 1);
@@ -8603,6 +8708,41 @@ int mt7921_mcu_set_associated_peer(struct mwx_softc *sc)
 }
 
 /*
+ * TX WTBL_BA configuration adapted from YYavicWiFi@7cf5b938841505e1e7c8e92888784927ff79e862
+ * Source/YYavicMtkWlan/YYavicMtkWlan/hal_mwx/MtkMwx.cpp::mwx_mcu_sta_ba
+ * (GPL-3.0-or-later). Submission order also checked against
+ * mt76@0936617dc529ff9da0385221d3fa6de732231177.
+ * Build both messages before submitting them to the same MCU queue,
+ * preserving asynchronous submission from RX callbacks.
+ */
+static struct mbuf *
+mwx_alloc_wtbl_tx_ba(struct mwx_softc *sc, struct ieee80211_node *ni,
+    uint8_t tid, uint16_t ssn, uint16_t winsize, int enable)
+{
+	struct mwx_node *mn = (struct mwx_node *)ni;
+	struct mbuf *m = mwx_alloc_sta_req_tlv(sizeof(struct sta_req_hdr));
+	uint16_t outer = 0, inner = 0;
+	if (m == NULL)
+		return NULL;
+	struct sta_rec_wtbl *wtbl = (struct sta_rec_wtbl *)mwx_append_tlv(m,
+		&outer, STA_REC_WTBL, sizeof(*wtbl));
+	wtbl->wlan_idx_lo = mn->wcid & 0xff;
+	wtbl->wlan_idx_hi = mn->wcid >> 8;
+	wtbl->operation = WTBL_SET;
+	struct wtbl_ba *ba = (struct wtbl_ba *)mwx_append_tlv(m,
+		&inner, WTBL_BA, sizeof(*ba));
+	ba->tid = tid;
+	ba->ba_type = MT_BA_TYPE_ORIGINATOR;
+	ba->sn = enable ? htole16(ssn) : 0;
+	ba->ba_en = enable ? 1 : 0;
+	ba->ba_winsize = enable ? htole16(winsize) : 0;
+	wtbl->tlv_num = htole16(inner);
+	wtbl->len = htole16(le16toh(wtbl->len) + sizeof(*ba));
+	return mwx_fill_sta_req_hdr(m, &sc->sc_vif, sc->sc_vif.omac_idx,
+		mn->wcid, outer);
+}
+
+/*
  * RX Block Ack session (we are the recipient). The firmware must know about
  * it to answer the AP's A-MPDUs with BlockAck; net80211 reorders in software.
  * Called from RX processing, so do not wait for the MCU response here.
@@ -8631,6 +8771,15 @@ mwx_mcu_sta_ba(struct mwx_softc *sc, struct ieee80211_node *ni, uint8_t tid,
 	    mn->wcid, tlvnum);
 	if (m == NULL)
 		return ENOBUFS;
+	if (tx) {
+		struct mbuf *wtbl = mwx_alloc_wtbl_tx_ba(sc, ni, tid, ssn, winsize, enable);
+		int rv = wtbl == NULL ? ENOBUFS :
+			mwx_mcu_send_mbuf(sc, MCU_UNI_CMD_STA_REC_UPDATE, wtbl, NULL);
+		if (rv != 0) {
+			m_freem(m);
+			return rv;
+		}
+	}
 	return mwx_mcu_send_mbuf(sc, MCU_UNI_CMD_STA_REC_UPDATE, m, NULL);
 }
 
@@ -8931,13 +9080,6 @@ MtkMwx::debugPoll()
 			retry_state = -1;
 			memset(last_peer, 0, sizeof(last_peer));
 		}
-	}
-
-	if (sc->sc_amsdu_n > 0 && ++sc->sc_amsdu_idle >= 2) {
-		struct mbuf_list ml = MBUF_LIST_INITIALIZER();
-		mwx_amsdu_flush(sc, &ml);
-		if (!ml_empty(&ml))
-			if_input(&sc->sc_ic.ic_if, &ml);
 	}
 
 	sta = mwx_read(sc, MT_WFDMA0_HOST_INT_STA);
