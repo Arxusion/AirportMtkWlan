@@ -1617,7 +1617,8 @@ ieee80211_get_assoc_req(struct ieee80211com *ic, struct ieee80211_node *ni,
 		2 + IEEE80211_WPAIE_MAXLEN : 0) +
 	    ((ic->ic_flags & IEEE80211_F_HTON) ? sizeof(struct ieee80211_ie_htcap) + sizeof(struct ieee80211_wme_info) : 0) +
         (((ic->ic_flags & IEEE80211_F_VHTON) && !IEEE80211_IS_CHAN_2GHZ(ni->ni_chan)) ? sizeof(struct ieee80211_ie_vhtcap) + 2 : 0) +
-        ((ic->ic_flags & IEEE80211_F_HEON) ? (sizeof(struct ieee80211_he_cap_elem) + 2 + 1 + sizeof(struct ieee80211_he_mcs_nss_supp) + IEEE80211_HE_PPE_THRES_MAX_LEN) : 0));
+        ((ic->ic_flags & IEEE80211_F_HEON) ? (sizeof(struct ieee80211_he_cap_elem) + 2 + 1 + sizeof(struct ieee80211_he_mcs_nss_supp) + IEEE80211_HE_PPE_THRES_MAX_LEN) : 0) +
+        ((ic->ic_apple_join_flags & 6) ? 26 : 0));
 	if (m == NULL)
 		return NULL;
 
@@ -1675,6 +1676,21 @@ ieee80211_get_assoc_req(struct ieee80211com *ic, struct ieee80211_node *ni,
     
     if (ic->ic_flags & IEEE80211_F_HEON)
         frm = ieee80211_add_hecaps(frm, ic);
+
+    if (ic->ic_apple_join_flags & 6) {
+        static const u_int8_t apple_dev_ie[] = {
+            0xdd, 0x0b, 0x00, 0x17, 0xf2, 0x0a, 0x00, 0x01, 0x04, 0x00, 0x00, 0x00, 0x00
+        };
+        memcpy(frm, apple_dev_ie, sizeof(apple_dev_ie));
+        frm += sizeof(apple_dev_ie);
+
+        u_int8_t flag = (ic->ic_apple_join_flags & 2) ? 2 : 1;
+        u_int8_t apple_hs_ie[] = {
+            0xdd, 0x0b, 0x00, 0x17, 0xf2, 0x0b, 0x00, 0x01, 0x04, flag, 0x00, 0x00, 0x00
+        };
+        memcpy(frm, apple_hs_ie, sizeof(apple_hs_ie));
+        frm += sizeof(apple_hs_ie);
+    }
 
     size_t l = frm - mtod(m, u_int8_t *);
     mbuf_pkthdr_setlen(m, l);

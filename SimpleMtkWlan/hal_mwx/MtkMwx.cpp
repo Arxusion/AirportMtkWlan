@@ -755,6 +755,7 @@ void	mwx_setkey_task(void *);
 
 int	mwx_tx(struct mwx_softc *, struct mbuf *, struct ieee80211_node *,
 	    bool = true);
+int	mwx_send_null_pm(struct mwx_softc *, int);
 void	mwx_pci_disable_aspm(struct mwx_softc *, IOPCIDevice *);
 void	mwx_rx(struct mwx_softc *, struct mbuf *, struct mbuf_list *);
 int	mwx_count_nodes(struct ieee80211com *);
@@ -2109,6 +2110,37 @@ mwx_tx(struct mwx_softc *sc, struct mbuf *m, struct ieee80211_node *ni,
 	if (rv != 0)
 		mwx_txwi_put(sc, mt);
 	return rv;
+}
+
+int
+mwx_send_null_pm(struct mwx_softc *sc, int pwr_mgmt)
+{
+	struct ieee80211_node *ni = sc->sc_ic.ic_bss;
+	struct mbuf *m;
+	struct ieee80211_frame *wh;
+
+	if (sc->sc_ic.ic_state != IEEE80211_S_RUN || ni == NULL)
+		return -1;
+
+	m = m_gethdr(M_DONTWAIT, MT_DATA);
+	if (m == NULL)
+		return -1;
+
+	mbuf_setlen(m, sizeof(struct ieee80211_frame));
+	mbuf_pkthdr_setlen(m, sizeof(struct ieee80211_frame));
+
+	wh = mtod(m, struct ieee80211_frame *);
+	memset(wh, 0, sizeof(*wh));
+	wh->i_fc[0] = IEEE80211_FC0_TYPE_DATA | IEEE80211_FC0_SUBTYPE_NODATA;
+	wh->i_fc[1] = IEEE80211_FC1_DIR_TODS;
+	if (pwr_mgmt)
+		wh->i_fc[1] |= IEEE80211_FC1_PWR_MGT;
+
+	IEEE80211_ADDR_COPY(wh->i_addr1, ni->ni_bssid);
+	IEEE80211_ADDR_COPY(wh->i_addr2, sc->sc_ic.ic_myaddr);
+	IEEE80211_ADDR_COPY(wh->i_addr3, ni->ni_bssid);
+
+	return mwx_tx(sc, m, ni, true);
 }
 
 /* Hand one received MPDU to net80211. */
@@ -7221,6 +7253,10 @@ mt7921_mac_write_txwi_80211(struct mwx_softc *sc, struct mbuf *m,
 	}
 
 	txp->txwi[2] |= htole32(val);
+
+	if (fc_type == IEEE80211_FC0_TYPE_DATA && (wh->i_fc[0] & IEEE80211_FC0_SUBTYPE_NODATA)) {
+		txp->txwi[3] |= htole32(MT_TXD3_SW_POWER_MGMT);
+	}
 
 #ifdef NOTYET
 	if (ieee80211_is_beacon(fc)) {

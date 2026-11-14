@@ -593,6 +593,7 @@ struct ieee80211com {
     struct ieee80211_he_cap_elem ic_he_cap_elem;   /* Fixed portion of the HE capabilities element. */
     struct ieee80211_he_mcs_nss_supp ic_he_mcs_nss_supp;   /* The supported NSS/MCS combinations. */
     uint8_t ic_ppe_thres[IEEE80211_HE_PPE_THRES_MAX_LEN]; /* Holds the PPE Thresholds data. */
+    uint32_t ic_apple_join_flags;
     
 	TAILQ_HEAD(, ieee80211_ess)	 ic_ess;
 };

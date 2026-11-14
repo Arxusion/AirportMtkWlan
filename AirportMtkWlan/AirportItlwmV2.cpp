@@ -1081,6 +1081,7 @@ getCARD_CAPABILITIES(OSObject *object,
         // 2. Byte 9 bit 0 (-0x63(%rbp)): Authorizes creation of role 9 (Infrastructure AWDL / NAN)!
         cd->capabilities[9] |= (1 << 0);
     }
+    cd->capabilities[9] |= (1 << 1);
     // 3. Byte 9 bit 3: WPA3-SAE
     cd->capabilities[9] |= (1 << 3);
     // 4. Byte 6 bit 0 + bit 4: PMF / MFP capability

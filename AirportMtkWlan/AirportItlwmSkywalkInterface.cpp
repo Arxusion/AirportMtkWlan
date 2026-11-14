@@ -814,6 +814,7 @@ setASSOCIATE(struct apple80211_assoc_data *ad)
         return kIOReturnSuccess;
 
     if (ad->ad_mode != APPLE80211_AP_MODE_IBSS) {
+        ic->ic_apple_join_flags = ad->ad_flags;
         disassocIsVoluntary = false;
         auth_type_data.version = APPLE80211_VERSION;
         auth_type_data.authtype_upper = ad->ad_auth_upper;
