@@ -117,6 +117,10 @@ static inline void delay(int) {}
 static inline void free(void *, int, size_t) {}
 static inline void task_del(void *, void *) {}
 static inline void timeout_del(void *) {}
+static inline void mwx_amsdu_purge(mwx_softc *sc) {
+    assert(!(sc->sc_ic.ic_if.if_flags & IFF_RUNNING));
+    calls.push_back("amsdu_purge");
+}
 static inline void ifq_clr_oactive(void *) {}
 static inline void mwx_start(ifnet *) {}
 static inline void mwx_set(mwx_softc *, int, int) {}
@@ -194,6 +198,7 @@ int main() {
         calls.clear();
         mwx_stop(&sc.sc_ic.ic_if);
         assert(sc.sc_sta_added == 0);
+        assert(idx_of("amsdu_purge") >= 0 && idx_of("amsdu_purge") < idx_of("bss_off"));
         assert(idx_of("bss_off") >= 0 && idx_of("sta_remove") > idx_of("bss_off"));
         assert(idx_of("uni_add_dev_off") > idx_of("sta_remove"));
         assert(idx_of("mac_enable_off") > idx_of("uni_add_dev_off"));
