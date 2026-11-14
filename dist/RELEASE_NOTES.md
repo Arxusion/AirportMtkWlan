@@ -1,3 +1,50 @@
+## AirportMtkWlan v2.1.6
+
+### Overview
+**AirportMtkWlan v2.1.6** is a critical stability and performance release. It resolves system hard-freezes on AMD Ryzen platforms and permanent `lpctl=0x00000004` attach failures across warm reboots on PCIe riser cards without dedicated `PERST#` lines (#11). It also incorporates the v2.1.5 throughput engine overhaul, resolving the `< 40 Mbps` ceiling on MT7921/MT7922 hardware by enabling RX A-MSDU BlockAck agreements, uncapping RX batch processing to 512 frames, and eliminating edge-triggered MSI interrupt stranding.
+
+---
+
+### What's Fixed in v2.1.6
+
+1. **Fix AMD Ryzen PCIe Root Port Deadlock & Section 5.4.1.3 ASPM Sequencing (`MtkMwx.cpp`)**:
+   - Fixed ASPM link disable order to clear the Downstream Port (`parent`) before the Upstream Port (`ep`) per PCIe Base Specification Section 5.4.1.3.
+   - Bypassed parent bridge ASPM modification entirely on AMD host bridges/root ports (`parent_vendor == 0x1022`). On AMD platforms, macOS lacks native PCIe power management control via ACPI `_OSC`; modifying root port registers corrupted the link state machine and deadlocked the PCIe bus as soon as traffic/DMA began (Issue #11).
+   - Parent bridges now never have their L1SS extended capability registers modified directly, matching upstream Linux `mt76_pci_disable_aspm`.
+   - Added new boot-args: `-mtkallowaspm` (keep ASPM intact), `-mtknoparentaspm` (skip parent bridge modification), and `-mtkforceparentaspm` (override AMD check if explicitly requested).
+
+2. **Fix Warm-Boot Attach Failures & `lpctl=0x00000004` on Riser Cards (`MtkMwx.cpp`)**:
+   - When running on M.2-to-PCIe riser cards without a dedicated `PERST#` line, standby power keeps the MT7922 active across soft/warm reboots.
+   - In `mwx_ensure_drv_own()`, early-return if the driver already holds ownership (`(lpctl & PCIE_LPCR_HOST_OWN_SYNC) == 0`).
+   - Removed premature `mwx_mcu_fw_pmctrl()` calls that surrendered chip ownership to firmware right before requesting driver ownership.
+   - Increased `mwx_mcu_drv_pmctrl()` polling timeout from 50 ms to 500 ms (matching Linux `mt76_poll_msec`), allowing sufficient settling time for firmware/hardware power transitions without dropping into failed WFSYS reset/FLR loops.
+
+3. **Gate AWDL & RSDB Multi-Channel Scheduling behind Boot-Args (`AirportItlwmSkywalkInterface.cpp`, `AirportItlwmV2.cpp`)**:
+   - Prevented Skywalk and `wifip2pd` from forcibly initiating Real Simultaneous Dual Band (RSDB) and virtual `awdl0` multi-channel interfaces on single-MAC OpenBSD HALs.
+   - Gated `rsdb` capability, SDB flags, and virtual interface creation behind `-mtkawdl` and `-mtkrsdb`.
+
+---
+
+## AirportMtkWlan v2.1.5
+
+### Overview
+**AirportMtkWlan v2.1.5** resolves the sustained `< 40 Mbps` bottleneck on MediaTek MT7921/MT7922 Wi-Fi hardware.
+
+---
+
+### What's Fixed in v2.1.5
+
+1. **Enable RX A-MSDU in MCU BlockAck Agreement (`mwx_ampdu_rx_start`)**:
+   - Programmed MCU BlockAck parameters to accept aggregated MSDUs inside A-MPDUs.
+2. **Prevent Multi-Chunk A-MSDU Packet Drops (`mwx_amsdu_flush`)**:
+   - Preserved chained mbufs using linear `mbuf_copyback` so large frame segments are delivered intact to the network stack.
+3. **Uncapped RX Queue Drain Budget (`MtkMwx.cpp`)**:
+   - Raised per-call RX processing budget to 512 frames (128x4) and up to 2048 descriptors per interrupt pass.
+4. **Eliminate Edge-Triggered MSI Stranding (`mwx_intr`)**:
+   - Re-triggered `interruptOccurred` when unconsumed work remained in the DMA ring after yielding the workloop.
+
+---
+
 ## AirportMtkWlan v2.1.4
 
 ### Overview
