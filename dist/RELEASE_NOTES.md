@@ -1,3 +1,29 @@
+## AirportMtkWlan v2.2.0
+
+### Overview
+**AirportMtkWlan v2.2.0** brings native Apple Instant Hotspot support, router channel coexistence handshaking for Apple Continuity (AWDL), and default activation of the `awdl0` virtual interface.
+
+---
+
+### What's New in v2.2.0
+
+1. **Native Apple Instant Hotspot Support (`ieee80211_output.c`, `AirportItlwmSkywalkInterface.cpp`)**:
+   - Injected authentic Apple Device (`0x0A`) and Instant Hotspot (`0x0B`) Vendor Information Elements (IEs) directly into 802.11 Association Request frames when connecting to iOS Personal Hotspots.
+   - Preserved candidate join flags from macOS Skywalk `setASSOCIATE()` into the 802.11 core controller.
+   - Enabled WCL multi-SSID hotspot scan capability (bit 73) on macOS Tahoe in `AirportItlwmV2.cpp`, resolving discovery timeouts and handshake aborts.
+
+2. **Router Channel Coexistence Handshake (`MtkMwx.cpp`)**:
+   - Implemented automated Null Data power-save handshake (`mwx_send_null_pm`) transmitting IEEE 802.11 Null frames with `PM=1` to the home AP prior to channel switching, and `PM=0` upon return.
+   - Configured `MT_TXD3_SW_POWER_MGMT` in the MediaTek hardware MAC transmission descriptor so router connections remain active during peer-to-peer operations.
+
+3. **Out-of-the-Box AWDL Virtual Interface Activation (`AirportItlwmV2.cpp`, `AirportItlwmSkywalkInterface.cpp`)**:
+   - Activated virtual `awdl0` interface creation by default for seamless Apple Continuity services without requiring manual `-mtkawdl` boot-args (override with `-mtknoawdl`).
+
+4. **Unified MediaTek Wireless & Bluetooth Ecosystem**:
+   - Bundled and documented companion MediaTek Bluetooth support using `SimpleMtkBtFw.kext` and `SimpleMtkBtPatcher.kext`.
+
+---
+
 ## AirportMtkWlan v2.1.6
 
 ### Overview

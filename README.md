@@ -30,7 +30,9 @@ The repository builds two front-ends:
 | **Power Management (S3)** | ✅ | Clean hardware quiescing on sleep; full re-attach and firmware restore on wake |
 | **Network Roaming** | ✅ | Band steering preferring 5 GHz when within 15 dBm RSSI of 2.4 GHz |
 | **802.11ax (HE)** | ✅ | Wi-Fi 6 HE association, 256 BlockAck window, and A-MSDU reassembly enabled |
-| **Apple Continuity / AWDL** | 🚧 | Dedicated research repository: [AirportMtk-AWDL](https://github.com/Arxusion/AirportMtk-AWDL) |
+| **Apple Instant Hotspot** | ✅ | Native Apple Device (`0x0A`) & Hotspot (`0x0B`) Vendor IEs in 802.11 Association Requests |
+| **Apple Continuity / AWDL** | ✅ | Native virtual `awdl0` interface with router power-save (`PM=1`/`PM=0`) coexistence |
+| **Bluetooth Companion** | ✅ | Supported via companion `SimpleMtkBtFw.kext` and `SimpleMtkBtPatcher.kext` |
 
 ---
 
@@ -52,7 +54,7 @@ The repository builds two front-ends:
 ## Installation Guide (OpenCore)
 
 ### Option A: Graphical OpenCore Installer (Recommended)
-Download **`AirportMtkWlan-Installer-v2.1.6.zip`** from [Releases](https://github.com/Arxusion/AirportMtkWlan/releases).
+Download **`AirportMtkWlan-Installer-v2.2.0.zip`** from [Releases](https://github.com/Arxusion/AirportMtkWlan/releases).
 - Launch `AirportMtkWlan Installer.app`
 - Select your target OpenCore EFI partition (or click Browse to locate your EFI folder)
 - Choose your OS flavor (`macOS 26 Tahoe` or `macOS 15 Sequoia`)
@@ -61,8 +63,8 @@ Download **`AirportMtkWlan-Installer-v2.1.6.zip`** from [Releases](https://githu
 ### Option B: Manual Installation
 
 1. Download the latest release package matching your macOS version from [Releases](https://github.com/Arxusion/AirportMtkWlan/releases):
-   * `AirportMtkWlan-Sequoia-v2.1.6-RELEASE.zip` for **macOS 15 Sequoia (15.2+)**
-   * `AirportMtkWlan-Tahoe-v2.1.6-RELEASE.zip` for **macOS 26 Tahoe**
+   * `AirportMtkWlan-Sequoia-v2.2.0-RELEASE.zip` for **macOS 15 Sequoia (15.2+)**
+   * `AirportMtkWlan-Tahoe-v2.2.0-RELEASE.zip` for **macOS 26 Tahoe**
    * *For macOS 14 Sonoma, 13 Ventura, or earlier*: Native AirPort Skywalk is not compatible; download `SimpleMtkWlan.kext` and use [SimpleMTK](https://github.com/laobamac/SimpleMTKClient) (HeliPort).
 2. Extract and place `AirportMtkWlan.kext` into your EFI directory: `EFI/OC/Kexts/`.
 3. Add the kernel extension entry to your `config.plist` under `Kernel -> Add`:

@@ -47,7 +47,7 @@ codesign -s - --force --deep "$APP_BUNDLE" >/dev/null 2>&1 || true
 
 # 4. Package distribution zip
 echo "[4/4] Creating distribution archive..."
-VERSION="${1:-2.1.6}"
+VERSION="${1:-2.2.0}"
 ZIP_NAME="AirportMtkWlan-Installer-v${VERSION}.zip"
 ditto -c -k --keepParent "$APP_BUNDLE" "$DIST_DIR/$ZIP_NAME"
 

@@ -1070,11 +1070,11 @@ getCARD_CAPABILITIES(OSObject *object,
         (1 << (APPLE80211_CAP_SHORT_GI_40MHZ - 16)) |
         (1 << (APPLE80211_CAP_SHORT_GI_20MHZ - 16));
 
-    int allow_awdl = 0, allow_rsdb = 0;
-    PE_parse_boot_argn("-mtkawdl", &allow_awdl, sizeof(allow_awdl));
+    int no_awdl = 0, allow_rsdb = 0;
+    PE_parse_boot_argn("-mtknoawdl", &no_awdl, sizeof(no_awdl));
     PE_parse_boot_argn("-mtkrsdb", &allow_rsdb, sizeof(allow_rsdb));
 
-    if (allow_awdl || allow_rsdb) {
+    if (!no_awdl) {
         // Capabilities required by wifip2pd to authorize AWDL virtual interface:
         // 1. Byte 4 bit 0 (-0x68(%rbp)): Authorizes creation of role 6 (APPLE80211_VIF_AWDL)!
         cd->capabilities[4] |= (1 << 0);
@@ -1568,11 +1568,10 @@ __asm__(".globl __ZN23IO80211VirtualInterfaceC1EPK11OSMetaClass\n"
 IO80211VirtualInterface* AirportItlwm::createVirtualInterface(ether_addr *ea, UInt role)
 {
     XYLog("%s: requested role %u\n", __FUNCTION__, role);
-    int allow_awdl = 0, allow_rsdb = 0;
-    PE_parse_boot_argn("-mtkawdl", &allow_awdl, sizeof(allow_awdl));
-    PE_parse_boot_argn("-mtkrsdb", &allow_rsdb, sizeof(allow_rsdb));
-    if (!allow_awdl && !allow_rsdb) {
-        XYLog("%s: virtual interface creation disabled (enable with -mtkawdl)\n", __FUNCTION__);
+    int no_awdl = 0;
+    PE_parse_boot_argn("-mtknoawdl", &no_awdl, sizeof(no_awdl));
+    if (no_awdl) {
+        XYLog("%s: virtual interface creation disabled by -mtknoawdl\n", __FUNCTION__);
         return NULL;
     }
 

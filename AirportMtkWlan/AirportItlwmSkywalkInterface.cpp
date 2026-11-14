@@ -1130,11 +1130,10 @@ IOReturn AirportItlwmSkywalkInterface::setVIRTUAL_IF_CREATE(apple80211_virt_if_c
     if (!data)
         return kIOReturnBadArgument;
 
-    int allow_awdl = 0, allow_rsdb = 0;
-    PE_parse_boot_argn("-mtkawdl", &allow_awdl, sizeof(allow_awdl));
-    PE_parse_boot_argn("-mtkrsdb", &allow_rsdb, sizeof(allow_rsdb));
-    if (!allow_awdl && !allow_rsdb) {
-        XYLog("%s: virtual interface creation disabled (enable with -mtkawdl)\n", __FUNCTION__);
+    int no_awdl = 0;
+    PE_parse_boot_argn("-mtknoawdl", &no_awdl, sizeof(no_awdl));
+    if (no_awdl) {
+        XYLog("%s: virtual interface creation disabled by -mtknoawdl\n", __FUNCTION__);
         return kIOReturnUnsupported;
     }
 
