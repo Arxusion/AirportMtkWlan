@@ -1070,11 +1070,17 @@ getCARD_CAPABILITIES(OSObject *object,
         (1 << (APPLE80211_CAP_SHORT_GI_40MHZ - 16)) |
         (1 << (APPLE80211_CAP_SHORT_GI_20MHZ - 16));
 
-    // Capabilities required by wifip2pd to authorize AWDL virtual interface:
-    // 1. Byte 4 bit 0 (-0x68(%rbp)): Authorizes creation of role 6 (APPLE80211_VIF_AWDL)!
-    cd->capabilities[4] |= (1 << 0);
-    // 2. Byte 9 bit 0 (-0x63(%rbp)): Authorizes creation of role 9 (Infrastructure AWDL / NAN)!
-    cd->capabilities[9] |= (1 << 0);
+    int allow_awdl = 0, allow_rsdb = 0;
+    PE_parse_boot_argn("-mtkawdl", &allow_awdl, sizeof(allow_awdl));
+    PE_parse_boot_argn("-mtkrsdb", &allow_rsdb, sizeof(allow_rsdb));
+
+    if (allow_awdl || allow_rsdb) {
+        // Capabilities required by wifip2pd to authorize AWDL virtual interface:
+        // 1. Byte 4 bit 0 (-0x68(%rbp)): Authorizes creation of role 6 (APPLE80211_VIF_AWDL)!
+        cd->capabilities[4] |= (1 << 0);
+        // 2. Byte 9 bit 0 (-0x63(%rbp)): Authorizes creation of role 9 (Infrastructure AWDL / NAN)!
+        cd->capabilities[9] |= (1 << 0);
+    }
     // 3. Byte 9 bit 3: WPA3-SAE
     cd->capabilities[9] |= (1 << 3);
     // 4. Byte 6 bit 0 + bit 4: PMF / MFP capability
@@ -1086,7 +1092,7 @@ getCARD_CAPABILITIES(OSObject *object,
         cd->capabilities[17] |= 0x80;
     // Wake on Wireless
     cd->capabilities[2] |= (1 << (APPLE80211_CAP_WOW - 16));
-    if (isMT7922()) {
+    if (allow_rsdb && isMT7922()) {
         cd->capabilities[7] |= (1 << 1); // SDB supported (WCLDeviceConfiguration::isSdbSupported)
     }
 #else
@@ -1561,6 +1567,14 @@ __asm__(".globl __ZN23IO80211VirtualInterfaceC1EPK11OSMetaClass\n"
 IO80211VirtualInterface* AirportItlwm::createVirtualInterface(ether_addr *ea, UInt role)
 {
     XYLog("%s: requested role %u\n", __FUNCTION__, role);
+    int allow_awdl = 0, allow_rsdb = 0;
+    PE_parse_boot_argn("-mtkawdl", &allow_awdl, sizeof(allow_awdl));
+    PE_parse_boot_argn("-mtkrsdb", &allow_rsdb, sizeof(allow_rsdb));
+    if (!allow_awdl && !allow_rsdb) {
+        XYLog("%s: virtual interface creation disabled (enable with -mtkawdl)\n", __FUNCTION__);
+        return NULL;
+    }
+
     if (role == APPLE80211_VIF_AWDL || role == 6 || role == 4 || role == 9 || role == 10) {
         IO80211VirtualInterface *vif = new IO80211VirtualInterface(&IO80211VirtualInterface::gMetaClass);
         if (!vif) {

@@ -4575,14 +4575,16 @@ mwx_dma_enable(struct mwx_softc *sc)
  * active caps throughput near 40 Mbps and stalls DMA completions.
  */
 static void
-mwx_pci_clear_aspm_dev(struct mwx_softc *sc, IOPCIDevice *d, const char *role)
+mwx_pci_clear_aspm_dev(struct mwx_softc *sc, IOPCIDevice *d, const char *role,
+    bool clear_l1ss = true)
 {
 	IOByteCount l1ss = 0;
 	UInt8 pcie = 0;
 
 	if (d == NULL)
 		return;
-	if (d->extendedFindPCICapability(kIOPCIExpressL1PMSubstatesCapability,
+	if (clear_l1ss &&
+	    d->extendedFindPCICapability(kIOPCIExpressL1PMSubstatesCapability,
 	    &l1ss) != 0 && l1ss >= 0x100) {
 		uint32_t ctl1 = d->extendedConfigRead32(l1ss + 0x08);
 		if (ctl1 & 0x0000000fU) {
@@ -4606,21 +4608,47 @@ mwx_pci_clear_aspm_dev(struct mwx_softc *sc, IOPCIDevice *d, const char *role)
 void
 mwx_pci_disable_aspm(struct mwx_softc *sc, IOPCIDevice *dev)
 {
-	int allow = 0;
+	int allow = 0, no_parent = 0, force_parent = 0;
 
 	if (dev == NULL || PE_parse_boot_argn("-mtkallowaspm", &allow,
 	    sizeof(allow)))
 		return;
 
-	mwx_pci_clear_aspm_dev(sc, dev, "ep");
+	PE_parse_boot_argn("-mtknoparentaspm", &no_parent, sizeof(no_parent));
+	PE_parse_boot_argn("-mtkforceparentaspm", &force_parent,
+	    sizeof(force_parent));
+
+	/*
+	 * PCIe Base Spec 5.4.1.3: Software must disable ASPM on the Downstream
+	 * Port (parent) BEFORE disabling ASPM on the Upstream Port (endpoint).
+	 *
+	 * On AMD Ryzen platforms (PCI vendor 0x1022), macOS does not own native
+	 * PCIe power management via ACPI _OSC; touching the upstream root port
+	 * registers can hang or corrupt the PCIe link state machine, causing a
+	 * hard system freeze when DMA starts. Skip parent on AMD unless
+	 * -mtkforceparentaspm is passed.
+	 *
+	 * Also, parent bridges should NEVER have their L1SS registers modified
+	 * directly (matching Linux mt76_pci_disable_aspm).
+	 */
+	IOPCIDevice *parent = NULL;
 	for (IORegistryEntry *e = dev->getParentEntry(gIOServicePlane);
 	    e != NULL; e = e->getParentEntry(gIOServicePlane)) {
-		IOPCIDevice *parent = OSDynamicCast(IOPCIDevice, e);
-		if (parent != NULL) {
-			mwx_pci_clear_aspm_dev(sc, parent, "parent");
+		parent = OSDynamicCast(IOPCIDevice, e);
+		if (parent != NULL)
 			break;
+	}
+
+	if (parent != NULL && !no_parent) {
+		uint16_t parent_vendor = parent->configRead16(0);
+		if (parent_vendor == 0x1022 && !force_parent) {
+			MWX_DEV_LOG(sc, "aspm: skipping parent bridge for AMD vendor 0x1022\n");
+		} else {
+			mwx_pci_clear_aspm_dev(sc, parent, "parent", false);
 		}
 	}
+
+	mwx_pci_clear_aspm_dev(sc, dev, "ep", true);
 }
 
 int
@@ -4682,7 +4710,7 @@ mwx_mcu_drv_pmctrl(struct mwx_softc *sc)
 		mwx_write(sc, MT_CONN_ON_LPCTL, PCIE_LPCR_HOST_CLR_OWN);
 		delay(3000);
 		if (mwx_poll(sc, MT_CONN_ON_LPCTL, 0,
-		    PCIE_LPCR_HOST_OWN_SYNC, 50) == 0)
+		    PCIE_LPCR_HOST_OWN_SYNC, 500) == 0)
 			break;
 	}
 
@@ -4710,7 +4738,11 @@ mwx_wfsys_reset(struct mwx_softc *sc)
 int
 mwx_ensure_drv_own(struct mwx_softc *sc, const char *ctx)
 {
-	if (mwx_mcu_fw_pmctrl(sc) == 0 && mwx_mcu_drv_pmctrl(sc) == 0)
+	uint32_t lpctl = mwx_read(sc, MT_CONN_ON_LPCTL);
+	if ((lpctl & PCIE_LPCR_HOST_OWN_SYNC) == 0)
+		return 0;
+
+	if (mwx_mcu_drv_pmctrl(sc) == 0)
 		return 0;
 
 	/*
@@ -4720,7 +4752,7 @@ mwx_ensure_drv_own(struct mwx_softc *sc, const char *ctx)
 	MWX_DEV_LOG(sc, "%s MCU power control failed lpctl=0x%08x, "
 	    "trying WFSYS reset\n", ctx, mwx_read(sc, MT_CONN_ON_LPCTL));
 	mwx_wfsys_reset(sc);
-	if (mwx_mcu_fw_pmctrl(sc) == 0 && mwx_mcu_drv_pmctrl(sc) == 0) {
+	if (mwx_mcu_drv_pmctrl(sc) == 0) {
 		MWX_DEV_LOG(sc, "%s MCU power control recovered\n", ctx);
 		return 0;
 	}
@@ -4729,7 +4761,6 @@ mwx_ensure_drv_own(struct mwx_softc *sc, const char *ctx)
 		MWX_DEV_LOG(sc, "%s still failing lpctl=0x%08x, trying PCIe FLR\n",
 		    ctx, mwx_read(sc, MT_CONN_ON_LPCTL));
 		if (mwx_pci_flr(sc, sc->sc_tag) == 0 &&
-		    mwx_mcu_fw_pmctrl(sc) == 0 &&
 		    mwx_mcu_drv_pmctrl(sc) == 0) {
 			MWX_DEV_LOG(sc, "%s MCU power control recovered via FLR\n",
 			    ctx);

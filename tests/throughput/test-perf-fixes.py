@@ -104,9 +104,19 @@ typedef size_t IOByteCount;
 static int g_io_service_plane_dummy = 0;
 #define gIOServicePlane (&g_io_service_plane_dummy)
 static bool g_boot_arg_allow_aspm = false;
+static bool g_boot_arg_no_parent_aspm = false;
+static bool g_boot_arg_force_parent_aspm = false;
 static bool PE_parse_boot_argn(const char *arg, void *val, int sz) {
     (void)sz;
     if (strcmp(arg, "-mtkallowaspm") == 0 && g_boot_arg_allow_aspm) {
+        *static_cast<int*>(val) = 1;
+        return true;
+    }
+    if (strcmp(arg, "-mtknoparentaspm") == 0 && g_boot_arg_no_parent_aspm) {
+        *static_cast<int*>(val) = 1;
+        return true;
+    }
+    if (strcmp(arg, "-mtkforceparentaspm") == 0 && g_boot_arg_force_parent_aspm) {
         *static_cast<int*>(val) = 1;
         return true;
     }
@@ -121,6 +131,7 @@ struct IORegistryEntry {
 };
 struct IOPCIDevice : public IORegistryEntry {
     const char *name = "ep";
+    uint16_t vendor = 0x14c3;
     IOByteCount l1ss_off = 0x1e0;
     uint32_t l1ss_ctl1 = 0;
     UInt8 pcie_off = 0x80;
@@ -150,6 +161,7 @@ struct IOPCIDevice : public IORegistryEntry {
         if (write_log) write_log->push_back(std::string(name) + ":l1ss");
     }
     UInt16 configRead16(UInt8 off) {
+        if (off == 0) return vendor;
         assert(off == pcie_off + 0x10);
         return lnkctl;
     }
@@ -570,6 +582,7 @@ static void test_aspm_disable() {
 
     IOPCIDevice parent;
     parent.name = "parent";
+    parent.vendor = 0x8086; // Non-AMD Intel root port
     parent.is_pci = true;
     parent.l1ss_ctl1 = 0x0000000fU;
     parent.lnkctl = 0x0043U;
@@ -581,6 +594,7 @@ static void test_aspm_disable() {
 
     IOPCIDevice ep;
     ep.name = "ep";
+    ep.vendor = 0x14c3;
     ep.is_pci = true;
     ep.parent = &bridge;
     ep.l1ss_ctl1 = 0x0000000fU;
@@ -588,16 +602,65 @@ static void test_aspm_disable() {
     ep.write_log = &writes;
 
     g_boot_arg_allow_aspm = false;
+    g_boot_arg_no_parent_aspm = false;
+    g_boot_arg_force_parent_aspm = false;
     mwx_pci_disable_aspm(&sc, &ep);
     assert(ep.l1ss_ctl1 == 0);
     assert(ep.lnkctl == 0x0040U);
-    assert(parent.l1ss_ctl1 == 0);
+    // Parent should NOT have L1SS modified, only LNKCTL!
+    assert(parent.l1ss_ctl1 == 0x0000000fU);
     assert(parent.lnkctl == 0x0040U);
-    assert(writes.size() == 4);
-    assert(writes[0] == "ep:l1ss" && writes[1] == "ep:lnkctl");
-    assert(writes[2] == "parent:l1ss" && writes[3] == "parent:lnkctl");
+    assert(writes.size() == 3);
+    // Order: parent (Downstream) before ep (Upstream)
+    assert(writes[0] == "parent:lnkctl");
+    assert(writes[1] == "ep:l1ss");
+    assert(writes[2] == "ep:lnkctl");
+
+    // Test AMD vendor 0x1022 skips parent bridge!
+    parent.vendor = 0x1022; // AMD
+    parent.l1ss_ctl1 = 0x0fU;
+    parent.lnkctl = 0x0043U;
+    ep.l1ss_ctl1 = 0x0fU;
+    ep.lnkctl = 0x0043U;
+    writes.clear();
+    mwx_pci_disable_aspm(&sc, &ep);
+    assert(writes.size() == 2);
+    assert(writes[0] == "ep:l1ss");
+    assert(writes[1] == "ep:lnkctl");
+    assert(parent.lnkctl == 0x0043U); // Untouched on AMD!
+
+    // -mtkforceparentaspm overrides AMD skip
+    parent.l1ss_ctl1 = 0x0fU;
+    parent.lnkctl = 0x0043U;
+    ep.l1ss_ctl1 = 0x0fU;
+    ep.lnkctl = 0x0043U;
+    writes.clear();
+    g_boot_arg_force_parent_aspm = true;
+    mwx_pci_disable_aspm(&sc, &ep);
+    assert(writes.size() == 3);
+    assert(writes[0] == "parent:lnkctl");
+    assert(writes[1] == "ep:l1ss");
+    assert(writes[2] == "ep:lnkctl");
+    assert(parent.lnkctl == 0x0040U);
+    g_boot_arg_force_parent_aspm = false;
+
+    // -mtknoparentaspm skips parent on non-AMD as well
+    parent.vendor = 0x8086;
+    parent.l1ss_ctl1 = 0x0fU;
+    parent.lnkctl = 0x0043U;
+    ep.l1ss_ctl1 = 0x0fU;
+    ep.lnkctl = 0x0043U;
+    writes.clear();
+    g_boot_arg_no_parent_aspm = true;
+    mwx_pci_disable_aspm(&sc, &ep);
+    assert(writes.size() == 2);
+    assert(writes[0] == "ep:l1ss");
+    assert(writes[1] == "ep:lnkctl");
+    assert(parent.lnkctl == 0x0043U);
+    g_boot_arg_no_parent_aspm = false;
 
     // -mtkallowaspm leaves ASPM and L1SS bits untouched.
+    parent.vendor = 0x8086;
     ep.l1ss_ctl1 = 0x0fU;
     ep.lnkctl = 0x0043U;
     parent.l1ss_ctl1 = 0x0fU;
