@@ -56,19 +56,19 @@ probe(IOService *provider, SInt32 *score)
     XYLog("%s\n", __PRETTY_FUNCTION__);
     bool isMatch = false;
     super::probe(provider, score);
-    UInt8 msiCap;
-    UInt8 msixCap;
+    UInt8 msiCap = 0;
+    UInt8 msixCap = 0;
     IOPCIDevice* device = OSDynamicCast(IOPCIDevice, provider);
     if (!device)
         return NULL;
     if (MtkMwx::mwx_match(device)) {
         isMatch = true;
-        fHalService = new MtkMwx;
+        if (!fHalService)
+            fHalService = new MtkMwx;
     }
     if (isMatch) {
         XYLog("%s Found\n", __FUNCTION__);
-        device->findPCICapability(PCI_CAP_ID_MSIX, &msixCap);
-        if (msixCap)
+        if (device->findPCICapability(PCI_CAP_ID_MSIX, &msixCap) && msixCap != 0)
             pciMsiXClearAndSet(device, msixCap, PCI_MSIX_FLAGS_ENABLE, 0);
         device->findPCICapability(PCI_CAP_ID_MSI, &msiCap);
         /*
@@ -79,8 +79,10 @@ probe(IOService *provider, SInt32 *score)
          */
         if (!msiCap && !msixCap) {
             XYLog("%s No MSI cap\n", __FUNCTION__);
-            fHalService->release();
-            fHalService = NULL;
+            if (fHalService) {
+                fHalService->release();
+                fHalService = NULL;
+            }
             return NULL;
         }
         this->pciNub = device;
