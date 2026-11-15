@@ -173,36 +173,36 @@ IOReturn CAirportMtkBtPatcher::newHostDeviceRequest(void *that, IOService *provi
     char hciBuf[MAX_HCI_BUF_LEN] = {0};
     
     if (data == nullptr) {
-        if (descriptor != nullptr &&
-            (getKernelVersion() < KernelVersion::Sequoia || !descriptor->prepare(kIODirectionOut))) {
-            if (descriptor->getLength() > 0) {
-                descriptor->readBytes(0, hciBuf, min(descriptor->getLength(), MAX_HCI_BUF_LEN));
-                hdrLen = (uint32_t)min(descriptor->getLength(), MAX_HCI_BUF_LEN);
+        if (descriptor != nullptr) {
+            IOByteCount descLen = descriptor->getLength();
+            if (descLen > 0) {
+                descriptor->readBytes(0, hciBuf, min(descLen, (IOByteCount)MAX_HCI_BUF_LEN));
+                hdrLen = (uint32_t)min(descLen, (IOByteCount)MAX_HCI_BUF_LEN);
             }
-            if (getKernelVersion() >= KernelVersion::Sequoia)
-                descriptor->complete(kIODirectionOut);
         }
         hdr = (HciCommandHdr *)hciBuf;
-        if (hdr->opcode == HCI_OP_LE_SET_SCAN_PARAM) {
+        if (hdr && hdr->opcode == HCI_OP_LE_SET_SCAN_PARAM) {
             if (!_randomAddressInit) {
                 randomAddressRequest.bmRequestType = makeDeviceRequestbmRequestType(kRequestDirectionOut, kRequestTypeClass, kRequestRecipientInterface);
                 randomAddressRequest.bRequest = 0xE0;
                 randomAddressRequest.wIndex = 0;
                 randomAddressRequest.wValue = 0;
                 randomAddressRequest.wLength = 9;
-                length = 9;
+                unsigned int randLen = 9;
                 if (writeHCIDescriptor == nullptr)
                     writeHCIDescriptor = IOBufferMemoryDescriptor::withBytes(randomAddressHci, 9, kIODirectionOut);
-                writeHCIDescriptor->prepare(kIODirectionOut);
-                IOReturn ret = FunctionCast(newHostDeviceRequest, callbackMtkBtPatcher->oldHostDeviceRequest)(that, provider, randomAddressRequest, nullptr, writeHCIDescriptor, length, nullptr, timeout);
-                writeHCIDescriptor->complete();
-                const char *randAddressDump = _hexDumpHCIData((uint8_t *)randomAddressHci, 9);
-                if (randAddressDump) {
-                    SYSLOG(DRV_NAME, "[PATCH] Sending Random Address HCI %d %s", ret, randAddressDump);
-                    IOFree((void *)randAddressDump, 9 * 3 + 1);
+                if (writeHCIDescriptor != nullptr) {
+                    writeHCIDescriptor->prepare(kIODirectionOut);
+                    IOReturn ret = FunctionCast(newHostDeviceRequest, callbackMtkBtPatcher->oldHostDeviceRequest)(that, provider, randomAddressRequest, nullptr, writeHCIDescriptor, randLen, nullptr, timeout);
+                    writeHCIDescriptor->complete(kIODirectionOut);
+                    const char *randAddressDump = _hexDumpHCIData((uint8_t *)randomAddressHci, 9);
+                    if (randAddressDump) {
+                        SYSLOG(DRV_NAME, "[PATCH] Sending Random Address HCI %d %s", ret, randAddressDump);
+                        IOFree((void *)randAddressDump, 9 * 3 + 1);
+                    }
+                    _randomAddressInit = true;
+                    SYSLOG(DRV_NAME, "[PATCH] Resend LE SCAN PARAM HCI %d", ret);
                 }
-                _randomAddressInit = true;
-                SYSLOG(DRV_NAME, "[PATCH] Resend LE SCAN PARAM HCI %d", ret);
             }
         }
     } else {

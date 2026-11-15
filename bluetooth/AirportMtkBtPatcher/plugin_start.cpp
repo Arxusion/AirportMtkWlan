@@ -45,6 +45,7 @@ extern "C" kern_return_t ADDPR(kern_start)(kmod_info_t *ki, void *data) {
             ADDPR(startSuccess) = true;
             ADDPR(config).pluginStart();
         }
+        lilu.releaseAccess();
     }
     return KERN_SUCCESS;
 }

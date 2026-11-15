@@ -120,8 +120,8 @@ cat > "$patch_obj/kmod_info.c" <<KMOD
 #include <mach/kmod.h>
 extern kern_return_t AirportMtkBtPatcher_kern_start(kmod_info_t *, void *);
 extern kern_return_t AirportMtkBtPatcher_kern_stop(kmod_info_t *, void *);
-__attribute__((visibility("default"))) kmod_start_func_t *_realmain = AirportMtkBtPatcher_kern_start;
-__attribute__((visibility("default"))) kmod_stop_func_t *_antimain = AirportMtkBtPatcher_kern_stop;
+__attribute__((visibility("default"))) kmod_start_func_t *_realmain = 0;
+__attribute__((visibility("default"))) kmod_stop_func_t *_antimain = 0;
 __attribute__((visibility("default"))) kmod_info_t kmod_info = {
     0, KMOD_INFO_VERSION, -1U, "com.arxusion.AirportMtkBtPatcher", "$version", -1, 0, 0, 0, 0,
     AirportMtkBtPatcher_kern_start, AirportMtkBtPatcher_kern_stop,
