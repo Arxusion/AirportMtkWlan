@@ -414,8 +414,11 @@ int bus_dmamap_load(bus_dmamap_t map, mbuf_t mb) {
 				map->dm_bounce_mem = 0;
 				map->dm_bounce_size = 0;
 			}
+			// Data bounce allocation follows YYavicWiFi@7cf5b938841505e1e7c8e92888784927ff79e862,
+			// Source/YYavicMtkWlan/mtk80211/compat.cpp (GPL-3.0-or-later).
+			// Use coherent caching for x86_64 PCIe DMA, retaining contiguous memory and 32-bit addresses.
 			IOBufferMemoryDescriptor *mem =
-			    alloc_dma_memory(bounce_size, PAGE_SIZE);
+			    alloc_dma_memory(bounce_size, PAGE_SIZE, kIOMemoryPhysicallyContiguous);
 			if (mem == 0)
 				return 1;
 			map->dm_bounce_mem = mem;
