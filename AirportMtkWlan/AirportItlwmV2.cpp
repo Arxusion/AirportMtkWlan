@@ -6,6 +6,7 @@
 //  Copyright © 2023 钟先耀. All rights reserved.
 //
 
+#include <HAL/MtkPerf.hpp>
 #include "AirportItlwmV2.hpp"
 #include <sys/_netstat.h>
 #include <crypto/sha1.h>
@@ -145,6 +146,14 @@ IOReturn AirportItlwm::halDebugPollGated(OSObject *owner, void *, void *, void *
         if (ic && ic->ic_ac.ac_if.if_watchdog)
             (*ic->ic_ac.ac_if.if_watchdog)(&ic->ic_ac.ac_if);
         self->fHalService->debugPoll();
+#if MTK_PERF
+        if (ic) {
+            mp_set(mp_gauge_state, ic->ic_state);
+            mp_set(mp_gauge_running, (ic->ic_ac.ac_if.if_flags & IFF_RUNNING) != 0);
+            mtk_perf_publish(self->pciNub);
+        }
+#endif
+
     }
     return kIOReturnSuccess;
 }
@@ -161,6 +170,9 @@ void AirportItlwm::watchdogAction(IOTimerEventSource *timer)
      * across multiple seconds.
      */
     if (_fCommandGate && _fCommandGate->attemptAction(halDebugPollGated) != kIOReturnSuccess) {
+#if MTK_PERF
+        mp_async_add(mp_watchdog_busy);
+#endif
         if (++watchdogBusyCount >= 50 && (watchdogBusyCount % 50) == 0)
             XYLog("watchdog: main work loop busy, poll skipped (%u)\n", watchdogBusyCount);
         nextTimeoutMs = kWatchDogBusyRetryPeriod;
@@ -765,8 +777,14 @@ setLinkStateGated(OSObject *target, void *arg0, void *arg1, void *arg2, void *ar
 }
 
 #ifdef __PRIVATE_SPI__
-IOReturn AirportItlwm::outputStartGated(OSObject *owner, void *arg0, void *, void *, void *)
+IOReturn AirportItlwm::outputStartGated(OSObject *owner, void *arg0, void *arg1, void *, void *)
 {
+#if MTK_PERF
+    MpTimer perf(mp_tx_gated_samples);
+    if (arg1) mp_time(mp_tx_gate_wait_samples,
+        mach_absolute_time() - *static_cast<uint64_t *>(arg1));
+#endif
+
     auto self = static_cast<AirportItlwm *>(owner);
     auto interface = static_cast<IONetworkInterface *>(arg0);
     struct _ifnet *ifp = &self->fHalService->get80211Controller()->ic_ac.ac_if;
@@ -784,6 +802,10 @@ IOReturn AirportItlwm::outputStartGated(OSObject *owner, void *arg0, void *, voi
     if (interface->dequeueOutputPackets(count, &m) != kIOReturnSuccess || !m)
         return kIOReturnSuccess;
     while (m) {
+#if MTK_PERF
+        mp_add(mp_tx_pull_packets);
+        mp_add(mp_tx_pull_bytes, mbuf_pkthdr_len(m));
+#endif
         mbuf_t next = mbuf_nextpkt(m);
         mbuf_setnextpkt(m, NULL);
 #ifdef AIRPORT_WCL
@@ -803,7 +825,12 @@ IOReturn AirportItlwm::outputStartGated(OSObject *owner, void *arg0, void *, voi
 
 IOReturn AirportItlwm::outputStart(IONetworkInterface *interface, IOOptionBits options)
 {
+#if MTK_PERF
+    uint64_t entered = mach_absolute_time();
+    return _fCommandGate ? _fCommandGate->runAction(outputStartGated, interface, &entered) : kIOReturnNoResources;
+#else
     return _fCommandGate ? _fCommandGate->runAction(outputStartGated, interface) : kIOReturnNoResources;
+#endif
 }
 
 IOReturn AirportItlwm::networkInterfaceNotification(
@@ -846,8 +873,16 @@ UInt32 AirportItlwm::enqueuePacket(mbuf_t m)
     auto ifp = &ic->ic_ac.ac_if;
     if (ic->ic_state == IEEE80211_S_RUN && ifp->if_snd.queue &&
         m && mbuf_type(m) != MBUF_TYPE_FREE && (mbuf_flags(m) & MBUF_PKTHDR) &&
-        ifp->if_snd.queue->lockEnqueue(m))
+        ifp->if_snd.queue->lockEnqueue(m)) {
+#if MTK_PERF
+        mp_add(mp_tx_enqueue_ok);
+#endif
         return kIOReturnOutputSuccess;
+    }
+#if MTK_PERF
+    mp_add(mp_tx_enqueue_drop);
+#endif
+
     if (ifp->netStat)
         ++ifp->netStat->outputErrors;
     if (m && mbuf_type(m) != MBUF_TYPE_FREE)

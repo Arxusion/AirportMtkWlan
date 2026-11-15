@@ -26,6 +26,7 @@
 //  Copyright (c) 2012 Prashant Vaibhav. All rights reserved.
 //
 
+#include <HAL/MtkPerf.hpp>
 #include "compat.h"
 #include <IOKit/IOLib.h>
 #include <sys/random.h>
@@ -328,10 +329,20 @@ void bus_dmamap_sync(bus_dma_tag_t tag, bus_dmamap_t dmam, bus_addr_t offset, bu
 		return;
 
 	if (ops & BUS_DMASYNC_PREWRITE) {
+#if MTK_PERF
+		mp_add(mp_bounce_tx_calls);
+		mp_add(mp_bounce_tx_bytes, copy_len);
+#endif
 		mbuf_copydata(dmam->dm_mbuf, offset, copy_len,
 		    (uint8_t *)bounce + offset);
 	}
 	if (ops & BUS_DMASYNC_POSTREAD) {
+#if MTK_PERF
+		mp_add(mp_bounce_rx_calls);
+		mp_add(mp_bounce_rx_bytes, copy_len);
+		MpTimer perf(mp_rx_bounce_sample_samples,
+		    (mp_values[mp_bounce_rx_calls] % MP_BOUNCE_SAMPLE_PERIOD) == 0);
+#endif
 		mbuf_copyback(dmam->dm_mbuf, offset, copy_len,
 		    (uint8_t *)bounce + offset, MBUF_DONTWAIT);
 		mbuf_inbound_modified(dmam->dm_mbuf);

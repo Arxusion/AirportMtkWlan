@@ -6,6 +6,7 @@
 //  Copyright © 2023 钟先耀. All rights reserved.
 //
 
+#include <HAL/MtkPerf.hpp>
 #include "AirportItlwmEthernetInterface.hpp"
 
 #include <sys/_if_ether.h>
@@ -141,6 +142,9 @@ static mbuf_t normalizeInputPacket(mbuf_t packet, UInt32 length)
     if (!mbuf_next(packet) && mbuf_len(packet) >= packetLength)
         return packet;
 
+#if MTK_PERF
+    mp_add(mp_rx_normalize_copy);
+#endif
     unsigned int maxChunks = 1;
     mbuf_t linear = NULL;
     if (mbuf_allocpacket(MBUF_DONTWAIT, packetLength + ETHER_ALIGN, &maxChunks, &linear)) {
@@ -175,6 +179,9 @@ inputPacket(mbuf_t packet, UInt32 length, IOOptionBits options, void *param)
     const bool directInput = param == packet;
     packet = normalizeInputPacket(packet, length);
     if (!packet) {
+#if MTK_PERF
+        mp_add(mp_rx_normalize_drop);
+#endif
         IONetworkData *data = getParameter(kIONetworkStatsKey);
         IONetworkStats *stats = data ? (IONetworkStats *)data->getBuffer() : NULL;
         if (stats)

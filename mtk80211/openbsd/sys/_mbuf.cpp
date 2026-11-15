@@ -27,6 +27,7 @@
 * GNU General Public License for more details.
 */
 
+#include <HAL/MtkPerf.hpp>
 #include <sys/_mbuf.h>
 extern "C" {
 #include <net/bpf.h>
@@ -42,6 +43,9 @@ struct network_header {
 
 static IOReturn _if_input(OSObject *target, void *arg0, void *arg1, void *arg2, void *arg3)
 {
+#if MTK_PERF
+    MpTimer perf(mp_rx_if_input_samples);
+#endif
     mbuf_t m;
     bool isEmpty = true;
     bool isAwdlEmpty = true;
@@ -82,14 +86,30 @@ static IOReturn _if_input(OSObject *target, void *arg0, void *arg1, void *arg2, 
             ifq->if_awdl_iface->inputPacket(m, 0, IONetworkInterface::kInputOptionQueuePacket);
         } else {
             isEmpty = false;
+#if MTK_PERF
+            // Count infrastructure delivery; preserve AWDL routing and clone ownership.
+            mp_add(mp_rx_bsd_packets);
+            mp_add(mp_rx_bsd_bytes, mbuf_pkthdr_len(m));
+            UInt32 accepted =
+#endif
             ifq->iface->inputPacket(m, 0, IONetworkInterface::kInputOptionQueuePacket);
+#if MTK_PERF
+            mp_add(mp_rx_bsd_return_packets, accepted);
+#endif
             if (ifq->netStat != NULL) {
                 ifq->netStat->inputPackets++;
             }
         }
     }
     if (!isEmpty) {
+#if MTK_PERF
+        MpTimer flush(mp_rx_bsd_flush_samples);
+        UInt32 flushed =
+#endif
         ifq->iface->flushInputQueue();
+#if MTK_PERF
+        mp_add(mp_rx_bsd_flush_return, flushed);
+#endif
     }
     if (!isAwdlEmpty && ifq->if_awdl_iface != NULL) {
         ifq->if_awdl_iface->flushInputQueue();
