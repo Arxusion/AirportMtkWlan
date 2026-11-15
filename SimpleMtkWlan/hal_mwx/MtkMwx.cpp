@@ -28,6 +28,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+#include <HAL/MtkPerf.hpp>
 #include "MtkMwx.hpp"
 #include <IOKit/IODeviceTreeSupport.h>
 #include <HAL/MtkNvramHelper.hpp>
@@ -545,6 +546,9 @@ struct mwx_softc {
 	int8_t			sc_tx_amsdu;	/* hardware TX A-MSDU (-mtknoamsdu: off) */
 	volatile int8_t		sc_suspended;	/* system sleep: leave the hardware alone */
 	uint32_t		sc_tx_full_cnt;	/* output paused: no TXWI / ring slot */
+#if MTK_PERF
+	uint64_t		sc_tx_pause_started;
+#endif
 	int8_t			sc_sta_added;	/* peer STA record exists in fw */
 	bool sc_detaching, sc_net_attached;
 	int8_t			sc_fw_loaded;
@@ -629,6 +633,9 @@ struct mwx_softc {
 	struct ieee80211_rxinfo	 sc_amsdu_rxi;
 	CTimeout		*sc_amsdu_to;
 	uint64_t		 sc_amsdu_last_ticks;
+#if MTK_PERF
+	bool			 sc_amsdu_cross_batch;
+#endif
 
 };
 
@@ -731,6 +738,9 @@ int	mwx_init_hw(struct ifnet *);
 void	mwx_stop(struct ifnet *);
 static void mwx_amsdu_purge(struct mwx_softc *);
 static void mwx_amsdu_timeout(void *);
+#if MTK_PERF
+static void mwx_tx_pause_end(struct mwx_softc *, bool);
+#endif
 void	mwx_watchdog(struct ifnet *);
 void	mwx_start(struct ifnet *);
 int	mwx_ioctl(struct ifnet *, u_long, caddr_t);
@@ -1215,6 +1225,9 @@ mwx_stop(struct ifnet *ifp)
 	ifp->if_timer = 0;
 	ifp->if_flags &= ~IFF_RUNNING;
 	mwx_amsdu_purge(sc);
+#if MTK_PERF
+	mwx_tx_pause_end(sc, false);
+#endif
 	ifq_clr_oactive(&ifp->if_snd);
 
 	if (was_running) {
@@ -1298,14 +1311,48 @@ mwx_tx_has_room(struct mwx_softc *sc, u_int need)
 	    mwx_dma_free_slots(&sc->sc_txq) >= (int)need;
 }
 
+#if MTK_PERF
+/* Time only pause/resume boundaries; both resource causes can apply. */
+static void
+mwx_tx_pause_begin(struct mwx_softc *sc)
+{
+	sc->sc_tx_pause_started = mach_absolute_time();
+	if (sc->sc_txwi.mt_nfree == 0)
+		mp_add(mp_tx_full_token);
+	if (mwx_dma_free_slots(&sc->sc_txq) == 0)
+		mp_add(mp_tx_full_ring);
+}
+
+static void
+mwx_tx_pause_end(struct mwx_softc *sc, bool resumed)
+{
+	if (sc->sc_tx_pause_started == 0)
+		return;
+	mp_time(mp_tx_pause_samples, mach_absolute_time() - sc->sc_tx_pause_started);
+	if (!resumed)
+		mp_add(mp_tx_pause_abort);
+	sc->sc_tx_pause_started = 0;
+}
+#endif
+
 /* Restart output after TX completions freed enough room. */
 static void
 mwx_tx_kick(struct mwx_softc *sc)
 {
 	struct ifnet *ifp = &sc->sc_ic.ic_if;
 
-	if (!ifq_is_oactive(&ifp->if_snd) || !mwx_tx_has_room(sc, 32))
+	if (!ifq_is_oactive(&ifp->if_snd))
 		return;
+	if (!mwx_tx_has_room(sc, 32)) {
+#if MTK_PERF
+		if (mwx_tx_has_room(sc, 1))
+			mp_add(mp_tx_wake_below_threshold);
+#endif
+		return;
+	}
+#if MTK_PERF
+	mwx_tx_pause_end(sc, true);
+#endif
 	ifq_clr_oactive(&ifp->if_snd);
 	mwx_start(ifp);
 #ifdef __PRIVATE_SPI__
@@ -1317,6 +1364,10 @@ mwx_tx_kick(struct mwx_softc *sc)
 void
 mwx_start(struct ifnet *ifp)
 {
+#if MTK_PERF
+	MpTimer perf(mp_tx_start_samples);
+#endif
+
 	struct mwx_softc *sc = (struct mwx_softc *)ifp->if_softc;
 	struct ieee80211com *ic = &sc->sc_ic;
 	struct ieee80211_node *ni;
@@ -1336,6 +1387,9 @@ mwx_start(struct ifnet *ifp)
 		if (!mwx_tx_has_room(sc, 1)) {
 			ifq_set_oactive(&ifp->if_snd);
 			sc->sc_tx_full_cnt++;
+#if MTK_PERF
+			mwx_tx_pause_begin(sc);
+#endif
 			break;
 		}
 
@@ -1373,7 +1427,15 @@ mwx_start(struct ifnet *ifp)
 			bpf_mtap(ic->ic_rawbpf, m, BPF_DIRECTION_OUT);
 #endif
 		/* Defer the PCIe CPU_IDX MMIO doorbell to once per burst (or every 16 frames). */
+#if MTK_PERF
+		size_t perf_len = mbuf_pkthdr_len(m);
+#endif
 		int rv = mwx_tx(sc, m, ni, false);
+#if MTK_PERF
+		mp_add(rv ? mp_tx_dma_drop : mp_tx_dma_ok);
+		if (!rv) mp_add(mp_tx_dma_bytes, perf_len);
+#endif
+
 		/* mwx_tx copies node metadata into the descriptor; completion uses
 		 * the packet/token only, so release the enqueue reference here. */
 		ieee80211_release_node(ic, ni);
@@ -2165,6 +2227,10 @@ mwx_rx_deliver(struct mwx_softc *sc, struct mbuf *m, struct ieee80211_rxinfo *rx
 	if (ic->ic_max_rssi && rxi->rxi_rssi < 0)
 		rxi->rxi_rssi = mwx_dbm_to_rssi(rxi->rxi_rssi);
 
+#if MTK_PERF
+	mp_add(mp_rx_mpdu);
+	mp_add(mp_rx_mpdu_bytes, mbuf_pkthdr_len(m));
+#endif
 	/* send the frame to the 802.11 layer */
 	ieee80211_inputm(ifp, m, ni, rxi, ml);
 
@@ -2191,6 +2257,9 @@ mwx_amsdu_flush(struct mwx_softc *sc, struct mbuf_list *ml)
 
 	if (n == 0)
 		return;
+#if MTK_PERF
+	mp_add(mp_rx_amsdu_flush);
+#endif
 	sc->sc_amsdu_n = 0;
 	if (n == 1) {
 		mwx_rx_deliver(sc, sc->sc_amsdu_sub[0], &sc->sc_amsdu_rxi, ml);
@@ -2202,6 +2271,9 @@ mwx_amsdu_flush(struct mwx_softc *sc, struct mbuf_list *ml)
 		total += i < n - 1 ? ((sc->sc_amsdu_len[i] + 3) & ~3U) : sc->sc_amsdu_len[i];
 
 	if (mbuf_allocpacket(MBUF_DONTWAIT, total, &chunks, &nm) != 0 || nm == NULL) {
+#if MTK_PERF
+		mp_add(mp_rx_amsdu_alloc_fail);
+#endif
 		/* If allocation failed under memory pressure, deliver subframe 0 directly */
 		mwx_rx_deliver(sc, sc->sc_amsdu_sub[0], &sc->sc_amsdu_rxi, ml);
 		sc->sc_amsdu_sub[0] = NULL;
@@ -2253,6 +2325,9 @@ mwx_amsdu_flush(struct mwx_softc *sc, struct mbuf_list *ml)
 		}
 	} else {
 		static const uint8_t zero_pad[4] = { 0, 0, 0, 0 };
+#if MTK_PERF
+		mp_add(mp_rx_amsdu_chain);
+#endif
 		if (mbuf_copyback(nm, 0, hl, mtod(sc->sc_amsdu_sub[0], uint8_t *), MBUF_DONTWAIT) != 0)
 			goto copy_failed;
 		off = hl;
@@ -2294,6 +2369,9 @@ mwx_amsdu_flush(struct mwx_softc *sc, struct mbuf_list *ml)
 	return;
 
 copy_failed:
+#if MTK_PERF
+	mp_add(mp_rx_amsdu_copy_fail);
+#endif
 	m_freem(nm);
 	for (i = 0; i < n; i++) {
 		if (sc->sc_amsdu_sub[i] != NULL)
@@ -2314,6 +2392,10 @@ static void
 mwx_amsdu_purge(struct mwx_softc *sc)
 {
 	timeout_del(&sc->sc_amsdu_to);
+#if MTK_PERF
+	mp_add(mp_rx_amsdu_purge_sub, sc->sc_amsdu_n);
+	sc->sc_amsdu_cross_batch = false;
+#endif
 	for (int i = 0; i < sc->sc_amsdu_n; i++) {
 		m_freem(sc->sc_amsdu_sub[i]);
 		sc->sc_amsdu_sub[i] = NULL;
@@ -2326,6 +2408,9 @@ static void
 mwx_amsdu_arm(struct mwx_softc *sc, struct mbuf_list *ml, int msec)
 {
 	if (!timeout_add_msec(&sc->sc_amsdu_to, msec)) {
+#if MTK_PERF
+		mp_add(mp_rx_amsdu_timer_fail);
+#endif
 		/* If scheduling fails, deliver the partial aggregate rather than hold it indefinitely. */
 		mwx_amsdu_flush(sc, ml);
 	}
@@ -2341,6 +2426,10 @@ mwx_amsdu_schedule(struct mwx_softc *sc, struct mbuf_list *ml)
 	}
 	if (sc->sc_amsdu_n == 0)
 		return;
+
+#if MTK_PERF
+	sc->sc_amsdu_cross_batch = true;
+#endif
 	if (!timeout_pending(&sc->sc_amsdu_to))
 		mwx_amsdu_arm(sc, ml, MWX_AMSDU_TIMEOUT_MS);
 }
@@ -2365,6 +2454,9 @@ mwx_amsdu_timeout(void *arg)
 	if (elapsed_ns < limit_ns) {
 		mwx_amsdu_arm(sc, &ml, (int)((limit_ns - elapsed_ns + 999999) / 1000000));
 	} else {
+#if MTK_PERF
+		mp_add(mp_rx_amsdu_timer_flush);
+#endif
 		mwx_amsdu_flush(sc, &ml);
 	}
 	if (!ml_empty(&ml))
@@ -2381,6 +2473,10 @@ mwx_amsdu_add(struct mwx_softc *sc, struct mbuf *m, struct ieee80211_rxinfo *rxi
 	uint16_t seq = letoh16(*(uint16_t *)wh->i_seq) >> IEEE80211_SEQ_SEQ_SHIFT;
 	u_int hl = ieee80211_get_hdrlen(wh);
 
+#if MTK_PERF
+	mp_add(mp_rx_amsdu_sub);
+	mp_add(mp_rx_amsdu_sub_bytes, mbuf_pkthdr_len(m));
+#endif
 	rxi->rxi_flags &= ~MWX_RXI_AMSDU_MASK;
 	if (sc->sc_amsdu_n > 0 &&
 	    (fmt == MT_RXD4_FIRST_AMSDU_FRAME || seq != sc->sc_amsdu_seq || hl != sc->sc_amsdu_hdrlen ||
@@ -2392,6 +2488,9 @@ mwx_amsdu_add(struct mwx_softc *sc, struct mbuf *m, struct ieee80211_rxinfo *rxi
 	}
 	sc->sc_amsdu_last_ticks = mach_absolute_time();
 	if (sc->sc_amsdu_n == 0) {
+#if MTK_PERF
+		sc->sc_amsdu_cross_batch = false;
+#endif
 		sc->sc_amsdu_seq = seq;
 		sc->sc_amsdu_hdrlen = hl;
 		IEEE80211_ADDR_COPY(sc->sc_amsdu_ta, wh->i_addr2);
@@ -2400,6 +2499,10 @@ mwx_amsdu_add(struct mwx_softc *sc, struct mbuf *m, struct ieee80211_rxinfo *rxi
 	sc->sc_amsdu_sub[sc->sc_amsdu_n] = m;
 	sc->sc_amsdu_len[sc->sc_amsdu_n] = (uint16_t)(mbuf_len(m) - hl);	/* one RX buffer */
 	sc->sc_amsdu_n++;
+#if MTK_PERF
+	if (fmt == MT_RXD4_LAST_AMSDU_FRAME && sc->sc_amsdu_cross_batch)
+		mp_add(mp_rx_amsdu_cross_batch_complete);
+#endif
 	if (fmt == MT_RXD4_LAST_AMSDU_FRAME)
 		mwx_amsdu_flush(sc, ml);
 }
@@ -2413,6 +2516,10 @@ mwx_rx(struct mwx_softc *sc, struct mbuf *m, struct mbuf_list *ml)
 	struct ieee80211_rxinfo rxi = { 0 };
 	int rv;
 
+#if MTK_PERF
+	mp_add(mp_rx_normal);
+	mp_add(mp_rx_normal_bytes, mbuf_pkthdr_len(m));
+#endif
 	rv = mt7921_mac_fill_rx(sc, m, &rxi);
 	if (rv != 0) {
 		if (sc->sc_rx_fill_fail < 32) {
@@ -2420,6 +2527,9 @@ mwx_rx(struct mwx_softc *sc, struct mbuf *m, struct mbuf_list *ml)
 			    "rx fill failed rv=%d len=%zu fail_count=%u\n",
 			    rv, mbuf_len(m), sc->sc_rx_fill_fail + 1);
 		}
+#if MTK_PERF
+		mp_add(mp_rx_fill_drop);
+#endif
 		sc->sc_rx_fill_fail++;
 		ifp->if_ierrors++;
 		m_freem(m);
@@ -2525,6 +2635,10 @@ mwx_intr_timeout(void *arg)
 int
 mwx_intr(void *arg)
 {
+#if MTK_PERF
+	MpTimer perf(mp_rx_intr_samples);
+#endif
+
 	struct mwx_softc *sc = (struct mwx_softc *)arg;
 	uint32_t intr, intr_sw, forced;
 	uint32_t mask = sc->sc_intr_mask;
@@ -4044,6 +4158,10 @@ mwx_dma_tx_done(struct mwx_softc *sc)
 void
 mwx_dma_rx_process(struct mwx_softc *sc, struct mbuf_list *ml)
 {
+#if MTK_PERF
+	MpTimer perf(mp_rx_process_samples);
+#endif
+
 	struct mbuf_list mlout = MBUF_LIST_INITIALIZER();
 	struct mbuf *m;
 	uint32_t *data, rxd, type, flag;
@@ -4130,6 +4248,10 @@ void
 mwx_dma_rx_dequeue(struct mwx_softc *sc, struct mwx_queue *q,
     struct mbuf_list *ml, int budget, bool *morep)
 {
+#if MTK_PERF
+	MpTimer perf(mp_rx_dequeue_samples);
+#endif
+
 	struct mwx_queue_data *md;
 	struct mwx_desc *desc;
 	struct mbuf *m, *m0 = NULL, *mtail = NULL;
@@ -4178,6 +4300,10 @@ mwx_dma_rx_dequeue(struct mwx_softc *sc, struct mwx_queue *q,
 		/* only buf0 is used on RX rings */
 		ctrl = le32toh(desc->ctrl);
 		mbuf_setlen(m, MT_DNA_CTL_SD_GET_LEN0(ctrl));
+#if MTK_PERF
+		mp_add(mp_rx_desc);
+		mp_add(mp_rx_desc_bytes, mbuf_len(m));
+#endif
 
 		if (m0 == NULL) {
 			m0 = mtail = m;
@@ -4192,6 +4318,10 @@ mwx_dma_rx_dequeue(struct mwx_softc *sc, struct mwx_queue *q,
 
 		/* check if this was the last mbuf of the chain */
 		if (ctrl & MT_DMA_CTL_LAST_SEC0) {
+#if MTK_PERF
+			mp_add(mp_rx_records);
+			mp_add(mp_rx_record_bytes, mbuf_pkthdr_len(m0));
+#endif
 			ml_enqueue(ml, m0);
 			m0 = NULL;
 			mtail = NULL;
@@ -4205,6 +4335,10 @@ mwx_dma_rx_dequeue(struct mwx_softc *sc, struct mwx_queue *q,
 
 	/* a chain cut short by the out-of-sync check above */
 	if (m0 != NULL) {
+#if MTK_PERF
+		mp_add(mp_rx_partial_drop);
+#endif
+
 		m_freem(m0);
 		m0 = NULL;
 	}
@@ -4235,13 +4369,23 @@ mwx_dma_rx_done(struct mwx_softc *sc, struct mwx_queue *q)
 			break;
 
 		if (!ml_empty(&ml)) {
+#if MTK_PERF
+			{
+				MpTimer fill(mp_rx_refill_samples);
+				if (mwx_queue_fill(sc, q)) mp_add(mp_rx_refill_fail);
+			}
+#else
 			mwx_queue_fill(sc, q);	/* TODO what if it fails, run timer? */
+#endif
 			mwx_dma_rx_process(sc, &ml);
 		}
 		if (!more)
 			break;
 	}
 
+#if MTK_PERF
+	if (more) mp_add(mp_rx_budget_more);
+#endif
 	return more;
 }
 
@@ -8776,11 +8920,24 @@ mwx_mcu_sta_ba(struct mwx_softc *sc, struct ieee80211_node *ni, uint8_t tid,
 		int rv = wtbl == NULL ? ENOBUFS :
 			mwx_mcu_send_mbuf(sc, MCU_UNI_CMD_STA_REC_UPDATE, wtbl, NULL);
 		if (rv != 0) {
+#if MTK_PERF
+			mp_add(mp_tx_wtbl_ba_submit_fail);
+#endif
 			m_freem(m);
 			return rv;
 		}
+#if MTK_PERF
+		mp_add(enable ? mp_tx_wtbl_ba_enable_submit : mp_tx_wtbl_ba_disable_submit);
+#endif
 	}
+#if MTK_PERF
+	int rv = mwx_mcu_send_mbuf(sc, MCU_UNI_CMD_STA_REC_UPDATE, m, NULL);
+	if (tx && rv != 0)
+		mp_add(mp_tx_sta_ba_submit_fail);
+	return rv;
+#else
 	return mwx_mcu_send_mbuf(sc, MCU_UNI_CMD_STA_REC_UPDATE, m, NULL);
+#endif
 }
 
 int
@@ -9034,6 +9191,23 @@ MtkMwx::debugPoll()
 		return;
 	ic = &sc->sc_ic;
 	polls++;
+#if MTK_PERF
+	mp_set(mp_gauge_state, ic->ic_state);
+	mp_set(mp_gauge_tx_full, sc->sc_tx_full_cnt);
+	mp_set(mp_gauge_tx_ba_agreements, ic->ic_stats.is_ht_tx_ba_agreements);
+	mp_set(mp_gauge_tx_free, mwx_dma_free_slots(&sc->sc_txq));
+	mp_set(mp_gauge_txwi_free, sc->sc_txwi.mt_nfree);
+	mp_set(mp_gauge_tx_oactive, ifq_is_oactive(&ic->ic_if.if_snd));
+	mp_set(mp_gauge_ba_gap_timeout, ic->ic_stats.is_ht_rx_ba_window_gap_timeout);
+	mp_set(mp_gauge_ba_lost, ic->ic_stats.is_ht_rx_ba_frame_lost);
+	mp_set(mp_gauge_ba_below, ic->ic_stats.is_ht_rx_frame_below_ba_winstart);
+	mp_set(mp_gauge_ba_above, ic->ic_stats.is_ht_rx_frame_above_ba_winend);
+	mp_set(mp_gauge_tooshort, ic->ic_stats.is_rx_tooshort);
+	mp_set(mp_gauge_decap, ic->ic_stats.is_rx_decap);
+	mp_set(mp_gauge_nombuf, ic->ic_stats.is_rx_nombuf);
+	mp_set(mp_gauge_rx_fill_fail, sc->sc_rx_fill_fail);
+	mp_set(mp_gauge_amsdu_pending, sc->sc_amsdu_n);
+#endif
 
 	/*
 	 * net80211 sends AUTH / ASSOC_REQ once and then waits the whole 5 s

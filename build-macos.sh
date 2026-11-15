@@ -5,9 +5,15 @@
 # AirportMtkWlan: the same driver behind macOS's native Wi-Fi interface, from laobamac's
 #                 AirportItlwm (WCL) on our MediaTek HAL. AIRPORT_OS=tahoe (default, macOS 26)
 #                 or sequoia (15.2+) picks the IO80211 ABI; the kext only works on that one.
+# MTK_PERF=1 enables AirportMtkWlan throughput counters (disabled by default).
 set -euo pipefail
 config="${1:-Release}"
 product="${2:-all}"
+mtk_perf="${MTK_PERF:-0}"
+case "$mtk_perf" in
+	0|1) ;;
+	*) echo "MTK_PERF must be 0 or 1" >&2; exit 2 ;;
+esac
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 version="${MODULE_VERSION:-$(sed -n 's/.*MODULE_VERSION = \([0-9.]*\);.*/\1/p' "$here/SimpleMtkWlan.xcodeproj/project.pbxproj" | head -1)}"
 commit="$(git -C "$here" rev-parse --short HEAD 2>/dev/null || echo unknown)"
@@ -110,6 +116,10 @@ if [[ "$product" == all || "$product" == SimpleMtkWlan ]]; then
 	fi
 fi
 if [[ "$product" == all || "$product" == AirportMtkWlan ]] && [[ -d "$here/AirportMtkWlan" ]]; then
+	perf_sources=()
+	if [[ "$mtk_perf" == 1 ]]; then
+		perf_sources+=(SimpleMtkWlan/MtkPerf.cpp)
+	fi
 	case "${AIRPORT_OS:-tahoe}" in
 		tahoe)   target=__MAC_26_0 ;;
 		sequoia) target=__MAC_15_2 ;;
@@ -118,7 +128,8 @@ if [[ "$product" == all || "$product" == AirportMtkWlan ]] && [[ -d "$here/Airpo
 	out="$here/build/$config/${AIRPORT_OS:-tahoe}"
 	mkdir -p "$out"
 	build AirportMtkWlan com.flxxxxddd.AirportMtkWlan AirportMtkWlan/WCL/Info.plist \
-		-DAIRPORT -DAIRPORT_WCL "-D__IO80211_TARGET=$target" -DIO80211FAMILY_V2 -- "${common_sources[@]}" \
+		-DAIRPORT -DAIRPORT_WCL "-D__IO80211_TARGET=$target" -DIO80211FAMILY_V2 "-DMTK_PERF=$mtk_perf" -- \
+		"${common_sources[@]}" ${perf_sources[@]+"${perf_sources[@]}"} \
 		$(cd "$here" && ls AirportMtkWlan/*.cpp AirportMtkWlan/WCL/*.cpp 2>/dev/null)
 fi
 if [[ "$product" == all || "$product" == bluetooth ]] && [[ -f "$here/bluetooth/build-bluetooth.sh" ]]; then

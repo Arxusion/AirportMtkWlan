@@ -101,3 +101,47 @@ To read the log without administrative privileges:
 ```
 > [!WARNING]
 > Never log per-packet on the fast path. Use rate-limiting counters to avoid dropping throughput or flooding the debug ring buffer.
+
+## 6. Optional Throughput Diagnostics
+
+The shell build supports `MTK_PERF=1` for AirportMtkWlan. It defaults to `0`;
+SimpleMtkWlan builds keep instrumentation disabled. Build and load a diagnostic
+kext before reading its numeric `MtkThroughput` IORegistry property:
+
+```sh
+MTK_PERF=1 AIRPORT_OS=tahoe ./build-macos.sh Release AirportMtkWlan
+python3 -B tools/airport_throughput.py snapshot
+python3 -B tools/airport_throughput.py run --server '<wired-iperf3-server>' \
+  --direction down --seconds 20 --omit 3 --streams 1
+```
+
+Use `--direction up` for upload or `--streams 4` for a parallel TCP test.
+Python 3 is required; `run` also requires iperf3. Output stays in the terminal
+unless `--output <new-file.json>` is supplied. Reports contain allowlisted numeric
+snapshots and TCP totals; server addresses and other registry properties are
+omitted. Existing output files are never overwritten.
+
+Counters cover DMA bounce copies, RX processing and delivery, A-MSDU completion
+and failures, BA message submission, TX resource pressure, and queue/state gauges.
+The current driver uses a shared workloop and one adapter; the reader requires
+exactly one diagnostic property. Most updates run under the main gate; the
+watchdog contention counter uses atomic updates. Snapshots are published as a
+complete dictionary by the gated watchdog poll. The disabled build omits the
+collector, diagnostic fields, and timing calls.
+
+Interpretation:
+
+- Schema 2 includes a kext-session timestamp, sequence number, and timebase.
+  The reader rejects session changes, stale snapshots, and decreasing counters.
+- Timing regions measure elapsed time, can overlap, and include scheduling;
+  their sum is not CPU utilization. RX bounce timing samples one in 64 copies.
+- Maximum times cover the kext session, not just the measurement interval.
+  A TX pause is counted when it ends, so its duration can cross snapshot boundaries.
+- Diagnostic windows include warm-up and snapshot polling; iperf3 receiver
+  throughput excludes `--omit`. The two rates use different time windows.
+- TX-full events indicate temporary backpressure, not packet drops. BA submission
+  counts describe host submission, not firmware acknowledgment. BSD packet/byte
+  counts cover infrastructure delivery; AWDL routing is unchanged.
+
+The diagnostic build adds measurement overhead. Use it to locate bottlenecks,
+then validate performance and behavior on hardware with the intended release build.
