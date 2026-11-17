@@ -21,6 +21,53 @@ extern IOCommandGate *_fCommandGate;
 #define super IO80211InfraProtocol
 OSDefineMetaClassAndStructors(AirportItlwmSkywalkInterface, IO80211InfraProtocol);
 
+IOReturn AirportItlwmSkywalkInterface::getHT_CAPABILITY(apple80211_ht_capability *d)
+{
+    if (!d) return kIOReturnBadArgument;
+    if (!fHalService) return kIOReturnNotReady;
+    auto *ic = fHalService->get80211Controller();
+    if (!ic) return kIOReturnNotReady;
+    bzero(d, sizeof(*d));
+    d->version = APPLE80211_VERSION;
+    d->hc_id = 45;
+    d->hc_len = 26;
+    d->hc_cap = ic->ic_htcaps;
+    d->hc_param = ic->ic_ampdu_params;
+    memcpy(d->hc_mcsset, ic->ic_sup_mcs, sizeof(ic->ic_sup_mcs));
+    d->hc_extcap = ic->ic_htxcaps;
+    d->hc_txbf = ic->ic_txbfcaps;
+    return kIOReturnSuccess;
+}
+
+IOReturn AirportItlwmSkywalkInterface::getVHT_CAPABILITY(apple80211_vht_capability *d)
+{
+    if (!d) return kIOReturnBadArgument;
+    if (!fHalService) return kIOReturnNotReady;
+    auto *ic = fHalService->get80211Controller();
+    if (!ic) return kIOReturnNotReady;
+    bzero(d, sizeof(*d));
+    d->version = APPLE80211_VERSION;
+    d->cap = ic->ic_vhtcaps & 0xffff;
+    d->unk1 = ic->ic_vhtcaps;
+    return kIOReturnSuccess;
+}
+
+IOReturn AirportItlwmSkywalkInterface::getHE_CAPABILITY(apple80211_he_capability *d)
+{
+    if (!d) return kIOReturnBadArgument;
+    uint8_t *raw = reinterpret_cast<uint8_t *>(d);
+    bzero(raw, 0x28);
+    *reinterpret_cast<uint32_t *>(raw) = APPLE80211_VERSION;
+    return kIOReturnSuccess;
+}
+
+IOReturn AirportItlwmSkywalkInterface::getSIB_COEX_STATUS(apple80211_sib_coex_status *d)
+{
+    if (!d) return kIOReturnBadArgument;
+    bzero(reinterpret_cast<uint8_t *>(d), 16);
+    return kIOReturnSuccess;
+}
+
 const char* hexdump(uint8_t *buf, size_t len) {
     ssize_t str_len = len * 3 + 1;
     char *str = (char*)IOMalloc(str_len);
@@ -1130,10 +1177,11 @@ IOReturn AirportItlwmSkywalkInterface::setVIRTUAL_IF_CREATE(apple80211_virt_if_c
     if (!data)
         return kIOReturnBadArgument;
 
-    int no_awdl = 0;
-    PE_parse_boot_argn("-mtknoawdl", &no_awdl, sizeof(no_awdl));
-    if (no_awdl) {
-        XYLog("%s: virtual interface creation disabled by -mtknoawdl\n", __FUNCTION__);
+    int allow_awdl = 0, allow_rsdb = 0;
+    PE_parse_boot_argn("-mtkawdl", &allow_awdl, sizeof(allow_awdl));
+    PE_parse_boot_argn("-mtkrsdb", &allow_rsdb, sizeof(allow_rsdb));
+    if (!allow_awdl && !allow_rsdb) {
+        XYLog("%s: virtual interface creation disabled (enable with -mtkawdl)\n", __FUNCTION__);
         return kIOReturnUnsupported;
     }
 

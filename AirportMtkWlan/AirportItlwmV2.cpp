@@ -393,21 +393,26 @@ bool AirportItlwm::start(IOService *provider)
     if (PE_parse_boot_argn("-noht40", &boot_value, sizeof(boot_value)))
         fHalService->get80211Controller()->ic_userflags |= IEEE80211_F_NOHT40;
 
-#ifdef AIRPORT_WCL
-    struct ieee80211com *ic_he = fHalService->get80211Controller();
-    int no_he = 0;
-    if (PE_parse_boot_argn("-nohe", &no_he, sizeof(no_he)))
-        ic_he->ic_flags &= ~IEEE80211_F_HEON;
-    else if (ic_he->ic_caps & IEEE80211_C_HE)
-        ic_he->ic_flags |= IEEE80211_F_HEON;
-#endif
-
     if (!fHalService->attach(pciNub)) {
         XYLog("attach fail\n");
         super::stop(pciNub);
         releaseAll();
         return false;
     }
+
+#ifdef AIRPORT_WCL
+    // Enable 802.11ax (HE / Wi-Fi 6) by default after hardware attach sets ic_caps
+    struct ieee80211com *ic_he = fHalService->get80211Controller();
+    int no_he = 0;
+    if (PE_parse_boot_argn("-nohe", &no_he, sizeof(no_he)) ||
+        (PE_parse_boot_argn("amtk_he", &no_he, sizeof(no_he)) && no_he == 0)) {
+        ic_he->ic_flags &= ~IEEE80211_F_HEON;
+        ic_he->ic_userflags &= ~IEEE80211_F_HEON;
+    } else if (ic_he->ic_caps & IEEE80211_C_HE) {
+        ic_he->ic_flags |= IEEE80211_F_HEON;
+        ic_he->ic_userflags |= IEEE80211_F_HEON;
+    }
+#endif
     fWatchdogWorkLoop = IOWorkLoop::workLoop();
     if (fWatchdogWorkLoop == NULL) {
         XYLog("init watchdog workloop fail\n");
