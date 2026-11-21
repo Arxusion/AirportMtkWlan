@@ -174,10 +174,21 @@ IOReturn CAirportMtkBtPatcher::newHostDeviceRequest(void *that, IOService *provi
     
     if (data == nullptr) {
         if (descriptor != nullptr) {
-            IOByteCount descLen = descriptor->getLength();
-            if (descLen > 0) {
-                descriptor->readBytes(0, hciBuf, min(descLen, (IOByteCount)MAX_HCI_BUF_LEN));
-                hdrLen = (uint32_t)min(descLen, (IOByteCount)MAX_HCI_BUF_LEN);
+            // Newer kernels require DMA preparation before reading the descriptor.
+            bool needsPrepare = getKernelVersion() >= KernelVersion::Sequoia;
+            IOReturn status = needsPrepare
+                ? descriptor->prepare(kIODirectionOut)
+                : kIOReturnSuccess;
+
+            if (status == kIOReturnSuccess) {
+                IOByteCount descLen = descriptor->getLength();
+                if (descLen > 0) {
+                    hdrLen = (uint32_t)descriptor->readBytes(
+                        0, hciBuf, min(descLen, (IOByteCount)MAX_HCI_BUF_LEN));
+                }
+
+                if (needsPrepare)
+                    descriptor->complete(kIODirectionOut);
             }
         }
         hdr = (HciCommandHdr *)hciBuf;
