@@ -191,7 +191,7 @@ mwx_rx_drop_count(const char *reason)
  * Keep payload + TXD within one 4K cluster: a 4096-byte chunk needs a 16K
  * jumbo cluster, which is often unavailable during early boot (ENOMEM).
  */
-#define MWX_FW_CHUNK_SIZE	(4096 - sizeof(struct mwx_mcu_txd))
+#define MWX_FW_CHUNK_SIZE	(2048 - sizeof(struct mwx_mcu_txd))
 
 #define MWX_LOG(x...) printf("SimpleMtkWlan-mwx: " x)
 #define MWX_DEV_LOG(sc, fmt, args...) \
@@ -589,6 +589,7 @@ struct mwx_softc {
 		struct mbuf	*mcu_m;
 		uint32_t	 mcu_cmd;
 		uint32_t	 mcu_int;
+		volatile int	 mcu_done;
 	}			sc_mcu_wait[16];
 	uint8_t			sc_scan_seq_num;
 	uint64_t		sc_last_bgscan_ns;
@@ -4516,6 +4517,7 @@ mwx_mcu_send_mbuf(struct mwx_softc *sc, uint32_t cmd, struct mbuf *m, int *seqp)
 	if (seqp != NULL) {
 		memset(&sc->sc_mcu_wait[seq], 0, sizeof(sc->sc_mcu_wait[0]));
 		sc->sc_mcu_wait[seq].mcu_cmd = cmd;
+		sc->sc_mcu_wait[seq].mcu_done = 0;
 		*seqp = seq;
 	}
 	q = &sc->sc_txmcuq;
@@ -4535,15 +4537,23 @@ enqueue:
 #endif
 	}
 
-	s = splnet();
-	while (1) {
-		rv = mwx_dma_tx_enqueue(sc, q, m);
-		if (rv != EBUSY)
-			break;
-		q->mq_wakeme = 1;
-		tsleep_nsec(q, 0, "mwxq", MSEC_TO_NSEC(100));
+	{
+		int attempts = 0;
+		while (1) {
+			s = splnet();
+			rv = mwx_dma_tx_enqueue(sc, q, m);
+			splx(s);
+			if (rv != EBUSY)
+				break;
+			if (++attempts > 50000) {
+				MWX_LOG("mcu send msg queue busy timeout cmd=0x%08x\n", cmd);
+				break;
+			}
+			q->mq_wakeme = 1;
+			mwx_dma_tx_cleanup(sc, q);
+			IODelay(200);
+		}
 	}
-	splx(s);
 	if (rv != 0) {
 		if (seqp != NULL)
 			memset(&sc->sc_mcu_wait[seq], 0,
@@ -4704,6 +4714,7 @@ mwx_mcu_rx_event(struct mwx_softc *sc, struct mbuf *m)
 
 		sc->sc_mcu_wait[rxd_seq].mcu_int = mcu_int;
 		sc->sc_mcu_wait[rxd_seq].mcu_m = m;
+		sc->sc_mcu_wait[rxd_seq].mcu_done = 1;
 		wakeup(&sc->sc_mcu_wait[rxd_seq]);
 		return;
 	}
@@ -4715,15 +4726,18 @@ int
 mwx_mcu_wait_resp_int(struct mwx_softc *sc, uint32_t cmd, int seq,
     uint32_t *val)
 {
-	int rv;
+	int remaining_ms = 3000;
 
 	KASSERT(seq < nitems(sc->sc_mcu_wait));
 
-	rv = tsleep_nsec(&sc->sc_mcu_wait[seq], 0, "mwxwait", SEC_TO_NSEC(3));
-	if (rv != 0) {
-		printf("%s: command %x timeout\n", DEVNAME(sc), cmd);
+	while (!sc->sc_mcu_wait[seq].mcu_done && remaining_ms > 0) {
+		tsleep_nsec(&sc->sc_mcu_wait[seq], 0, "mwxwait", MSEC_TO_NSEC(10));
+		remaining_ms -= 10;
+	}
+	if (!sc->sc_mcu_wait[seq].mcu_done) {
+		printf("%s: command %x timeout (seq=%d)\n", DEVNAME(sc), cmd, seq);
 		mwx_reset(sc);
-		return rv;
+		return ETIMEDOUT;
 	}
 
 	if (sc->sc_mcu_wait[seq].mcu_m != NULL) {
@@ -4739,15 +4753,18 @@ int
 mwx_mcu_wait_resp_msg(struct mwx_softc *sc, uint32_t cmd, int seq,
     struct mbuf **mp)
 {
-	int rv;
+	int remaining_ms = 3000;
 
 	KASSERT(seq < nitems(sc->sc_mcu_wait));
 
-	rv = tsleep_nsec(&sc->sc_mcu_wait[seq], 0, "mwxwait", SEC_TO_NSEC(3));
-	if (rv != 0) {
-		printf("%s: command %x timeout\n", DEVNAME(sc), cmd);
+	while (!sc->sc_mcu_wait[seq].mcu_done && remaining_ms > 0) {
+		tsleep_nsec(&sc->sc_mcu_wait[seq], 0, "mwxwait", MSEC_TO_NSEC(10));
+		remaining_ms -= 10;
+	}
+	if (!sc->sc_mcu_wait[seq].mcu_done) {
+		printf("%s: command %x timeout (seq=%d)\n", DEVNAME(sc), cmd, seq);
 		mwx_reset(sc);
-		return rv;
+		return ETIMEDOUT;
 	}
 	if (sc->sc_mcu_wait[seq].mcu_m == NULL) {
 		printf("%s: command response missing\n", DEVNAME(sc));
@@ -5290,7 +5307,7 @@ mwx_load_firmware(struct mwx_softc *sc)
 	MWX_DEV_LOG(sc, "firmware load start hwtype=%s\n",
 	    sc->sc_hwtype == MWX_HW_MT7922 ? "MT7922" : "MT7921");
 	reg = mwx_read(sc, MT_CONN_ON_MISC) & MT_TOP_MISC2_FW_N9_RDY;
-	if (reg != 0) {
+	if (reg == MT_TOP_MISC2_FW_N9_RDY) {
 		MWX_DEV_LOG(sc, "firmware already downloaded status=0x%08x\n", reg);
 		return 0;
 	}

@@ -1,6 +1,6 @@
 //
 //  main.swift
-//  AirportMtkWlan Installer v2.2.1
+//  AirportMtkWlan Installer v2.2.2
 //
 //  Copyright © 2026 Aswini Soni (Arxusion). All rights reserved.
 //
@@ -22,7 +22,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         )
         window.center()
         window.minSize = NSSize(width: 880, height: 600)
-        window.title = "AirportMtkWlan Deployment Suite v2.2.1"
+        window.title = "AirportMtkWlan Deployment Suite v2.2.2"
         window.titleVisibility = .visible
         window.titlebarAppearsTransparent = false
         window.backgroundColor = NSColor.white

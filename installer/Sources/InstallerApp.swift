@@ -1,6 +1,6 @@
 //
 //  InstallerApp.swift
-//  AirportMtkWlan Unified Deployment Suite v2.2.1
+//  AirportMtkWlan Unified Deployment Suite v2.2.2
 //
 //  Copyright © 2026 Aswini Soni (@Arxusion). All rights reserved.
 //
@@ -11,7 +11,7 @@ import AppKit
 // MARK: - Navigation Tabs
 enum NavigationTab: String, CaseIterable, Identifiable {
     case overview = "Overview"
-    case deploy = "Deploy Suite"
+    case deploy = "Deploy to EFI (Unified Suite)"
     case bootDiagnostics = "Boot Diagnostics"
     case console = "Console Stream"
     case updates = "Updates"
@@ -165,7 +165,7 @@ struct ContentView: View {
                             .font(.system(size: 16, weight: .bold))
                             .foregroundColor(ThemeColors.textPrimary)
 
-                        Text("v2.2.1")
+                        Text("v2.2.2")
                             .font(.system(size: 10, weight: .bold))
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
@@ -291,7 +291,7 @@ struct ContentView: View {
                 specRow(label: "WI-FI CHIPSET", value: "MediaTek MT7921 / MT7922 PCIe 802.11ax")
                 specRow(label: "BLUETOOTH", value: "MediaTek USB Bluetooth (0489:e0e2 / SRS_7922)")
                 specRow(label: "TARGET OPENCORE", value: selectedDestination?.displayName ?? "Auto-detecting EFI...")
-                specRow(label: "DRIVER SUITE", value: "AirportMtkWlan v2.2.1 + AirportMtkBt Companion")
+                specRow(label: "DRIVER SUITE", value: "AirportMtkWlan v2.2.2 + AirportMtkBt Companion")
                 specRow(
                     label: "KERNEL STATUS",
                     value: (driverStatus?.isLoaded ?? false) ? "RUNNING (MediaTek MT7921/MT7922 802.11ax, AWDL AirDrop Active)" : "Ready to Install / Not Loaded into Active Kernel",
@@ -305,7 +305,7 @@ struct ContentView: View {
                     Image(systemName: "checkmark.circle.fill")
                         .foregroundColor(ThemeColors.greenText)
                         .font(.system(size: 16))
-                    Text("Unified driver bundle v2.2.1 ready for deployment. Supports Wi-Fi 6, AWDL, and Bluetooth.")
+                    Text("Unified driver bundle v2.2.2 ready for deployment. Supports Wi-Fi 6, AWDL, and Bluetooth.")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundColor(ThemeColors.textPrimary)
                 }
@@ -316,7 +316,7 @@ struct ContentView: View {
                 }
                 .buttonStyle(SecondaryOutlineButtonStyle())
 
-                Button("Deploy Suite") {
+                Button("Deploy Unified Suite to EFI") {
                     selectedTab = .deploy
                 }
                 .buttonStyle(PrimaryBlackButtonStyle())
@@ -661,7 +661,7 @@ struct ContentView: View {
                             .font(.system(size: 10, weight: .bold))
                             .tracking(1.2)
                             .foregroundColor(ThemeColors.sectionHeader)
-                        Text("AirportMtkWlan v2.2.1 (Best of the Best Milestone)")
+                        Text("AirportMtkWlan v2.2.2 (Stability & High-Throughput Release)")
                             .font(.system(size: 15, weight: .semibold))
                             .foregroundColor(ThemeColors.textPrimary)
                     }
@@ -1019,7 +1019,7 @@ struct ContentView: View {
 
                     self.latestReleaseURL = releaseURL
                     self.latestTagFound = tagName
-                    let currentTag = "v2.2.1"
+                    let currentTag = "v2.2.2"
                     if tagName != currentTag && tagName > currentTag {
                         self.updateAvailable = true
                         self.updateStatusMessage = "New update available: \(tagName)! (Installed: \(currentTag))"
@@ -1028,7 +1028,7 @@ struct ContentView: View {
                         self.updateStatusMessage = "You're running the latest version (\(currentTag))!"
                     }
                 } else {
-                    self.updateStatusMessage = "Checked GitHub. Running latest v2.2.1."
+                    self.updateStatusMessage = "Checked GitHub. Running latest v2.2.2."
                 }
             }
         }.resume()

@@ -86,6 +86,7 @@ KMOD
 		-I "$sdkhdr" -c "$obj/kmod_info.c" -o "$obj/kmod_info.o"
 	objects+=("$obj/kmod_info.o")
 	"$ld64" -arch x86_64 -kext -static -macos_version_min 10.12 -undefined dynamic_lookup \
+		-exported_symbol _kmod_info -exported_symbol __realmain -exported_symbol __antimain \
 		-o "$bundle/Contents/MacOS/$name" "${objects[@]}" "$libkmod"
 	python3 -I - "$here/$plist" "$bundle/Contents/Info.plist" "$version" "$name" "$bundleid" <<'PY'
 import sys

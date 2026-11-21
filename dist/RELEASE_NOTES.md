@@ -1,3 +1,36 @@
+## AirportMtkWlan v2.2.2
+
+### Overview
+**AirportMtkWlan v2.2.2** is a critical stability, compatibility, and high-throughput maintenance release for MediaTek MT7921 & MT7922 Wi-Fi & Bluetooth on macOS Tahoe (macOS 26) and macOS Sequoia (macOS 15).
+
+This update resolves early-boot panics, silent MCU command deadlocks on warm boot, USB memory descriptor wiring panics on newer kernels, and unifies version parity across the driver suite, EFI deployments, and the graphical installer.
+
+---
+
+### What's New & Fixed in v2.2.2
+
+1. **Bluetooth USB DMA Memory Descriptor Panic Fix (`AirportMtkBtPatcher`)**:
+   - Resolved kernel panic on macOS Sequoia and Tahoe (`IOGMD: not wired for the IODMACommand @IOMemoryDescriptor.cpp:3537`) caused by un-wired DMA memory descriptor access during HCI host device requests (PR #18, fixes Issues #14, #15, #16).
+   - Added automated descriptor preparation (`prepare(kIODirectionOut)`) and completion handling on newer kernels.
+
+2. **Early Boot & MCU Synchronization Reliability (`hal_mwx`)**:
+   - **Eliminated early boot deadlocks**: In `mwx_mcu_send_mbuf`, replaced sleep on unserviced command gate during driver attach with descriptor cleanup (`mwx_dma_tx_cleanup`) and calibrated micro-delays (fixes Issue #17).
+   - **Resolved MCU response timeout race**: Replaced lost wakeup timeouts with authoritative `mcu_done` signaling and 10ms sliced polling in `mwx_mcu_wait_resp_int` / `mwx_mcu_wait_resp_msg`.
+   - **Firmware Cluster Pressure Protection**: Reduced `MWX_FW_CHUNK_SIZE` to 2 KB cluster payload (`2048 - sizeof(struct mwx_mcu_txd)`), preventing early-boot mbuf exhaustion.
+   - **Warm Reboot Firmware Download Fix**: Fixed `MT_CONN_ON_MISC` state evaluation so that unfinished loading states (`0x1`) do not falsely bypass firmware downloading.
+
+3. **Skywalk Offload Capabilities & Safe AWDL Control (`AirportItlwmSkywalkInterface`)**:
+   - Added native implementations for `getHT_CAPABILITY`, `getVHT_CAPABILITY`, `getHE_CAPABILITY`, and `getSIB_COEX_STATUS`.
+   - Enforced safe virtual interface creation guarding (`-mtkawdl` / `-mtkrsdb`).
+   - Enabled Wi-Fi 6 (802.11ax / HE) negotiation by default post hardware attach.
+
+4. **Installer Usability & Version Synchronization**:
+   - Updated tab navigation to clearly show **"Deploy to EFI (Unified Suite)"** and clarified quick-action buttons to address user installation navigation issues (Issue #19).
+   - Aligned versions across all components: `AirportMtkWlan.kext` (v2.2.2), `SimpleMtkWlan.kext` (v2.2.2), `AirportMtkBtFw.kext` (v2.2.2), `AirportMtkBtPatcher.kext` (v2.2.2), and `AirportMtkWlan Installer.app` (v2.2.2).
+   - Added linker symbol exports (`_kmod_info`, `__realmain`, `__antimain`) for Xcode and Command Line Tools builds.
+
+---
+
 ## AirportMtkWlan v2.2.1
 
 ### Overview
