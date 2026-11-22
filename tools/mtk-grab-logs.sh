@@ -648,21 +648,165 @@ if [ "$MODE" = "full" ] || [ "$LAST_3_BOOTS" -eq 1 ] || { [ -n "$FIXTURE_DIR" ] 
 
     PRED_MULTI_BOOT='(process == "kernel" AND (eventMessage CONTAINS[c] "mtk" OR eventMessage CONTAINS[c] "mwx" OR eventMessage CONTAINS[c] "AirportMtk" OR eventMessage CONTAINS[c] "AirportMtkBt" OR eventMessage CONTAINS[c] "SimpleMtk" OR eventMessage CONTAINS[c] "AirportItlwm" OR eventMessage CONTAINS[c] "itlwm" OR eventMessage CONTAINS[c] "WCL" OR eventMessage CONTAINS[c] "panic" OR eventMessage CONTAINS[c] "shutdown cause" OR eventMessage CONTAINS[c] "outside of kext range" OR eventMessage CONTAINS[c] "Debugger" OR eventMessage CONTAINS[c] "backtrace" OR sender CONTAINS[c] "Mtk" OR sender CONTAINS[c] "AirportMtkBt")) OR (process == "kernelmanagerd" AND (eventMessage CONTAINS[c] "mtk" OR eventMessage CONTAINS[c] "airport" OR eventMessage CONTAINS[c] "fail" OR eventMessage CONTAINS[c] "error" OR eventMessage CONTAINS[c] "load" OR eventMessage CONTAINS[c] "IOVersatile" OR eventMessage CONTAINS[c] "dependencies"))'
 
-    # Boot 1 (Previous Boot)
+    # Detect exact historical boot sessions across reboots
+    detect_boot_epochs() {
+        if [ -n "$FIXTURE_DIR" ]; then
+            return
+        fi
+        if command -v /usr/bin/python3 >/dev/null 2>&1; then
+            /usr/bin/python3 -c '
+import subprocess, os, re, datetime, glob
+
+now_ts = int(datetime.datetime.now().timestamp())
+boots = []
+
+# 1. sysctl kern.boottime (Current Boot)
+try:
+    out = subprocess.check_output(["sysctl", "-n", "kern.boottime"]).decode()
+    m = re.search(r"sec = (\d+)", out)
+    if m:
+        b0 = int(m.group(1))
+        if b0 <= now_ts + 60:
+            boots.append(b0)
+except Exception:
+    pass
+
+# 2. /var/log/fsck_apfs.log (Universal APFS boot mount records)
+if os.path.exists("/var/log/fsck_apfs.log"):
+    try:
+        with open("/var/log/fsck_apfs.log") as f:
+            for line in f:
+                m = re.search(r"fsck_apfs started at (.* \d{4})", line)
+                if m:
+                    try:
+                        dt = datetime.datetime.strptime(m.group(1).strip(), "%a %b %d %H:%M:%S %Y")
+                        ts = int(dt.timestamp())
+                        if ts <= now_ts + 60:
+                            boots.append(ts)
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+# 3. OpenCore log files across /Volumes
+for p in glob.glob("/Volumes/*/opencore-*.txt") + glob.glob("/Volumes/opencore-*.txt"):
+    fn = os.path.basename(p)
+    m = re.search(r"opencore-(\d{4})-(\d{2})-(\d{2})-(\d{2})(\d{2})(\d{2})\.txt", fn)
+    if m:
+        try:
+            dt = datetime.datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)),
+                                   int(m.group(4)), int(m.group(5)), int(m.group(6)))
+            ts = int(dt.timestamp())
+            if ts <= now_ts + 60:
+                boots.append(ts)
+        except Exception:
+            pass
+
+boots = sorted(list(set(boots)))
+distinct_starts = []
+for ts in reversed(boots):
+    if not distinct_starts or abs(distinct_starts[-1] - ts) > 900:
+        distinct_starts.append(ts)
+
+for i in range(min(3, len(distinct_starts))):
+    s_ts = distinct_starts[i]
+    e_ts = now_ts if i == 0 else distinct_starts[i - 1] - 5
+    s_dt = datetime.datetime.fromtimestamp(s_ts)
+    e_dt = datetime.datetime.fromtimestamp(e_ts)
+    s_str = s_dt.strftime("%Y-%m-%d %H:%M:%S")
+    e_str = e_dt.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"{i}|{s_ts}|{e_ts}|{s_str}|{e_str}")
+' 2>/dev/null || true
+        fi
+    }
+
+    # Match OpenCore log within window
+    find_oc_for_epoch() {
+        local target_ts=$1
+        local best_f="" best_d=999999
+        for f in /Volumes/*/opencore-*.txt /Volumes/opencore-*.txt; do
+            [ -f "$f" ] || continue
+            fn=$(basename "$f")
+            if [[ "$fn" =~ opencore-([0-9]{4})-([0-9]{2})-([0-9]{2})-([0-9]{2})([0-9]{2})([0-9]{2})\.txt ]]; then
+                f_ts=$(date -j -f "%Y-%m-%d %H%M%S" "${BASH_REMATCH[1]}-${BASH_REMATCH[2]}-${BASH_REMATCH[3]} ${BASH_REMATCH[4]}${BASH_REMATCH[5]}${BASH_REMATCH[6]}" "+%s" 2>/dev/null || echo 0)
+                diff=$(( target_ts > f_ts ? target_ts - f_ts : f_ts - target_ts ))
+                if [ "$diff" -lt "$best_d" ] && [ "$diff" -lt 1800 ]; then
+                    best_d=$diff
+                    best_f="$f"
+                fi
+            fi
+        done
+        printf '%s' "$best_f"
+    }
+
+    # Match panics or shutdown stalls within window
+    find_panics_for_window() {
+        local s_ts=$1 e_ts=$2 out_f=$3
+        for d in "/Library/Logs/DiagnosticReports" "/Library/Logs/DiagnosticReports/Retired" "$TARGET_HOME/Library/Logs/DiagnosticReports"; do
+            [ -d "$d" ] || continue
+            for pf in "$d"/*panic* "$d"/Kernel* "$d"/shutdown_stall*; do
+                [ -f "$pf" ] || continue
+                m_ts=$(stat -f "%m" "$pf" 2>/dev/null || echo 0)
+                if [ "$m_ts" -ge "$s_ts" ] && [ "$m_ts" -le "$((e_ts + 120))" ]; then
+                    echo "=== $(basename "$pf") ===" >> "$out_f"
+                    head -n 250 "$pf" 2>/dev/null | squash_repeats >> "$out_f"
+                    echo >> "$out_f"
+                fi
+            done
+        done
+    }
+
+    BOOT_EPOCHS=$(detect_boot_epochs)
+    
+    # Defaults in case epochs detection is not available
+    B0_START=$BOOT_SEC; B0_END=$(date +%s); B0_START_FMT=$(date -r "$BOOT_SEC" '+%Y-%m-%d %H:%M:%S'); B0_END_FMT=$(date '+%Y-%m-%d %H:%M:%S')
+    B1_START=$((BOOT_SEC - 7200)); B1_END=$BOOT_SEC; B1_START_FMT=$(date -r "$B1_START" '+%Y-%m-%d %H:%M:%S'); B1_END_FMT=$(date -r "$B1_END" '+%Y-%m-%d %H:%M:%S')
+    B2_START=$((BOOT_SEC - 21600)); B2_END=$((BOOT_SEC - 7200)); B2_START_FMT=$(date -r "$B2_START" '+%Y-%m-%d %H:%M:%S'); B2_END_FMT=$(date -r "$B2_END" '+%Y-%m-%d %H:%M:%S')
+
+    while IFS='|' read -r b_idx b_sts b_ets b_sstr b_estr; do
+        case "$b_idx" in
+            0) B0_START=$b_sts; B0_END=$b_ets; B0_START_FMT=$b_sstr; B0_END_FMT=$b_estr ;;
+            1) B1_START=$b_sts; B1_END=$b_ets; B1_START_FMT=$b_sstr; B1_END_FMT=$b_estr ;;
+            2) B2_START=$b_sts; B2_END=$b_ets; B2_START_FMT=$b_sstr; B2_END_FMT=$b_estr ;;
+        esac
+    done <<< "$BOOT_EPOCHS"
+
+    # --- Boot 0 (Current Boot) ---
+    {
+        echo "=== Boot 0 (Current Session) Summary ==="
+        echo "Boot Time:      $B0_START_FMT (epoch $B0_START)"
+        echo "Snapshot Time:  $B0_END_FMT"
+        echo "Uptime:         $(( B0_END - B0_START )) seconds"
+        echo "Kernel Version: $(uname -v 2>/dev/null || echo '?')"
+        echo "macOS Version:  $(sw_vers -productVersion 2>/dev/null || echo '?') (Build $(sw_vers -buildVersion 2>/dev/null || echo '?'))"
+    } > "$BOOT_LOGS_DIR/boot-0-current/00-boot-summary.txt"
+    find_panics_for_window "$B0_START" "$B0_END" "$BOOT_LOGS_DIR/boot-0-current/02-crashes-panics.txt"
+    b0_oc=$(find_oc_for_epoch "$B0_START")
+    if [ -n "$b0_oc" ] && [ -r "$b0_oc" ]; then
+        head -c 262144 "$b0_oc" > "$BOOT_LOGS_DIR/boot-0-current/03-opencore-boot.txt"
+        redact_file_inplace "$BOOT_LOGS_DIR/boot-0-current/03-opencore-boot.txt"
+    fi
+
+    # --- Boot 1 (Previous Boot) ---
+    {
+        echo "=== Boot 1 (Previous Session) Summary ==="
+        echo "Boot Time:     $B1_START_FMT (epoch $B1_START)"
+        echo "Session End:   $B1_END_FMT"
+        echo "Duration:      $(( B1_END - B1_START )) seconds"
+    } > "$BOOT_LOGS_DIR/boot-1-previous/00-boot-summary.txt"
+
     {
         if [ -n "$FIXTURE_DIR" ] && [ -f "$FIXTURE_DIR/prev_boot_log.txt" ]; then
             echo "=== Previous Boot Kernel Log (fixture, tail-preserved) ==="
             cat "$FIXTURE_DIR/prev_boot_log.txt" | squash_repeats | headtail 800 2200
-        elif [ -z "$FIXTURE_DIR" ] && [ -n "$BOOT_SEC" ]; then
-            echo "=== Previous Boot Focused Driver, Panic & Shutdown Cause (last 2h before $(date -r "$BOOT_SEC" '+%Y-%m-%d %H:%M:%S')) ==="
-            lshow 20 --start "$(date -r $((BOOT_SEC - 7200)) '+%Y-%m-%d %H:%M:%S')" \
-                     --end "$(date -r "$BOOT_SEC" '+%Y-%m-%d %H:%M:%S')" \
+        elif [ -z "$FIXTURE_DIR" ] && [ -n "$B1_START" ]; then
+            echo "=== Previous Boot Focused Driver, Panic & Shutdown Cause ($B1_START_FMT to $B1_END_FMT) ==="
+            lshow 20 --start "$B1_START_FMT" --end "$B1_END_FMT" \
                      --style compact --predicate "$PRED_MULTI_BOOT" 2>&1 \
                 | squash_repeats | headtail 800 1500 || true
             echo
-            echo "=== Previous Boot Wi-Fi Stack Kernel Log Tail (last 4h before $(date -r "$BOOT_SEC" '+%Y-%m-%d %H:%M:%S')) ==="
-            lshow 25 --start "$(date -r $((BOOT_SEC - 14400)) '+%Y-%m-%d %H:%M:%S')" \
-                     --end "$(date -r "$BOOT_SEC" '+%Y-%m-%d %H:%M:%S')" \
+            echo "=== Previous Boot Wi-Fi Stack Kernel Log Tail ($B1_START_FMT to $B1_END_FMT) ==="
+            lshow 25 --start "$B1_START_FMT" --end "$B1_END_FMT" \
                      --style compact --predicate 'process == "kernel" AND (eventMessage CONTAINS[c] "mtk" OR eventMessage CONTAINS[c] "mwx" OR eventMessage CONTAINS[c] "airport" OR eventMessage CONTAINS[c] "itlwm" OR eventMessage CONTAINS[c] "80211" OR eventMessage CONTAINS[c] "skywalk" OR eventMessage CONTAINS[c] "panic" OR eventMessage CONTAINS[c] "shutdown cause" OR eventMessage CONTAINS[c] "outside of kext range")' 2>&1 \
                 | squash_repeats | headtail 800 2200 || true
         else
@@ -672,15 +816,28 @@ if [ "$MODE" = "full" ] || [ "$LAST_3_BOOTS" -eq 1 ] || { [ -n "$FIXTURE_DIR" ] 
     redact_file_inplace "$ROOT_DIR/07-previous-boot-kernel-log.txt"
     cp "$ROOT_DIR/07-previous-boot-kernel-log.txt" "$BOOT_LOGS_DIR/boot-1-previous/01-kernel-driver-tail.txt"
 
-    # Boot 2 (Prior Boot)
+    find_panics_for_window "$B1_START" "$B1_END" "$BOOT_LOGS_DIR/boot-1-previous/02-crashes-panics.txt"
+    b1_oc=$(find_oc_for_epoch "$B1_START")
+    if [ -n "$b1_oc" ] && [ -r "$b1_oc" ]; then
+        head -c 262144 "$b1_oc" > "$BOOT_LOGS_DIR/boot-1-previous/03-opencore-boot.txt"
+        redact_file_inplace "$BOOT_LOGS_DIR/boot-1-previous/03-opencore-boot.txt"
+    fi
+
+    # --- Boot 2 (Prior Boot) ---
+    {
+        echo "=== Boot 2 (Prior Session, 2 Boots Ago) Summary ==="
+        echo "Boot Time:     $B2_START_FMT (epoch $B2_START)"
+        echo "Session End:   $B2_END_FMT"
+        echo "Duration:      $(( B2_END - B2_START )) seconds"
+    } > "$BOOT_LOGS_DIR/boot-2-prior/00-boot-summary.txt"
+
     {
         if [ -n "$FIXTURE_DIR" ] && [ -f "$FIXTURE_DIR/prev_boot_log.txt" ]; then
             echo "=== Prior Boot Kernel Log (fixture mock) ==="
             head -n 50 "$FIXTURE_DIR/prev_boot_log.txt" | squash_repeats
-        elif [ -z "$FIXTURE_DIR" ] && [ -n "$BOOT_SEC" ]; then
-            echo "=== Prior Boot (2 boots ago) Focused Driver & Kernel Log (6h to 2h before $(date -r "$BOOT_SEC" '+%Y-%m-%d %H:%M:%S')) ==="
-            lshow 20 --start "$(date -r $((BOOT_SEC - 21600)) '+%Y-%m-%d %H:%M:%S')" \
-                     --end "$(date -r $((BOOT_SEC - 7200)) '+%Y-%m-%d %H:%M:%S')" \
+        elif [ -z "$FIXTURE_DIR" ] && [ -n "$B2_START" ]; then
+            echo "=== Prior Boot (2 boots ago) Focused Driver & Kernel Log ($B2_START_FMT to $B2_END_FMT) ==="
+            lshow 20 --start "$B2_START_FMT" --end "$B2_END_FMT" \
                      --style compact --predicate "$PRED_MULTI_BOOT" 2>&1 \
                 | squash_repeats | headtail 800 1500 || true
         else
@@ -689,6 +846,13 @@ if [ "$MODE" = "full" ] || [ "$LAST_3_BOOTS" -eq 1 ] || { [ -n "$FIXTURE_DIR" ] 
     } > "$ROOT_DIR/07b-prior-boot-kernel-log.txt" 2>&1
     redact_file_inplace "$ROOT_DIR/07b-prior-boot-kernel-log.txt"
     cp "$ROOT_DIR/07b-prior-boot-kernel-log.txt" "$BOOT_LOGS_DIR/boot-2-prior/01-kernel-driver-tail.txt"
+
+    find_panics_for_window "$B2_START" "$B2_END" "$BOOT_LOGS_DIR/boot-2-prior/02-crashes-panics.txt"
+    b2_oc=$(find_oc_for_epoch "$B2_START")
+    if [ -n "$b2_oc" ] && [ -r "$b2_oc" ]; then
+        head -c 262144 "$b2_oc" > "$BOOT_LOGS_DIR/boot-2-prior/03-opencore-boot.txt"
+        redact_file_inplace "$BOOT_LOGS_DIR/boot-2-prior/03-opencore-boot.txt"
+    fi
 fi
 
 # --- Section 8: OpenCore EFI Config & Logs ---
