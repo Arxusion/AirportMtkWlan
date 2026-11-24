@@ -1,3 +1,29 @@
+## AirportMtkWlan v2.2.3
+
+### Overview
+**AirportMtkWlan v2.2.3** is a critical bugfix and stability update addressing kernel panics on boot, concurrent descriptor double-frees, warm-reboot MCU hangs, and early-boot Bluetooth controller freezes across macOS Tahoe (macOS 26) and macOS Sequoia (macOS 15).
+
+---
+
+### What's New & Fixed in v2.2.3
+
+1. **Kernel Panic Fix: `mwx_dma_tx_cleanup` Concurrency & Mbuf Double Free (Issue #23, Issue #17)**:
+   - **Root Cause**: `mwx_dma_tx_cleanup()` was concurrently entered from both interrupt context (`mwx_intr` -> `mwx_dma_tx_done`) and firmware loader/MCU command threads (`mwx_mcu_send_firmware` / `mwx_mcu_send_msg`). Both paths unmapped and freed the same `md->md_mbuf`, triggering `panic: assertion failed: MEXT_REF(m) != 0 in uipc_mbuf.c` on RZ616/MT7922 and MT7921 systems.
+   - **Fix**: Added atomic lock `mq_cleanup_busy` via `OSCompareAndSwap` ensuring mutual exclusion on TX queue cleanup. Atomically detached `md->md_mbuf = NULL` before DMA unmap and `m_freem(m)`.
+
+2. **Warm Reboot & Deep Sleep LPCTL Recovery (Issue #17 Bug 5, Issue #21)**:
+   - **Root Cause**: When warm rebooting from Windows, Linux, or previous macOS sessions, `PCIE_LPCR_HOST_OWN_SYNC` was already 0 (host owned), causing `mwx_ensure_drv_own()` to short-circuit while on-chip firmware remained in deep sleep, causing subsequent WFSYS reset and firmware commands to timeout with EIO.
+   - **Fix**: On driver `attach()`, forced full firmware power control cycle (`mwx_mcu_fw_pmctrl()` -> `mwx_mcu_drv_pmctrl()`) to properly wake resident firmware on warm boots.
+
+3. **Bluetooth Early Boot Hang on macOS Tahoe (`AirportMtkBtPatcher`, Issue #14)**:
+   - **Root Cause**: Memory descriptor completion (`descriptor->complete(kIODirectionOut)`) was erroneously called *before* passing the descriptor to the underlying USB device request (`oldHostDeviceRequest`), resulting in an unmapped descriptor and deadlocking the host controller during early boot on Tahoe.
+   - **Fix**: Kept descriptor mapping alive throughout the entire USB transaction lifecycle and added a bounded 2000ms timeout on random address requests.
+
+4. **AirDrop / AWDL Compatibility Notice (Issue #22)**:
+   - AirDrop virtual interface creation is guarded behind the `-mtkawdl` boot-arg. With the concurrency and warm reboot panics resolved in v2.2.3, AWDL can now be enabled safely without boot freezes.
+
+---
+
 ## AirportMtkWlan v2.2.2
 
 ### Overview

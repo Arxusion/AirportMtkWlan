@@ -171,6 +171,7 @@ IOReturn CAirportMtkBtPatcher::newHostDeviceRequest(void *that, IOService *provi
     HciCommandHdr *hdr = nullptr;
     uint32_t hdrLen = 0;
     char hciBuf[MAX_HCI_BUF_LEN] = {0};
+    bool didPrepare = false;
     
     if (data == nullptr) {
         if (descriptor != nullptr) {
@@ -181,14 +182,13 @@ IOReturn CAirportMtkBtPatcher::newHostDeviceRequest(void *that, IOService *provi
                 : kIOReturnSuccess;
 
             if (status == kIOReturnSuccess) {
+                if (needsPrepare)
+                    didPrepare = true;
                 IOByteCount descLen = descriptor->getLength();
                 if (descLen > 0) {
                     hdrLen = (uint32_t)descriptor->readBytes(
                         0, hciBuf, min(descLen, (IOByteCount)MAX_HCI_BUF_LEN));
                 }
-
-                if (needsPrepare)
-                    descriptor->complete(kIODirectionOut);
             }
         }
         hdr = (HciCommandHdr *)hciBuf;
@@ -204,7 +204,8 @@ IOReturn CAirportMtkBtPatcher::newHostDeviceRequest(void *that, IOService *provi
                     writeHCIDescriptor = IOBufferMemoryDescriptor::withBytes(randomAddressHci, 9, kIODirectionOut);
                 if (writeHCIDescriptor != nullptr) {
                     writeHCIDescriptor->prepare(kIODirectionOut);
-                    IOReturn ret = FunctionCast(newHostDeviceRequest, callbackMtkBtPatcher->oldHostDeviceRequest)(that, provider, randomAddressRequest, nullptr, writeHCIDescriptor, randLen, nullptr, timeout);
+                    unsigned int randTimeout = timeout > 0 ? min(timeout, 2000U) : 2000U;
+                    IOReturn ret = FunctionCast(newHostDeviceRequest, callbackMtkBtPatcher->oldHostDeviceRequest)(that, provider, randomAddressRequest, nullptr, writeHCIDescriptor, randLen, nullptr, randTimeout);
                     writeHCIDescriptor->complete(kIODirectionOut);
                     const char *randAddressDump = _hexDumpHCIData((uint8_t *)randomAddressHci, 9);
                     if (randAddressDump) {
@@ -235,5 +236,8 @@ IOReturn CAirportMtkBtPatcher::newHostDeviceRequest(void *that, IOService *provi
         }
 #endif
     }
-    return FunctionCast(newHostDeviceRequest, callbackMtkBtPatcher->oldHostDeviceRequest)(that, provider, request, data, descriptor, length, completion, timeout);
+    IOReturn res = FunctionCast(newHostDeviceRequest, callbackMtkBtPatcher->oldHostDeviceRequest)(that, provider, request, data, descriptor, length, completion, timeout);
+    if (didPrepare && descriptor != nullptr)
+        descriptor->complete(kIODirectionOut);
+    return res;
 }

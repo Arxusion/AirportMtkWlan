@@ -2,7 +2,7 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-version="${MODULE_VERSION:-2.2.2}"
+version="${MODULE_VERSION:-2.2.3}"
 kernelsdk="${MACKERNELSDK:-$here/MacKernelSDK}"
 sdkhdr="$kernelsdk/Headers"
 libkmod="$kernelsdk/Library/x86_64/libkmod.a"

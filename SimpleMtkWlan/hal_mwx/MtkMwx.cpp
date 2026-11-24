@@ -466,6 +466,7 @@ struct mwx_queue {
 	bus_dmamap_t			mq_map;
 	bus_dma_segment_t		mq_seg;
 	int				mq_wakeme;
+	volatile int			mq_cleanup_busy;
 };
 
 struct mwx_hw_capa {
@@ -4087,11 +4088,16 @@ mwx_dma_tx_cleanup(struct mwx_softc *sc, struct mwx_queue *q)
 	struct mwx_desc *desc;
 	int idx, last;
 
+	if (!OSCompareAndSwap(0, 1, &q->mq_cleanup_busy))
+		return;
+
 	idx = q->mq_cons;
 	last = mwx_read(sc, q->mq_regbase + MT_DMA_DMA_IDX);
 
-	if (idx == last)
+	if (idx == last) {
+		OSCompareAndSwap(1, 0, &q->mq_cleanup_busy);
 		return;
+	}
 
 	bus_dmamap_sync(sc->sc_dmat, q->mq_map, 0, q->mq_map->dm_mapsize,
 	     BUS_DMASYNC_PREWRITE);
@@ -4101,11 +4107,13 @@ mwx_dma_tx_cleanup(struct mwx_softc *sc, struct mwx_queue *q)
 		desc = &q->mq_desc[idx];
 
 		if (md->md_mbuf != NULL) {
+			struct mbuf *m = md->md_mbuf;
+			md->md_mbuf = NULL;
 			bus_dmamap_sync(sc->sc_dmat, md->md_map, 0,
 			    md->md_map->dm_mapsize, BUS_DMASYNC_POSTWRITE);
 			bus_dmamap_unload(sc->sc_dmat, md->md_map);
-			m_freem(md->md_mbuf);
-			md->md_mbuf = NULL;
+			if (m != NULL)
+				m_freem(m);
 		}
 		if (md->md_txwi != NULL) {
 			static uint32_t txwi_ack_log_count;
@@ -4140,6 +4148,7 @@ mwx_dma_tx_cleanup(struct mwx_softc *sc, struct mwx_queue *q)
 		q->mq_wakeme = 0;
 		wakeup(q);
 	}
+	OSCompareAndSwap(1, 0, &q->mq_cleanup_busy);
 }
 
 void
@@ -5037,8 +5046,20 @@ int
 mwx_ensure_drv_own(struct mwx_softc *sc, const char *ctx)
 {
 	uint32_t lpctl = mwx_read(sc, MT_CONN_ON_LPCTL);
-	if ((lpctl & PCIE_LPCR_HOST_OWN_SYNC) == 0)
-		return 0;
+	if ((lpctl & PCIE_LPCR_HOST_OWN_SYNC) == 0) {
+		/*
+		 * If already host-owned on attach, cycle through firmware own
+		 * and back to driver own to ensure sleep state from warm reboot
+		 * is cleared.
+		 */
+		if (strcmp(ctx, "attach") == 0) {
+			mwx_mcu_fw_pmctrl(sc);
+			if (mwx_mcu_drv_pmctrl(sc) == 0)
+				return 0;
+		} else {
+			return 0;
+		}
+	}
 
 	if (mwx_mcu_drv_pmctrl(sc) == 0)
 		return 0;
