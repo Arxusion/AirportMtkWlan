@@ -466,7 +466,7 @@ struct mwx_queue {
 	bus_dmamap_t			mq_map;
 	bus_dma_segment_t		mq_seg;
 	int				mq_wakeme;
-	volatile int			mq_cleanup_busy;
+	unsigned int			mq_cleanup_state;
 };
 
 struct mwx_hw_capa {
@@ -1667,6 +1667,27 @@ mwx_newstate_task(void *ptr)
 	int s = splnet();
 	int rv = 0;
 
+#ifdef AIRPORT_WCL
+	bool abort_bgscan = ostate == IEEE80211_S_RUN &&
+	    nstate != IEEE80211_S_RUN &&
+	    (ic->ic_flags & IEEE80211_F_BGSCAN);
+	if (abort_bgscan) {
+		/*
+		 * Cancel the firmware scan now, but keep net80211 busy
+		 * while the link still appears associated to WCL.
+		 */
+		if (sc->sc_flags & MWX_FLAG_BGSCAN)
+			rv = mt7921_mcu_hw_scan_cancel(sc);
+		timeout_del(&ic->ic_bgscan_timeout);
+		MWX_DEV_LOG(sc, "background scan aborted on link exit rv=%d\n", rv);
+		if (rv) {
+			mwx_reset(sc);
+			splx(s);
+			return;
+		}
+	}
+#endif
+
 	switch (ostate) {
 	case IEEE80211_S_RUN:
 		if (nstate != ostate)
@@ -1784,6 +1805,14 @@ mwx_newstate_task(void *ptr)
 		mwx_reset(sc);
 	else
 		sc->sc_newstate(ic, nstate, arg);
+#ifdef AIRPORT_WCL
+	if (abort_bgscan && ic->ic_state != IEEE80211_S_RUN) {
+		ic->ic_flags &= ~(IEEE80211_F_BGSCAN |
+		    IEEE80211_F_DISABLE_BG_AUTO_CONNECT);
+		if (ic->ic_event_handler)
+			(*ic->ic_event_handler)(ic, IEEE80211_EVT_SCAN_ABORTED, NULL);
+	}
+#endif
 	splx(s);
 }
 
@@ -4081,23 +4110,18 @@ mwx_dma_txwi_enqueue(struct mwx_softc *sc, struct mwx_queue *q,
 	return 0;
 }
 
-void
-mwx_dma_tx_cleanup(struct mwx_softc *sc, struct mwx_queue *q)
+static void
+mwx_dma_tx_cleanup_pass(struct mwx_softc *sc, struct mwx_queue *q)
 {
 	struct mwx_queue_data *md;
 	struct mwx_desc *desc;
 	int idx, last;
 
-	if (!OSCompareAndSwap(0, 1, &q->mq_cleanup_busy))
-		return;
-
 	idx = q->mq_cons;
 	last = mwx_read(sc, q->mq_regbase + MT_DMA_DMA_IDX);
 
-	if (idx == last) {
-		OSCompareAndSwap(1, 0, &q->mq_cleanup_busy);
+	if (idx == last)
 		return;
-	}
 
 	bus_dmamap_sync(sc->sc_dmat, q->mq_map, 0, q->mq_map->dm_mapsize,
 	     BUS_DMASYNC_PREWRITE);
@@ -4148,7 +4172,26 @@ mwx_dma_tx_cleanup(struct mwx_softc *sc, struct mwx_queue *q)
 		q->mq_wakeme = 0;
 		wakeup(q);
 	}
-	OSCompareAndSwap(1, 0, &q->mq_cleanup_busy);
+}
+
+void
+mwx_dma_tx_cleanup(struct mwx_softc *sc, struct mwx_queue *q)
+{
+	enum : unsigned int { idle, running, pending };
+
+	// Firmware upload and TX completion can drain the same queue.
+	// A competing caller requests another pass without waiting.
+	if (__atomic_exchange_n(&q->mq_cleanup_state, pending,
+	    __ATOMIC_ACQ_REL) != idle)
+		return;
+
+	unsigned int expected;
+	do {
+		__atomic_store_n(&q->mq_cleanup_state, running, __ATOMIC_RELAXED);
+		mwx_dma_tx_cleanup_pass(sc, q);
+		expected = running;
+	} while (!__atomic_compare_exchange_n(&q->mq_cleanup_state, &expected,
+	    idle, false, __ATOMIC_RELEASE, __ATOMIC_RELAXED));
 }
 
 void
@@ -6159,6 +6202,15 @@ mt7921_mcu_scan_event(struct mwx_softc *sc, struct mbuf *m)
 		    sc->sc_scan_done_count, mbuf_len(m), nodes_before,
 		    sc->sc_rx_pkt_normal, sc->sc_rx_fill_fail);
 	}
+
+#ifdef AIRPORT_WCL
+	/* A canceled background scan can report completion after a new scan starts. */
+	if (!(sc->sc_flags & (MWX_FLAG_SCANNING | MWX_FLAG_BGSCAN)))
+		return;
+	if (mbuf_len(m) >= sizeof(*event) &&
+	    (event->seq_num & 0x7f) != sc->sc_scan_seq_num)
+		return;
+#endif
 
 	if (mt7921_mcu_hw_scan_cancel(sc) != 0)
 		MWX_DEV_LOG(sc, "hw scan cancel failed; clearing local scan state\n");

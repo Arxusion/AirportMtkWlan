@@ -2775,11 +2775,13 @@ ieee80211_recv_assoc_resp(struct ieee80211com *ic, mbuf_t m,
     status =  LE_READ_2(frm); frm += 2;
 
     ic->ic_assoc_status = status;
+#if !defined(AIRPORT_WCL)
     if (status == IEEE80211_STATUS_SUCCESS) {
         if (ic->ic_event_handler) {
             (*ic->ic_event_handler)(ic, IEEE80211_EVT_STA_ASSOC_DONE, NULL);
         }
     }
+#endif
     
     if (status != IEEE80211_STATUS_SUCCESS) {
         if (ifp->if_flags & IFF_DEBUG)

@@ -709,6 +709,7 @@ struct ieee80211_ess {
 #define IEEE80211_EVT_DRIVER_READY 6
 #define IEEE80211_EVT_DRIVER_STOPPED 7
 #define IEEE80211_EVT_DRIVER_RESET_BEGIN 8
+#define IEEE80211_EVT_SCAN_ABORTED 9
 struct ieee80211_beacon_event {
     const struct ieee80211_node *node;
     const uint8_t *ies;

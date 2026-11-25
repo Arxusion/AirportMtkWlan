@@ -1697,7 +1697,16 @@ justcleanup:
                     " HE enabled" : "");
 			}
 #if defined(AIRPORT_WCL)
-            if (!(ic->ic_flags & IEEE80211_F_RSNON)) {
+			/*
+			 * WCL can query the associated BSS on AssocComplete.
+			 * Publish it after the hardware and net80211 reach RUN.
+			 */
+			if (ostate == IEEE80211_S_ASSOC &&
+			    ic->ic_opmode == IEEE80211_M_STA &&
+			    mgt == IEEE80211_FC0_SUBTYPE_ASSOC_RESP &&
+			    ic->ic_event_handler)
+				(*ic->ic_event_handler)(ic, IEEE80211_EVT_STA_ASSOC_DONE, NULL);
+			if (!(ic->ic_flags & IEEE80211_F_RSNON)) {
 #elif defined(USE_APPLE_SUPPLICANT)
             {
 #elif (defined IO80211FAMILY_V2)

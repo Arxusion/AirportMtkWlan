@@ -774,9 +774,10 @@ void AirportItlwmSkywalkInterface::handleWCLEvent(int code, void *data)
     if (wclStopping)
         return;
     // Firmware initialization runs on systq, outside the native PostOffice gate.
-    // Serialize only lifecycle notifications; never run synchronous WCL ioctls here.
+    // Serialize lifecycle and scan cancellation before updating WCL requests.
     if ((code == IEEE80211_EVT_DRIVER_RESET_BEGIN || code == IEEE80211_EVT_DRIVER_READY ||
-         code == IEEE80211_EVT_DRIVER_STOPPED) && !instance->getWorkQueue()->inGate()) {
+         code == IEEE80211_EVT_DRIVER_STOPPED || code == IEEE80211_EVT_SCAN_ABORTED) &&
+        !instance->getWorkQueue()->inGate()) {
         _fCommandGate->runAction(wclCommand, this, reinterpret_cast<void *>(12),
                                 reinterpret_cast<void *>(uintptr_t(code)));
         return;
@@ -900,6 +901,9 @@ void AirportItlwmSkywalkInterface::handleWCLEvent(int code, void *data)
             }
             break;
         }
+        case IEEE80211_EVT_SCAN_ABORTED:
+            finishWCLScan(kIOReturnAborted);
+            break;
         case IEEE80211_EVT_SCAN_DONE:
             if (scanPending) {
                 if (scanSkipCompletion)

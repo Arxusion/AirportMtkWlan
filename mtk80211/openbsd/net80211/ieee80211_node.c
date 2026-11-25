@@ -1430,6 +1430,12 @@ ieee80211_end_scan(struct _ifnet *ifp)
                   ic->ic_state == IEEE80211_S_RUN);
     int roamscan = bgscan &&
                 (ic->ic_flags & IEEE80211_F_DISABLE_BG_AUTO_CONNECT) == 0;
+
+#ifdef AIRPORT_WCL
+    /* Foreground completion must not leave a canceled background scan busy. */
+    if (ic->ic_state == IEEE80211_S_SCAN)
+        ic->ic_flags &= ~(IEEE80211_F_BGSCAN | IEEE80211_F_DISABLE_BG_AUTO_CONNECT);
+#endif
     
     if (ic->ic_event_handler)
         (*ic->ic_event_handler)(ic, IEEE80211_EVT_SCAN_DONE, NULL);
