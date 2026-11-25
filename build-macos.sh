@@ -43,6 +43,11 @@ common_sources=(
 # build <name> <bundle id> <Info.plist> <extra defines...> -- <sources...>
 build() {
 	local name="$1" bundleid="$2" plist="$3"; shift 3
+	local deployment=10.12
+	# Tahoe's native IOService vtable has the Dispatch(IORPC) slot from 10.15.
+	if [[ "$name" == AirportMtkWlan && "${AIRPORT_OS:-tahoe}" == tahoe ]]; then
+		deployment=10.15
+	fi
 	local defines=() sources=()
 	while [[ $# -gt 0 && "$1" != "--" ]]; do defines+=("$1"); shift; done
 	shift
@@ -54,7 +59,7 @@ build() {
 	while IFS= read -r d; do incs+=(-I "$d"); done < <(find "$here/SimpleMtkWlan" "$here/include" "$here/mtk80211" -type d)
 	[[ -d "$here/AirportMtkWlan" ]] && incs+=(-I "$here/AirportMtkWlan")
 	local flags=(
-		-target x86_64-apple-macos10.12 -x c++ -std=gnu++14
+		-target "x86_64-apple-macos$deployment" -x c++ -std=gnu++14
 		-mkernel -fapple-kext -fno-rtti -fno-exceptions -fno-builtin -fno-common -nostdlib
 		-fno-use-cxa-atexit -fno-asynchronous-unwind-tables
 		-DKERNEL -DIEEE80211_STA_ONLY -D__PRIVATE_SPI__ ${defines[@]+"${defines[@]}"}
@@ -82,10 +87,10 @@ __attribute__((visibility("default"))) kmod_info_t kmod_info = {
 	0, KMOD_INFO_VERSION, -1U, "$bundleid", "$version", -1, 0, 0, 0, 0, _start, _stop,
 };
 KMOD
-	"$clang" -target x86_64-apple-macos10.12 -mkernel -fno-builtin -fno-common -nostdlib -DKERNEL \
+	"$clang" -target "x86_64-apple-macos$deployment" -mkernel -fno-builtin -fno-common -nostdlib -DKERNEL \
 		-I "$sdkhdr" -c "$obj/kmod_info.c" -o "$obj/kmod_info.o"
 	objects+=("$obj/kmod_info.o")
-	"$ld64" -arch x86_64 -kext -static -macos_version_min 10.12 -undefined dynamic_lookup \
+	"$ld64" -arch x86_64 -kext -static -macos_version_min "$deployment" -undefined dynamic_lookup \
 		-exported_symbol _kmod_info -exported_symbol __realmain -exported_symbol __antimain \
 		-o "$bundle/Contents/MacOS/$name" "${objects[@]}" "$libkmod"
 	python3 -I - "$here/$plist" "$bundle/Contents/Info.plist" "$version" "$name" "$bundleid" <<'PY'

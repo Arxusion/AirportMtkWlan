@@ -13,6 +13,7 @@
 #include <net80211/ieee80211_node.h>
 #include <net80211/ieee80211_ioctl.h>
 #include <net80211/ieee80211_priv.h>
+#include <HAL/MtkAwdlDiagnostics.hpp>
 
 #ifdef AIRPORT_WCL
 extern IOCommandGate *_fCommandGate;
@@ -1156,19 +1157,14 @@ IOReturn AirportItlwmSkywalkInterface::getAWDL_RSDB_CAPS(apple80211_rsdb_capabil
     if (!cap)
         return kIOReturnBadArgument;
 
+    const bool probe = mtk_awdl_diagnostics_enabled();
     memset(cap, 0, sizeof(*cap));
     cap->version = 1;
-    cap->cores = 2;
-    int allow_rsdb = 0;
-    PE_parse_boot_argn("-mtkrsdb", &allow_rsdb, sizeof(allow_rsdb));
-    if (allow_rsdb && instance && instance->isMT7922()) {
-        cap->rsdb = 1;
-        cap->flags = 0x01;
-    } else {
-        cap->rsdb = 0;
-        cap->flags = 0;
+    cap->cores = probe ? 1 : 2;
+    if (probe) {
+        setProperty("MtkAwdlProbeRsdbRead", true);
+        IOLog("MTK AWDL: AWDL_RSDB_CAPS replied, RSDB=0 cores=1\n");
     }
-    XYLog("%s: RSDB=%u, cores=%u, flags=0x%04x\n", __FUNCTION__, cap->rsdb, cap->cores, cap->flags);
     return kIOReturnSuccess;
 }
 
@@ -1177,39 +1173,19 @@ IOReturn AirportItlwmSkywalkInterface::setVIRTUAL_IF_CREATE(apple80211_virt_if_c
     if (!data)
         return kIOReturnBadArgument;
 
-    int no_awdl = 0, allow_awdl = 0, allow_rsdb = 0;
-    PE_parse_boot_argn("-mtknoawdl", &no_awdl, sizeof(no_awdl));
-    PE_parse_boot_argn("-mtkawdl", &allow_awdl, sizeof(allow_awdl));
-    PE_parse_boot_argn("-mtkrsdb", &allow_rsdb, sizeof(allow_rsdb));
-    if (no_awdl || (!allow_awdl && !allow_rsdb)) {
-        XYLog("%s: virtual interface creation disabled (enable with -mtkawdl)\n", __FUNCTION__);
-        return kIOReturnUnsupported;
+#if defined(AIRPORT_WCL) && __IO80211_TARGET == __MAC_26_0
+    if (mtk_awdl_diagnostics_enabled()) {
+        setProperty("MtkAwdlProbeCreateRequested", true);
+        setProperty("MtkAwdlRequestedRole", data->role, 32);
+        IOLog("MTK AWDL: VIRTUAL_IF_CREATE version=%u role=%u\n", data->version, data->role);
+        if (instance && data->role == APPLE80211_VIF_AWDL) {
+            ether_addr address = {};
+            memcpy(address.octet, data->mac, sizeof(address.octet));
+            return instance->registerAwdlInterface(address);
+        }
     }
-
-    XYLog("%s: request version=%u, role=%u, bsd_name='%s', mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
-          __FUNCTION__, data->version, data->role, data->bsd_name,
-          data->mac[0], data->mac[1], data->mac[2], data->mac[3], data->mac[4], data->mac[5]);
-
-    UInt role = data->role;
-    if (role == 0 || strncmp((char *)data->bsd_name, "awdl", 4) == 0) {
-        role = APPLE80211_VIF_AWDL;
-    }
-
-    if (instance && instance->getAwdlInterface()) {
-        strlcpy((char *)data->bsd_name, "awdl0", sizeof(data->bsd_name));
-        XYLog("%s: Re-using existing AWDL interface '%s'\n", __FUNCTION__, data->bsd_name);
-        return kIOReturnSuccess;
-    }
-
-    IO80211VirtualInterface *vif = NULL;
-    if (!instance || !instance->attachVirtualInterface(&vif, (ether_addr *)data->mac, role, true)) {
-        XYLog("%s: attachVirtualInterface failed for role %u\n", __FUNCTION__, role);
-        return kIOReturnError;
-    }
-
-    strlcpy((char *)data->bsd_name, "awdl0", sizeof(data->bsd_name));
-    XYLog("%s: Successfully created virtual interface '%s' for role %u\n", __FUNCTION__, data->bsd_name, role);
-    return kIOReturnSuccess;
+#endif
+    return kIOReturnUnsupported;
 }
 
 

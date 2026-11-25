@@ -56,6 +56,8 @@ nmx_hide_24ghz_twin(struct ieee80211com *ic, const struct ieee80211_node *node)
 }
 #ifdef AIRPORT_WCL
 #include "WCL/WCL.hpp"
+#include <HAL/MtkAwdlDiagnostics.hpp>
+#include <HAL/MtkAwdlAnnouncement.hpp>
 #endif
 
 #include <linux/kernel.h>
@@ -427,6 +429,8 @@ struct mwx_tx_radiotap_header {
 
 #endif
 
+enum class MwxAwdlTx : uint8_t { None, Sync, Service, VerifiedService, Data, GroupData };
+
 struct mwx_txwi {
 	struct mt76_txwi		*mt_desc;
 	struct mbuf			*mt_mbuf;
@@ -435,6 +439,11 @@ struct mwx_txwi {
 	u_int32_t			mt_addr;
 	u_int				mt_idx;
 	int				mt_busy;
+#if defined(AIRPORT_WCL) && __IO80211_TARGET == __MAC_26_0
+	MwxAwdlTx			mt_awdl;
+	uint32_t			mt_awdl_epoch;
+	uint64_t			mt_awdl_queue_time;
+#endif
 };
 
 struct mwx_txwi_desc {
@@ -519,6 +528,13 @@ struct mwx_softc {
 	struct mwx_queue	sc_rxfwdlq;
 
 	struct mwx_txwi_desc	sc_txwi;
+#if defined(AIRPORT_WCL) && __IO80211_TARGET == __MAC_26_0
+	MtkAwdl::AnnouncementCompletions sc_awdl_completions;
+	uint8_t sc_awdl_tx_channel;
+	uint32_t sc_awdl_channel_epoch;
+	uint8_t sc_awdl_mac[ETHER_ADDR_LEN];
+	bool sc_awdl_dev_active;
+#endif
 
 	bus_space_tag_t		sc_st;
 	bus_space_handle_t	sc_memh;
@@ -593,6 +609,12 @@ struct mwx_softc {
 		volatile int	 mcu_done;
 	}			sc_mcu_wait[16];
 	uint8_t			sc_scan_seq_num;
+#ifdef AIRPORT_WCL
+	uint32_t		sc_awdl_diag_frames;
+#if __IO80211_TARGET == __MAC_26_0
+	IOEthernetController *sc_awdl_controller;
+#endif
+#endif
 	uint64_t		sc_last_bgscan_ns;
 	uint64_t		sc_last_active_traffic_ns;
 	uint64_t		sc_last_traffic_pkts;
@@ -769,7 +791,7 @@ void	mwx_delete_key(struct ieee80211com *, struct ieee80211_node *,
 void	mwx_setkey_task(void *);
 
 int	mwx_tx(struct mwx_softc *, struct mbuf *, struct ieee80211_node *,
-	    bool = true);
+	    bool = true, MwxAwdlTx = MwxAwdlTx::None);
 int	mwx_send_null_pm(struct mwx_softc *, int);
 void	mwx_pci_disable_aspm(struct mwx_softc *, IOPCIDevice *);
 void	mwx_rx(struct mwx_softc *, struct mbuf *, struct mbuf_list *);
@@ -876,6 +898,9 @@ void		mt7921_mac_reset_counters(struct mwx_softc *);
 void		mt7921_mac_set_timing(struct mwx_softc *);
 int		mt7921_mcu_uni_add_dev(struct mwx_softc *, struct mwx_vif *,
 		    struct mwx_node *, int);
+#if defined(AIRPORT_WCL) && __IO80211_TARGET == __MAC_26_0
+int		mt7921_mcu_awdl_dev_update(struct mwx_softc *, const uint8_t *, int);
+#endif
 int		mt7921_mcu_set_sniffer(struct mwx_softc *, int);
 int		mt7921_mcu_set_beacon_filter(struct mwx_softc *, int);
 int		mt7921_mcu_set_bss_pm(struct mwx_softc *, int);
@@ -1132,6 +1157,16 @@ mwx_init_hw(struct ifnet *ifp)
 		return rv;
 	}
 	MWX_DEV_LOG(sc, "init add dev ok\n");
+#if defined(AIRPORT_WCL) && __IO80211_TARGET == __MAC_26_0
+	sc->sc_awdl_dev_active = false;
+	if (mtk_awdl_diagnostics_enabled() &&
+	    !IEEE80211_ADDR_EQ(sc->sc_awdl_mac, etheranyaddr) &&
+	    !(sc->sc_awdl_mac[0] & 1)) {
+		int awdl_rv = mt7921_mcu_awdl_dev_update(sc, sc->sc_awdl_mac, 1);
+		sc->sc_awdl_dev_active = (awdl_rv == 0);
+		MWX_DEV_LOG(sc, "init awdl dev omac=%u rv=%d\n", HW_BSSID_1, awdl_rv);
+	}
+#endif
 
 	rv = mt7921_mcu_set_tx(sc, &sc->sc_vif);
 	if (rv) {
@@ -1263,6 +1298,12 @@ mwx_stop(struct ifnet *ifp)
 				fw_err = 1;
 		}
 
+#if defined(AIRPORT_WCL) && __IO80211_TARGET == __MAC_26_0
+		if (!fw_err && sc->sc_awdl_dev_active) {
+			mt7921_mcu_awdl_dev_update(sc, sc->sc_awdl_mac, 0);
+			sc->sc_awdl_dev_active = false;
+		}
+#endif
 		mn = &sc->sc_vif.vif_mn;
 		if (!fw_err && mt7921_mcu_uni_add_dev(sc, &sc->sc_vif, mn, 0) != 0)
 			fw_err = 1;
@@ -2118,7 +2159,7 @@ mwx_tx_linearize(struct mbuf *m)
 
 int
 mwx_tx(struct mwx_softc *sc, struct mbuf *m, struct ieee80211_node *ni,
-    bool doorbell)
+    bool doorbell, MwxAwdlTx awdlAnnouncement)
 {
 	struct mwx_node *mn = (struct mwx_node *)ni;
 	struct mwx_txwi *mt;
@@ -2139,6 +2180,39 @@ mwx_tx(struct mwx_softc *sc, struct mbuf *m, struct ieee80211_node *ni,
 	txp = mt->mt_desc;
 	memset(txp, 0, sizeof(*txp));
 	mt7921_mac_write_txwi(sc, m, ni, txp);
+#if defined(AIRPORT_WCL) && __IO80211_TARGET == __MAC_26_0
+	mt->mt_awdl = awdlAnnouncement;
+	if (awdlAnnouncement == MwxAwdlTx::VerifiedService)
+		mt->mt_awdl_epoch = sc->sc_awdl_channel_epoch;
+	if (awdlAnnouncement != MwxAwdlTx::None) {
+		const auto *header = mtod(m, const uint8_t *);
+		const uint32_t sequence = (header[22] | (uint32_t(header[23]) << 8)) >> 4;
+		const uint32_t txd1 = le32toh(txp->txwi[1]) & ~MT_TXD1_WLAN_IDX_MASK;
+		uint32_t txd3 = le32toh(txp->txwi[3]);
+		txd3 &= ~(MT_TXD3_REM_TX_COUNT_MASK | MT_TXD3_SEQ | MT_TXD3_PROTECT_FRAME);
+		const bool unicast = awdlAnnouncement == MwxAwdlTx::Data && !(header[4] & 1);
+		if (unicast) {
+		    txd3 &= ~MT_TXD3_NO_ACK;
+		    txd3 |= MT_TXD3_BA_DISABLE;
+		    txp->txwi[2] |= htole32(MT_TXD2_FIX_RATE);
+		    txp->txwi[6] = htole32(MT_TXD6_FIXED_BW |
+		        ((mt7921_mac_tx_rate_val(sc) << MT_TXD6_TX_RATE_SHIFT) & MT_TXD6_TX_RATE_MASK));
+		} else {
+		    txd3 |= MT_TXD3_NO_ACK;
+		}
+		txd3 |= MT_TXD3_SN_VALID | (sequence << 16) |
+		    ((unicast ? 3u : 1u) << MT_TXD3_REM_TX_COUNT_SHIFT);
+		uint32_t awdlTxd1 = txd1 | (sc->sc_vif.vif_mn.wcid & MT_TXD1_WLAN_IDX_MASK);
+		if (sc->sc_awdl_dev_active) {
+			awdlTxd1 = (awdlTxd1 & ~MT_TXD1_OWN_MAC_MASK) |
+			    ((uint32_t(HW_BSSID_1) << MT_TXD1_OWN_MAC_SHIFT) & MT_TXD1_OWN_MAC_MASK);
+		}
+		txp->txwi[1] = htole32(awdlTxd1);
+		txp->txwi[3] = htole32(txd3);
+	}
+#else
+	(void)awdlAnnouncement;
+#endif
 
 #ifdef AIRPORT_WCL
 	/* Per access category data counters for macOS's link quality. */
@@ -2176,6 +2250,10 @@ mwx_tx(struct mwx_softc *sc, struct mbuf *m, struct ieee80211_node *ni,
 		tx_log_count++;
 	}
 
+#if defined(AIRPORT_WCL) && __IO80211_TARGET == __MAC_26_0
+	if (awdlAnnouncement == MwxAwdlTx::VerifiedService)
+		mt->mt_awdl_queue_time = mach_absolute_time();
+#endif
 	rv = mwx_dma_txwi_enqueue(sc, &sc->sc_txq, mt, doorbell);
 	if (rv != 0)
 		mwx_txwi_put(sc, mt);
@@ -2543,6 +2621,38 @@ mwx_rx(struct mwx_softc *sc, struct mbuf *m, struct mbuf_list *ml)
 		return;
 	}
 	wh = mtod(m, struct ieee80211_frame *);
+#ifdef AIRPORT_WCL
+#if __IO80211_TARGET == __MAC_26_0
+	constexpr uint8_t awdlBssid[] = {0x00, 0x25, 0x00, 0xff, 0x94, 0x73};
+	if (mtk_awdl_diagnostics_enabled() && mbuf_len(m) >= sizeof(*wh) &&
+	    (wh->i_fc[0] == 0x08 || wh->i_fc[0] == 0x88) &&
+	    !(wh->i_fc[1] & 3) && !memcmp(wh->i_addr3, awdlBssid, sizeof(awdlBssid))) {
+		mtkAwdlObserveData(sc->sc_awdl_controller, m, rxi.rxi_chan);
+		m_freem(m);
+		return;
+	}
+#endif
+	if ((wh->i_fc[0] & (IEEE80211_FC0_TYPE_MASK | IEEE80211_FC0_SUBTYPE_MASK)) ==
+	    (IEEE80211_FC0_TYPE_MGT | IEEE80211_FC0_SUBTYPE_ACTION) &&
+	    mtk_awdl_diagnostics_enabled()) {
+		// Vendor-specific category, Apple OUI and AWDL action type.
+		const uint8_t signature[] = {127, 0x00, 0x17, 0xf2, 8};
+		uint8_t action[7];
+		if (mbuf_pkthdr_len(m) >= sizeof(*wh) + sizeof(action) &&
+		    mbuf_copydata(m, sizeof(*wh), sizeof(action), action) == 0 &&
+		    memcmp(action, signature, sizeof(signature)) == 0) {
+			uint32_t count = __atomic_add_fetch(&sc->sc_awdl_diag_frames,
+			    1, __ATOMIC_RELAXED);
+			if (count <= 8 || (count && (count & (count - 1)) == 0))
+				MWX_DEV_LOG(sc, "AWDL diag: action RX count=%u subtype=%u channel=%u rssi=%d\n",
+				    count, action[6], rxi.rxi_chan, rxi.rxi_rssi);
+#if __IO80211_TARGET == __MAC_26_0
+			// rxi_rssi is still dBm here, before mwx_rx_deliver normalizes it.
+			mtkAwdlObserveAction(sc->sc_awdl_controller, m, rxi.rxi_chan, rxi.rxi_rssi);
+#endif
+		}
+	}
+#endif
 	/* Only a non-AMSDU data frame from the same TA ends a pending A-MSDU;
 	 * beacons/mgmt/control frames must not split it into ba_below drops. */
 	if (sc->sc_amsdu_n > 0 &&
@@ -3527,6 +3637,9 @@ mwx_txwi_put(struct mwx_softc *sc, struct mwx_txwi *mt)
 
 	memset(mt->mt_desc, 0, sizeof(*mt->mt_desc));
 	mt->mt_busy = 0;
+#if defined(AIRPORT_WCL) && __IO80211_TARGET == __MAC_26_0
+	mt->mt_awdl = MwxAwdlTx::None;
+#endif
 
 	if (mt->mt_idx < MT_PACKET_ID_FIRST)
 		return;
@@ -6715,6 +6828,40 @@ printf("%s: %s cmd %x wcid %d\n", DEVNAME(sc), __func__, cmd, mn->wcid);
 	return mwx_mcu_send_wait(sc, cmd, data, len);
 }
 
+#if defined(AIRPORT_WCL) && __IO80211_TARGET == __MAC_26_0
+int
+mt7921_mcu_awdl_dev_update(struct mwx_softc *sc, const uint8_t *mac, int enable)
+{
+	struct {
+		struct {
+			uint8_t		omac_idx;
+			uint8_t		band_idx;
+			uint16_t	pad;
+		} __packed hdr;
+		struct req_tlv {
+			uint16_t	tag;
+			uint16_t	len;
+			uint8_t		active;
+			uint8_t		pad;
+			uint8_t		omac_addr[ETHER_ADDR_LEN];
+		} __packed tlv;
+	} dev_req = {
+		.hdr = {
+			.omac_idx = HW_BSSID_1,
+			.band_idx = 0,
+		},
+		.tlv = {
+			.tag = htole16(DEV_INFO_ACTIVE),
+			.len = htole16(sizeof(dev_req.tlv)),
+			.active = (uint8_t)(enable ? 1 : 0),
+		},
+	};
+	if (mac)
+		memcpy(dev_req.tlv.omac_addr, mac, ETHER_ADDR_LEN);
+	return mwx_mcu_send_wait(sc, MCU_UNI_CMD_DEV_INFO_UPDATE, &dev_req, sizeof(dev_req));
+}
+#endif
+
 int
 mt7921_mcu_set_sniffer(struct mwx_softc *sc, int enable)
 {
@@ -7745,6 +7892,37 @@ mwx_mac_tx_free(struct mwx_softc *sc, struct mbuf *m)
 		mt = &sc->sc_txwi.mt_data[msdu];
 		if (mt->mt_busy == 0)
 			continue;
+#if defined(AIRPORT_WCL) && __IO80211_TARGET == __MAC_26_0
+		// TX free reports the firmware status for the matching MSDU token.
+		// Reset and DMA cleanup also free descriptors, without reporting success.
+		if (mt->mt_awdl != MwxAwdlTx::None) {
+			auto &counts = sc->sc_awdl_completions;
+			const auto status = (txval & MT_TX_FREE_STATUS_MASK) >> 13;
+			const bool verified = mt->mt_awdl == MwxAwdlTx::VerifiedService;
+			const bool service = verified || mt->mt_awdl == MwxAwdlTx::Service;
+			counts.lastStatus = status;
+			if (mt->mt_awdl == MwxAwdlTx::Data || mt->mt_awdl == MwxAwdlTx::GroupData) {
+				counts.dataSent += status == 0;
+				counts.unicastReportedSent += status == 0 && mt->mt_awdl == MwxAwdlTx::Data;
+				counts.dataFailed += status != 0;
+			} else if (status == 0) {
+				if (verified && mt->mt_awdl_epoch == sc->sc_awdl_channel_epoch) {
+					++counts.verifiedServiceSent;
+					uint64_t elapsedNS = 0;
+					absolutetime_to_nanoseconds(mach_absolute_time() - mt->mt_awdl_queue_time, &elapsedNS);
+					const uint64_t elapsedUS = elapsedNS / 1000;
+					counts.verifiedCompletionLastUS = elapsedUS > UINT32_MAX ? UINT32_MAX : uint32_t(elapsedUS);
+					if (counts.verifiedCompletionLastUS > counts.verifiedCompletionMaxUS)
+						counts.verifiedCompletionMaxUS = counts.verifiedCompletionLastUS;
+				}
+				++counts.sent;
+				counts.serviceSent += service;
+			} else {
+				++counts.failed;
+				counts.serviceFailed += service;
+			}
+		}
+#endif
 		mwx_txwi_put(sc, mt);
 	}
 
@@ -8374,6 +8552,9 @@ MtkMwx::attach(IOPCIDevice *device)
 	}
 	taskQueueOwned = true;
 	gMwxHal = this;
+#if defined(AIRPORT_WCL) && __IO80211_TARGET == __MAC_26_0
+	com->sc_awdl_controller = getController();
+#endif
 	pci->pa_tag = device;
 	pci->workloop = getMainWorkLoop();
 	pci->pa_id = ((pcireg_t)device->configRead16(kIOPCIConfigDeviceID) << 16) |
@@ -9210,6 +9391,116 @@ MtkMwx::resume()
 	mwx_reset(sc);
 	MWX_DEV_LOG(sc, "resume: firmware reload scheduled\n");
 }
+
+#if defined(AIRPORT_WCL) && __IO80211_TARGET == __MAC_26_0
+uint8_t MtkMwx::getAwdlChannel(bool &allowed)
+{
+    allowed = false;
+    auto *sc = com;
+    auto *loop = getMainWorkLoop();
+    if (!sc || !loop || !loop->inGate())
+        return 0;
+
+    auto &ic = sc->sc_ic;
+    auto *node = ic.ic_bss;
+    uint8_t channel = 0;
+    if (sc->sc_hwtype == MWX_HW_MT7922 && sc->sc_fw_loaded && sc->sc_memh &&
+        !sc->sc_detaching && !sc->sc_suspended && !sc->sc_resetting &&
+        ic.ic_state == IEEE80211_S_RUN && (ic.ic_if.if_flags & IFF_RUNNING) &&
+        ic.ic_if.if_link_state == LINK_STATE_UP && node && node->ni_chan &&
+        node->ni_chan != IEEE80211_CHAN_ANYC) {
+        const auto *associated = node->ni_chan;
+        // 6 GHz reuses channel numbers; validate the band's actual frequency.
+        const unsigned index = ieee80211_chan2ieee(&ic, associated);
+        const unsigned frequency = associated->ic_freq;
+        if (index <= 255 && ((index <= 13 && frequency == 2407 + index * 5) ||
+                             (index >= 36 && frequency == 5000 + index * 5)))
+            channel = uint8_t(index);
+        allowed = ItlAWDL::fixedScheduleChannel(channel) &&
+            !(associated->ic_flags & (IEEE80211_CHAN_PASSIVE | IEEE80211_CHAN_DFS));
+    }
+    const uint8_t txChannel = allowed ? channel : 0;
+    if (sc->sc_awdl_tx_channel != txChannel) {
+        sc->sc_awdl_tx_channel = txChannel;
+        ++sc->sc_awdl_channel_epoch;
+        sc->sc_awdl_completions.verifiedCompletionLastUS = 0;
+        sc->sc_awdl_completions.verifiedCompletionMaxUS = 0;
+    }
+    return channel;
+}
+
+IOReturn MtkMwx::transmitAwdlAnnouncement(const uint8_t *bytes, size_t length, MtkAwdl::TxKind kind,
+                                         uint8_t expectedChannel)
+{
+    bool allowed = false;
+    const auto channel = getAwdlChannel(allowed);
+    if (!allowed || channel != expectedChannel)
+        return kIOReturnNotReady;
+    auto *sc = com;
+    auto *node = sc->sc_ic.ic_bss;
+    if ((sc->sc_flags & (MWX_FLAG_SCANNING | MWX_FLAG_BGSCAN)) || !mwx_tx_has_room(sc, 4))
+        return kIOReturnBusy;
+
+    if (!bytes || length < 40 || length > 2048)
+        return kIOReturnBadArgument;
+    static constexpr MwxAwdlTx tags[] = {MwxAwdlTx::Sync, MwxAwdlTx::Service,
+        MwxAwdlTx::VerifiedService, MwxAwdlTx::Data, MwxAwdlTx::GroupData};
+    if (unsigned(kind) >= nitems(tags))
+        return kIOReturnBadArgument;
+    mbuf_t packet = nullptr;
+    if (mbuf_getpacket(MBUF_DONTWAIT, &packet) || !packet)
+        return kIOReturnNoMemory;
+    if (length > mbuf_maxlen(packet)) {
+        mbuf_freem(packet);
+        return kIOReturnNoSpace;
+    }
+    memcpy(mbuf_data(packet), bytes, length);
+    mbuf_setlen(packet, length);
+    mbuf_pkthdr_setlen(packet, length);
+    // mwx_tx takes ownership on every path; the normal firmware/DMA
+    // completion paths release the descriptor and packet.
+    return mwx_tx(sc, packet, node, true, tags[unsigned(kind)]) ? kIOReturnIOError : kIOReturnSuccess;
+}
+
+bool MtkMwx::readAwdlAnnouncementCompletions(MtkAwdl::AnnouncementCompletions &counts)
+{
+    auto *loop = getMainWorkLoop();
+    if (!com || !loop || !loop->inGate())
+        return false;
+    counts = com->sc_awdl_completions;
+    return true;
+}
+
+IOReturn MtkMwx::setAwdlMacAddress(const uint8_t *mac, bool enable)
+{
+    auto *sc = com;
+    auto *loop = getMainWorkLoop();
+    if (!sc || !loop || !loop->inGate())
+        return kIOReturnNotReady;
+    if (!sc->sc_fw_loaded || !sc->sc_memh || sc->sc_detaching ||
+        sc->sc_suspended || sc->sc_resetting)
+        return kIOReturnNotReady;
+    if (enable && (!mac || IEEE80211_ADDR_EQ(mac, etheranyaddr) || (mac[0] & 1)))
+        return kIOReturnBadArgument;
+
+    if (sc->sc_awdl_dev_active) {
+        if (enable && memcmp(sc->sc_awdl_mac, mac, ETHER_ADDR_LEN) == 0)
+            return kIOReturnSuccess;
+        mt7921_mcu_awdl_dev_update(sc, sc->sc_awdl_mac, 0);
+        sc->sc_awdl_dev_active = false;
+    }
+    if (!enable) {
+        memset(sc->sc_awdl_mac, 0, ETHER_ADDR_LEN);
+        return kIOReturnSuccess;
+    }
+
+    memcpy(sc->sc_awdl_mac, mac, ETHER_ADDR_LEN);
+    int rv = mt7921_mcu_awdl_dev_update(sc, sc->sc_awdl_mac, 1);
+    sc->sc_awdl_dev_active = (rv == 0);
+    MWX_DEV_LOG(sc, "AWDL d23: DEV_INFO_ACTIVE omac=%u enable=1 rv=%d\n", HW_BSSID_1, rv);
+    return rv == 0 ? kIOReturnSuccess : kIOReturnIOError;
+}
+#endif
 
 void
 MtkMwx::debugPoll()

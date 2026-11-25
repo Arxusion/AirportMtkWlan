@@ -1,3 +1,6 @@
+#if defined(AIRPORT_WCL) && __IO80211_TARGET == __MAC_26_0
+#include "macOS26/IO80211VirtualInterface.h"
+#else
 #ifndef IO80211VirtualInterface_h
 #define IO80211VirtualInterface_h
 
@@ -260,3 +263,4 @@ public:
 
 
 #endif /* IO80211VirtualInterface_h */
+#endif

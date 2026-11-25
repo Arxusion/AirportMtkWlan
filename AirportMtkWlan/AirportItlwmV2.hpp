@@ -10,6 +10,7 @@
 #define AirportItlwmV2_hpp
 
 #include "Apple80211.h"
+#include <HAL/MtkAwdlPeerIdentity.hpp>
 #ifdef AIRPORT_WCL
 #if __IO80211_TARGET == __MAC_15_2
 #include <Airport/macOS15/FaultReporter.h>
@@ -91,6 +92,7 @@ public:
     virtual IOReturn enable(IO80211SkywalkInterface *netif) AIRPORT_LEGACY_OVERRIDE;
     virtual IOReturn disable(IO80211SkywalkInterface *netif) AIRPORT_LEGACY_OVERRIDE;
     virtual IOReturn setHardwareAddress(const void *addr, UInt32 addrBytes) override;
+    IOReturn setProperties(OSObject *properties) override;
     virtual IOReturn getHardwareAddress(IOEthernetAddress* addrP) override;
     virtual IOReturn getPacketFilters(const OSSymbol *group, UInt32 *filters) const override;
     virtual IOReturn setPromiscuousMode(IOEnetPromiscuousMode mode) override;
@@ -210,10 +212,16 @@ public:
         return setPOWER((OSObject *)interface, data);
     }
     virtual IO80211VirtualInterface* createVirtualInterface(ether_addr *ea, UInt role) override;
-    virtual SInt32 enableVirtualInterface(IO80211VirtualInterface *vif) override;
-    virtual SInt32 disableVirtualInterface(IO80211VirtualInterface *vif) override;
     bool isMT7922();
-    IO80211VirtualInterface *getAwdlInterface() const { return fAwdlIf; }
+#if defined(AIRPORT_WCL) && __IO80211_TARGET == __MAC_26_0
+    IOReturn registerAwdlInterface(const ether_addr &);
+    void observeAwdlAction(mbuf_t, uint32_t channel, int32_t rssi);
+    void observeAwdlData(mbuf_t, uint32_t);
+    IOReturn transmitAwdlAnnouncement(const uint8_t *, size_t, MtkAwdl::TxKind, uint8_t);
+    uint8_t getAwdlChannel(bool &allowed);
+    bool readAwdlAnnouncementCompletions(MtkAwdl::AnnouncementCompletions &);
+    IOReturn setAwdlMacAddress(const uint8_t *, bool);
+#endif
 
     virtual IOReturn getCOUNTRY_CODE(IO80211SkywalkInterface *interface,apple80211_country_code_data *data) override {
 //        XYLog("%s\n", __FUNCTION__);
@@ -301,7 +309,12 @@ public:
     uint32_t btcMode;
     uint32_t btcOptions;
     bool awdlSyncEnable;
+#if defined(AIRPORT_WCL) && __IO80211_TARGET == __MAC_26_0
     IO80211VirtualInterface *fAwdlIf = nullptr;
+    IOLock *awdlRegistrationLock = nullptr;
+    bool awdlStopping = false;
+    MtkAwdl::PeerIdentity awdlTestPeer;
+#endif
     uint8_t fAwdlMac[6] = {0};
     bool fAwdlEnabled = false;
     
