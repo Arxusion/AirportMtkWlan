@@ -77,6 +77,9 @@ harness = r'''
 #define MT_WFDMA0_HOST_INT_ENA 0xd4204
 #define MT_MCU_CMD 0xd5000
 #define MT_MCU_CMD_WAKE_RX_PCIE 0x01
+#define MT_MCU_CMD_STOP_DMA_FW_RELOAD 0x02
+#define MT_MCU_CMD_STOP_DMA 0x04
+#define MWX_FULLRESET_SER 2
 #define MT_DMA_CPU_IDX 0x08
 #define MT_DMA_DMA_IDX 0x0c
 #define MT_INT_RX_DONE_WM 0x00010000U
@@ -283,6 +286,9 @@ struct mwx_softc {
     uint32_t sc_tx_full_cnt = 0;
     uint32_t sc_rx_fill_fail = 0;
     uint32_t sc_rx_delivered = 0;
+    uint32_t sc_mcu_cmd_irqs = 0;
+    uint32_t sc_last_mcu_cmd = 0;
+    uint32_t sc_ser_events = 0;
     int sc_amsdu_n = 0;
     uint8_t sc_amsdu_ta[6] = {};
 };
@@ -351,6 +357,7 @@ static void mwx_write(mwx_softc *sc, uint32_t reg, uint32_t val) {
 static void bus_dmamap_sync(void*, dmamap_t*, int, size_t, int) {}
 static void bus_dmamap_unload(void*, dmamap_t*) {}
 static void mwx_reset(mwx_softc*) { assert(false && "unexpected reset"); }
+static bool mwx_request_fullreset(mwx_softc*, const char*, uint32_t) { return false; }
 static int mwx_queue_fill(mwx_softc*, mwx_queue*) { g_fill_calls++; return 0; }
 static void mwx_dma_rx_process(mwx_softc*, mbuf_list *ml) {
     g_process_calls++;

@@ -54,20 +54,23 @@ The repository builds two front-ends:
 ## Installation Guide (OpenCore)
 
 ### Option A: Graphical OpenCore Installer (Recommended)
-Download **`AirportMtkWlan-Installer-v2.2.1.zip`** from [Releases](https://github.com/Arxusion/AirportMtkWlan/releases).
+Download **`AirportMtkWlan-WiFi-Installer-v2.3.0.zip`** from [Releases](https://github.com/Arxusion/AirportMtkWlan/releases).
+> [!TIP]
+> **Two Release Tracks**:
+> * Use the **Wi-Fi Only Stable Release (`v2.3.0`)** for daily Wi-Fi (AWDL is disabled and Bluetooth kexts are left untouched).
+> * Use the separate **AWDL Beta Release** only if you want to test experimental AirDrop / AWDL, and attach logs from **Grab Full Logs (Admin)** / `tools/mtk-grab-logs.sh` if any issue occurs.
+
 - Launch `AirportMtkWlan Installer.app`
-- Select your target OpenCore EFI partition (or click Browse to locate your EFI folder)
-- Choose your OS flavor (`macOS 26 Tahoe` or `macOS 15 Sequoia`)
-- Check the option to install companion Bluetooth drivers (`AirportMtkBtPatcher` & `AirportMtkBtFw`)
-- Click **Deploy Unified Suite to EFI** — the app installs Wi-Fi, Bluetooth, and AWDL all at once, streams live logs to the console, enables `DisableIoMapper`, and configures OpenCore `config.plist`.
+- Select your target OpenCore EFI partition (or click **Browse...** to locate your `EFI/OC` folder)
+- Choose your OS flavor (`macOS 26 Tahoe` or `macOS 15 Sequoia`, or `SimpleMtkWlan`)
+- Click **Deploy Wi-Fi-Only Kext to EFI** — the app installs the matching Wi-Fi kext, enables `DisableIoMapper`, backs up `config.plist`, and configures OpenCore automatically (leaving Bluetooth untouched).
 
 ### Option B: Manual Installation
 
 1. Download the latest release package matching your macOS version from [Releases](https://github.com/Arxusion/AirportMtkWlan/releases):
-   * `AirportMtkWlan-Tahoe-v2.2.1-RELEASE.zip` for **macOS 26 Tahoe**
-   * `AirportMtkWlan-Sequoia-v2.2.1-RELEASE.zip` for **macOS 15 Sequoia (15.2+)**
-   * `AirportMtkBt-v2.2.1-COMPANION.zip` for **MediaTek Bluetooth** (`AirportMtkBtPatcher.kext` & `AirportMtkBtFw.kext`)
-   * *For macOS 14 Sonoma, 13 Ventura, or earlier*: Native AirPort Skywalk is not compatible; download `SimpleMtkWlan-v2.2.1-RELEASE.zip` and use [SimpleMTK](https://github.com/laobamac/SimpleMTKClient) (HeliPort).
+   * `AirportMtkWlan-Tahoe-WiFi-v2.3.0.zip` for **macOS 26 Tahoe**
+   * `AirportMtkWlan-Sequoia-WiFi-v2.3.0.zip` for **macOS 15 Sequoia (15.2+)**
+   * *For macOS 14 Sonoma, 13 Ventura, or earlier*: Native AirPort Skywalk is not compatible; download `SimpleMtkWlan-v2.3.0.zip` and use [SimpleMTK](https://github.com/laobamac/SimpleMTKClient) (HeliPort).
 2. Extract and place `AirportMtkWlan.kext` into your EFI directory: `EFI/OC/Kexts/`.
 3. Add the kernel extension entry to your `config.plist` under `Kernel -> Add`:
 
@@ -117,6 +120,7 @@ Download **`AirportMtkWlan-Installer-v2.2.1.zip`** from [Releases](https://githu
 
 > [!IMPORTANT]
 > - **Enable `Kernel -> Quirks -> DisableIoMapper = true` in OpenCore**: The driver programs physical DMA rings directly and does not support AppleVTD IOMMU remapping. Leaving AppleVTD enabled can cause firmware/DMA stalls or Wi-Fi failures on Tahoe and Sequoia.
+> - **AMD Ryzen Laptops & Power Management**: If your board drops PCIe link state on S3 wake or boot with NootedRed/iGPU quirks, ensure PCIe ASPM is disabled in BIOS/DeviceProperties for the Wi-Fi root port and avoid `-wegnoigpu` on AMD APU systems relying on NootedRed. Setting `amtk_syspm=1` is active by default and reloads firmware on power-loss wake (`amtk_syspm=0` disables it).
 > - **Match your macOS kernel version**: Use the **Sequoia** build with `MinKernel = 24.2.0` / `MaxKernel = 24.99.99` on macOS 15.2+ and the **Tahoe** build with `MinKernel = 25.0.0` / `MaxKernel = 25.99.99` on macOS 26. Setting the wrong `MinKernel` prevents injection, and injecting the wrong OS build breaks `IO80211SkywalkInterface` vtables.
 > - **Fixing OpenCore `Invalid Parameter` at boot**: Re-download the matching zip (do not rename/strip inside the `.kext` bundle), confirm `Arch = x86_64`, `ExecutablePath = Contents/MacOS/AirportMtkWlan`, `PlistPath = Contents/Info.plist`, and remove any old copies from `/Library/Extensions` or `EFI/OC/Kexts`.
 > - **Do NOT** load `AirportMtkWlan.kext` and `SimpleMtkWlan.kext` simultaneously.
@@ -127,18 +131,21 @@ Download **`AirportMtkWlan-Installer-v2.2.1.zip`** from [Releases](https://githu
 
 ### NVRAM Variables
 
-Configuration properties can be set in OpenCore NVRAM (`7C436110-AB2A-4BBB-A880-FE41995C9F82`) as either `<string>` or `<data>` values:
+Configuration properties can be set in OpenCore NVRAM (`7C436110-AB2A-4BBB-A880-FE41995C9F82`) as either `<string>` or `<data>` values (both `mtk-*` and `nmx-*` aliases are supported):
 
 | Property | Values | Description |
 |---|---|---|
-| `mtk-wifi-band` | `5`, `2`, *unset* | `5` restricts the driver to 5 GHz channels only; `2` restricts to 2.4 GHz channels only. Unset enables dual-band operation preferring 5 GHz when RSSI is comparable. |
-| `mtk-wifi-cc` | e.g. `CN`, `US`, `IN`, `DE`, `00` | Overrides the regulatory country code (`<string>` or ASCII `<data>`) for 802.11d channel availability. |
+| `mtk-wifi-band` / `nmx-wifi-band` | `5`, `2`, *unset* | `5` restricts the driver to 5 GHz channels and suppresses duplicate 2.4 GHz twin SSIDs; `2` restricts to 2.4 GHz; unset keeps both bands visible while preferring 5 GHz for dual-band roaming. |
+| `mtk-wifi-cc` / `nmx-wifi-cc` | e.g. `CN`, `US`, `IN`, `DE`, `00` | Overrides the regulatory country code (`<string>` or ASCII `<data>`). When unset, 802.11d Country IEs from connected/scanned APs are resolved automatically (`mtkcc`). |
 
 ### Boot Arguments
 
 Optional boot arguments can be added to `boot-args` in OpenCore:
 
 * `mtk_cc=XX` — Overrides the 2-letter ISO country code.
+* `amtk_pmf=0` — Disables automatic Protected Management Frames (PMF/MFP is enabled by default with Open System status 30 comeback retry for WPA3/mixed routers).
+* `amtk_autoreset=0` — Disables automatic SER / deaf-RX / WFDMA stall recovery resets.
+* `amtk_syspm=0` — Disables S3 sleep/wake power-loss firmware reload (`12s` ack budget).
 * `-no160` — Restricts 802.11ac/ax to 80 MHz channel width (disables 160 MHz).
 * `-novht` — Disables 802.11ac VHT capabilities (limits connection to 802.11n).
 * `-noht40` — Restricts 802.11n to 20 MHz channel width.
@@ -151,7 +158,7 @@ Optional boot arguments can be added to `boot-args` in OpenCore:
 
 When something fails to load, scan, toggle Wi-Fi, or connect, use the built-in diagnostic log grabber to capture every log needed for debugging in one automatically redacted `.tar.gz` archive:
 
-* **From the GUI Installer (Recommended)**: Open **AirportMtkWlan Installer**, click **Grab Logs**, choose **Grab Full Logs (Admin)** (so `dmesg`, `wdutil`, previous-boot kernel logs, and your sanitized OpenCore config are included), then click **Open GitHub Issue & Attach** and drag the archive from your Desktop into the issue.
+* **From the GUI Installer (Recommended)**: Open **AirportMtkWlan Installer**, click **Boot Diagnostics**, choose **Grab Full Logs (Admin · Recommended)** (so `dmesg`, `wdutil`, previous-boot kernel logs, and your sanitized OpenCore config are included), then click **Open GitHub Issues** and drag the `.tar.gz` archive from your Desktop into your issue or reply.
 * **From Terminal or Finder**:
 
 ```sh

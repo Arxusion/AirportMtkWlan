@@ -35,13 +35,13 @@
 
 char nmx_wifi_band;	/* NVRAM nullmoth-wifi-band, read at preinit: '5', '2' or 0 (prefer 5 GHz) */
 
-/* Prefer-5 GHz mode: a 2.4 GHz node is a twin to hide when the same SSID is on 5 GHz within 15 RSSI points. */
+/* Prefer-5 GHz scans 5 GHz first; only suppress 2.4 GHz twins in strict 5 GHz mode ('5'). */
 bool
 nmx_hide_24ghz_twin(struct ieee80211com *ic, const struct ieee80211_node *node)
 {
 	struct ieee80211_node *o;
 
-	if (nmx_wifi_band == '2' || nmx_wifi_band == '5' || node->ni_esslen == 0 ||
+	if (nmx_wifi_band != '5' || node->ni_esslen == 0 ||
 	    node->ni_chan == NULL || node->ni_chan == IEEE80211_CHAN_ANYC || !IEEE80211_IS_CHAN_2GHZ(node->ni_chan))
 		return false;
 	RB_FOREACH(o, ieee80211_tree, &ic->ic_tree) {
@@ -466,7 +466,7 @@ struct mwx_queue {
 	bus_dmamap_t			mq_map;
 	bus_dma_segment_t		mq_seg;
 	int				mq_wakeme;
-	volatile int			mq_cleanup_busy;
+	unsigned int			mq_cleanup_state; /* 0=idle, 1=running, 2=pending */
 };
 
 struct mwx_hw_capa {
@@ -544,8 +544,46 @@ struct mwx_softc {
 	int			sc_coredump_cnt;
 	int8_t			sc_resetting;
 	int8_t			sc_hard_reset;	/* reload firmware on reset */
+	int8_t			sc_fw_restart;	/* full hardware/fw re-download inside mwx_fullreset_task */
 	int8_t			sc_tx_amsdu;	/* hardware TX A-MSDU (-mtknoamsdu: off) */
 	volatile int8_t		sc_suspended;	/* system sleep: leave the hardware alone */
+	volatile int8_t		sc_sys_suspended; /* runtime/S3 HIF suspended state */
+	uint32_t		sc_syspm_suspends;
+	uint32_t		sc_syspm_resumes;
+	uint32_t		sc_syspm_failures;
+	uint32_t		sc_syspm_last_step;
+	uint32_t		sc_syspm_dma_busy;
+	uint32_t		sc_syspm_dma_reinit;
+	uint32_t		sc_syspm_fw_reloads;
+	int			sc_syspm_last_error;
+	int			sc_syspm_result;
+	volatile int8_t		sc_syspm_want;
+	SInt32			sc_syspm_req;
+	SInt32			sc_syspm_done;
+	struct task		sc_syspm_task;
+	struct task		sc_fullreset_task;
+	CTimeout		*sc_dma_to;
+	uint32_t		sc_knobs;
+#define MWX_KNOB_AUTORESET	0x04	/* auto-recover WFDMA stalls, SER & deaf RX */
+	uint64_t		sc_fullreset_last_at_us;
+	uint32_t		sc_full_resets;
+	uint32_t		sc_fullreset_last_reason;
+#define MWX_FULLRESET_DMA_DISABLED	1
+#define MWX_FULLRESET_SER		2
+#define MWX_FULLRESET_DEAF_RX		3
+	uint32_t		sc_dma_stalls;
+	int			sc_dma_stall_logged;
+	uint32_t		sc_ser_events;
+	uint32_t		sc_rx_irq_rescues;
+	uint32_t		sc_rx_deaf_resets;
+	uint32_t		sc_rx_deaf_scans;
+	uint32_t		sc_rx_deaf_channels;
+	uint32_t		sc_rx_deaf_mdrdy;
+	uint32_t		sc_rx_deaf_baseline;
+	uint32_t		sc_scan_start_rx;
+	uint32_t		sc_mcu_cmd_irqs;
+	uint32_t		sc_last_mcu_cmd;
+	uint32_t		sc_mcu_timeouts;
 	uint32_t		sc_tx_full_cnt;	/* output paused: no TXWI / ring slot */
 #if MTK_PERF
 	uint64_t		sc_tx_pause_started;
@@ -785,6 +823,15 @@ int	mwx_activate(struct device *, int);
 void	mwx_reset(struct mwx_softc *);
 void	mwx_reset_timeo(void *);
 void	mwx_reset_task(void *);
+void	mwx_fullreset_task(void *);
+void	mwx_syspm_task(void *);
+void	mwx_dma_timeo(void *);
+void	mwx_update_slot(struct ieee80211com *);
+static void mwx_scan_reset_rx_deaf(struct mwx_softc *);
+static bool mwx_scan_check_rx_deaf(struct mwx_softc *, uint32_t, uint32_t,
+	    uint32_t, uint32_t);
+static bool mwx_request_fullreset(struct mwx_softc *, const char *, uint32_t);
+static uint64_t mwx_now_us(void);
 int	mwx_txwi_alloc(struct mwx_softc *, int);
 void	mwx_txwi_free(struct mwx_softc *);
 struct mwx_txwi	*mwx_txwi_get(struct mwx_softc *);
@@ -1165,6 +1212,11 @@ mwx_init_hw(struct ifnet *ifp)
 
 	ifp->if_flags |= IFF_RUNNING;
 	ifq_clr_oactive(&ifp->if_snd);
+	sc->sc_dma_stall_logged = 0;
+	sc->sc_resetting = 0;
+	mwx_scan_reset_rx_deaf(sc);
+	if (sc->sc_dma_to != NULL)
+		timeout_add_sec(&sc->sc_dma_to, 2);
 	MWX_DEV_LOG(sc, "init interface running flags=0x%x\n", ifp->if_flags);
 
 	if (ic->ic_opmode == IEEE80211_M_MONITOR) {
@@ -1216,13 +1268,14 @@ mwx_stop(struct ifnet *ifp)
 		task_del(sc->sc_nswq, &sc->sc_bgscan_done_task);
 		task_del(sc->sc_nswq, &sc->sc_setkey_task);
 		task_del(sc->sc_nswq, &sc->sc_reset_task);
+		task_del(sc->sc_nswq, &sc->sc_edca_task);
 	}
 	task_del(systq, &sc->sc_scan_task);
 	timeout_del(&sc->sc_reset_to);
 	timeout_del(&sc->sc_intr_to);
+	timeout_del(&sc->sc_dma_to);
+	mwx_scan_reset_rx_deaf(sc);
 	sc->sc_intr_pending = 0;
-	if (sc->sc_nswq != NULL)
-		task_del(sc->sc_nswq, &sc->sc_edca_task);
 
 	ifp->if_timer = 0;
 	ifp->if_flags &= ~IFF_RUNNING;
@@ -1235,14 +1288,19 @@ mwx_stop(struct ifnet *ifp)
 	if (was_running) {
 		struct mwx_node *mn;
 		int fw_err = 0;
+		uint32_t glo = sc->sc_resetting ? mwx_read(sc, MT_WFDMA0_GLO_CFG) :
+		    (MT_WFDMA0_GLO_CFG_TX_DMA_EN | MT_WFDMA0_GLO_CFG_RX_DMA_EN);
+		bool fw_dma_up = (glo != UINT32_MAX) &&
+		    ((glo & (MT_WFDMA0_GLO_CFG_TX_DMA_EN | MT_WFDMA0_GLO_CFG_RX_DMA_EN)) ==
+		     (MT_WFDMA0_GLO_CFG_TX_DMA_EN | MT_WFDMA0_GLO_CFG_RX_DMA_EN));
 
 		free(sc->sc_bgscan_arg, M_DEVBUF, sc->sc_bgscan_arg_size);
 		sc->sc_bgscan_arg = NULL;
 		sc->sc_bgscan_arg_size = 0;
-		if (sc->sc_flags & MWX_FLAG_SCANNING) {
-			if (mt7921_mcu_hw_scan_cancel(sc) != 0)
+		if (sc->sc_flags & (MWX_FLAG_SCANNING | MWX_FLAG_BGSCAN)) {
+			if (fw_dma_up && mt7921_mcu_hw_scan_cancel(sc) != 0)
 				fw_err = 1;
-			sc->sc_flags &= ~MWX_FLAG_SCANNING;
+			sc->sc_flags &= ~(MWX_FLAG_SCANNING | MWX_FLAG_BGSCAN);
 		}
 
 		/*
@@ -1250,7 +1308,7 @@ mwx_stop(struct ifnet *ifp)
 		 * device/OMAC; deactivating UNI_BSS_INFO_BASIC while a peer
 		 * WCID is still bound causes MT7921 firmware to coredump.
 		 */
-		if (!fw_err && ic->ic_opmode == IEEE80211_M_STA &&
+		if (fw_dma_up && !fw_err && ic->ic_opmode == IEEE80211_M_STA &&
 		    (ic->ic_state == IEEE80211_S_RUN || sc->sc_sta_added)) {
 			int brv = (ic->ic_state == IEEE80211_S_RUN) ?
 			    mt7921_mcu_set_associated_bss(sc, 0) : 0;
@@ -1264,14 +1322,15 @@ mwx_stop(struct ifnet *ifp)
 		}
 
 		mn = &sc->sc_vif.vif_mn;
-		if (!fw_err && mt7921_mcu_uni_add_dev(sc, &sc->sc_vif, mn, 0) != 0)
+		if (fw_dma_up && !fw_err && mt7921_mcu_uni_add_dev(sc, &sc->sc_vif, mn, 0) != 0)
 			fw_err = 1;
-		if (!fw_err && mt7921_mcu_set_mac_enable(sc, 0, 0) != 0)
+		if (fw_dma_up && !fw_err && mt7921_mcu_set_mac_enable(sc, 0, 0) != 0)
 			fw_err = 1;
-		if (!fw_err && mwx_mcu_set_deep_sleep(sc, 1) != 0)
+		if (fw_dma_up && !fw_err && mwx_mcu_set_deep_sleep(sc, 1) != 0)
 			fw_err = 1;
-		if (fw_err) {
-			MWX_DEV_LOG(sc, "stop: MCU teardown failed, marking hard reset\n");
+		if (fw_err || !fw_dma_up) {
+			MWX_DEV_LOG(sc, "stop: MCU teardown skipped/failed (dma_up=%d), marking hard reset\n",
+			    fw_dma_up ? 1 : 0);
 			sc->sc_fw_loaded = 0;
 			sc->sc_hard_reset = 1;
 		}
@@ -1669,8 +1728,25 @@ mwx_newstate_task(void *ptr)
 
 	switch (ostate) {
 	case IEEE80211_S_RUN:
-		if (nstate != ostate)
-			mwx_mcu_set_deep_sleep(sc, 1);
+		if (nstate != ostate) {
+			if (sc->sc_flags & MWX_FLAG_BGSCAN) {
+				mt7921_mcu_hw_scan_cancel(sc);
+				sc->sc_flags &= ~(MWX_FLAG_SCANNING | MWX_FLAG_BGSCAN);
+				ic->ic_flags &= ~IEEE80211_F_BGSCAN;
+#ifdef AIRPORT_WCL
+				ic->ic_wcl_scan_requested = false;
+				if (ic->ic_event_handler)
+					(*ic->ic_event_handler)(ic,
+					    IEEE80211_EVT_SCAN_ABORTED, NULL);
+#endif
+			}
+			task_del(sc->sc_nswq, &sc->sc_bgscan_done_task);
+			free(sc->sc_bgscan_arg, M_DEVBUF, sc->sc_bgscan_arg_size);
+			sc->sc_bgscan_arg = NULL;
+			sc->sc_bgscan_arg_size = 0;
+			if (!(ic->ic_if.if_flags & IFF_RUNNING))
+				mwx_mcu_set_deep_sleep(sc, 1);
+		}
 		/*
 		 * Leaving the BSS: tell the firmware the BSS is gone and remove
 		 * the peer station record (like Linux does on disassoc). Without
@@ -1782,8 +1858,13 @@ mwx_newstate_task(void *ptr)
 
 	if (rv)
 		mwx_reset(sc);
-	else
+	else {
 		sc->sc_newstate(ic, nstate, arg);
+#ifdef AIRPORT_WCL
+		if (ic->ic_event_handler)
+			(*ic->ic_event_handler)(ic, IEEE80211_EVT_STATE_CHANGED, NULL);
+#endif
+	}
 	splx(s);
 }
 
@@ -1954,17 +2035,16 @@ mwx_bgscan_done_task(void *arg)
 	}
 
 	/*
-	 * The local net80211 port switches BSS from ni_unref_cb when the
-	 * current node's final reference is released. Install the same
-	 * callback after the driver has removed hardware keys.
+	 * Hold an explicit reference across callback setup so releasing it
+	 * runs ieee80211_node_switch_bss even if TX references already drained.
 	 */
+	ieee80211_ref_node(ni);
 	ni->ni_unref_arg = sc->sc_bgscan_arg;
 	ni->ni_unref_arg_size = sc->sc_bgscan_arg_size;
 	ni->ni_unref_cb = ieee80211_node_switch_bss;
 	sc->sc_bgscan_arg = NULL;
 	sc->sc_bgscan_arg_size = 0;
-	if (ni->ni_flags & IEEE80211_NODE_MFP)
-		ieee80211_node_switch_bss(ic, ni);
+	ieee80211_release_node(ic, ni);
 
  done:
 	if (err) {
@@ -2664,8 +2744,10 @@ mwx_intr(void *arg)
 	forced = sc->sc_intr_pending;
 	sc->sc_intr_pending = 0;
 	intr = mwx_read(sc, MT_WFDMA0_HOST_INT_STA);
-	if (intr == 0xffffffff)
+	if (intr == 0xffffffff) {
+		mwx_write(sc, MT_WFDMA0_HOST_INT_ENA, mask);
 		return 0;
+	}
 	intr |= forced;
 	if ((intr & mask) == 0) {
 		if (intr != 0 && intr_unhandled_log_count < 16) {
@@ -2701,10 +2783,17 @@ mwx_intr(void *arg)
 
 	if (intr & MT_INT_MCU_CMD) {
 		intr_sw = mwx_read(sc, MT_MCU_CMD);
-		if (intr_log_count < 16)
+		sc->sc_mcu_cmd_irqs++;
+		sc->sc_last_mcu_cmd = intr_sw;
+		if (intr_log_count < 16 || (intr_sw & ~MT_MCU_CMD_WAKE_RX_PCIE))
 			MWX_DEV_LOG(sc, "mcu interrupt status=0x%08x\n", intr_sw);
 		/* ack MCU2HOST_SW_INT_STA */
 		mwx_write(sc, MT_MCU_CMD, intr_sw);
+		if (intr_sw != UINT32_MAX &&
+		    (intr_sw & (MT_MCU_CMD_STOP_DMA | MT_MCU_CMD_STOP_DMA_FW_RELOAD))) {
+			sc->sc_ser_events++;
+			mwx_request_fullreset(sc, "firmware SER", MWX_FULLRESET_SER);
+		}
 		if (intr_sw & MT_MCU_CMD_WAKE_RX_PCIE)
 			intr |= MT_INT_RX_DONE_DATA;
 	}
@@ -2751,7 +2840,14 @@ mwx_intr(void *arg)
 			mwx_write(sc, MT_WFDMA0_HOST_INT_STA, intr);
 			if (intr & MT_INT_MCU_CMD) {
 				intr_sw = mwx_read(sc, MT_MCU_CMD);
+				sc->sc_mcu_cmd_irqs++;
+				sc->sc_last_mcu_cmd = intr_sw;
 				mwx_write(sc, MT_MCU_CMD, intr_sw);
+				if (intr_sw != UINT32_MAX &&
+				    (intr_sw & (MT_MCU_CMD_STOP_DMA | MT_MCU_CMD_STOP_DMA_FW_RELOAD))) {
+					sc->sc_ser_events++;
+					mwx_request_fullreset(sc, "firmware SER", MWX_FULLRESET_SER);
+				}
 				if (intr_sw & MT_MCU_CMD_WAKE_RX_PCIE)
 					intr |= MT_INT_RX_DONE_DATA;
 			}
@@ -2825,7 +2921,9 @@ mwx_preinit(struct mwx_softc *sc)
 		mwx_write(sc, MT_WFDMA0_HOST_INT_ENA, 0);
 		if (mwx_ensure_drv_own(sc, "preinit") != 0)
 			return EIO;
-		mwx_set(sc, MT_MCU2HOST_SW_INT_ENA, MT_MCU_CMD_WAKE_RX_PCIE);
+		mwx_set(sc, MT_MCU2HOST_SW_INT_ENA,
+		    MT_MCU_CMD_WAKE_RX_PCIE | MT_MCU_CMD_STOP_DMA |
+		    MT_MCU_CMD_STOP_DMA_FW_RELOAD);
 		mwx_write(sc, MT_WFDMA0_HOST_INT_ENA, 0);
 		mwx_write(sc, MT_PCIE_MAC_INT_ENABLE, 0xff);
 		sc->sc_hard_reset = 0;
@@ -3027,7 +3125,9 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 	MWX_DEV_LOG(sc, "attach chip id=0x%04x hwrev=0x%02x interrupt=%s\n",
 	    hwid, hwrev, pci_intr_string(pa->pa_pc, ih));
 
-	mwx_set(sc, MT_MCU2HOST_SW_INT_ENA, MT_MCU_CMD_WAKE_RX_PCIE);
+	mwx_set(sc, MT_MCU2HOST_SW_INT_ENA,
+	    MT_MCU_CMD_WAKE_RX_PCIE | MT_MCU_CMD_STOP_DMA |
+	    MT_MCU_CMD_STOP_DMA_FW_RELOAD);
 	if (mwx_wfsys_reset(sc) != 0) {
 		MWX_DEV_LOG(sc, "attach WFSYS reset failed\n");
 		goto fail;
@@ -3102,7 +3202,13 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 	    IEEE80211_C_AMSDU_IN_AMPDU | /* RX A-MSDU inside A-MPDU */
 	    IEEE80211_C_HE |		/* Wi-Fi 6 (802.11ax) HE support */
 	    IEEE80211_C_TX_AMPDU;	/* TX A-MPDU, BA set up in firmware */
-	    /* IEEE80211_C_MFP; disabled: enables clean WPA2-PSK fallback without PMF mismatch */
+
+	{
+		int pmf = 1;
+		PE_parse_boot_argn("amtk_pmf", &pmf, sizeof(pmf));
+		if (pmf != 0)
+			ic->ic_caps |= IEEE80211_C_MFP;
+	}
 
 	/*
 	 * Hardware TX A-MSDU (MT_TXD7_HW_AMSDU), like Linux mt7921 and
@@ -3277,6 +3383,7 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 #endif
 	ic->ic_bgscan_start = mwx_bgscan;
 	ic->ic_bgscan_done = mwx_bgscan_done;
+	ic->ic_updateslot = mwx_update_slot;
 	ic->ic_updateedca = mwx_updateedca;
 	ic->ic_set_key = mwx_set_key;
 	ic->ic_ampdu_rx_start = mwx_ampdu_rx_start;
@@ -3300,10 +3407,27 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 	task_set(&sc->sc_edca_task, mwx_edca_task, sc, "mwx_edca");
 	task_set(&sc->sc_setkey_task, mwx_setkey_task, sc, "mwx_setkey");
 	task_set(&sc->sc_reset_task, mwx_reset_task, sc, "mwx_reset");
+	task_set(&sc->sc_fullreset_task, mwx_fullreset_task, sc, "mwx_fullreset");
+	task_set(&sc->sc_syspm_task, mwx_syspm_task, sc, "mwx_syspm");
 	task_set(&sc->sc_scan_task, mwx_end_scan_task, sc, "mwx_scan");
 	timeout_set(&sc->sc_reset_to, mwx_reset_timeo, sc);
+	timeout_set(&sc->sc_dma_to, mwx_dma_timeo, sc);
 	timeout_set(&sc->sc_intr_to, mwx_intr_timeout, sc);
 	timeout_set(&sc->sc_amsdu_to, mwx_amsdu_timeout, sc);
+
+	sc->sc_knobs = MWX_KNOB_AUTORESET;
+	{
+		uint32_t knobs = 0;
+		if (PE_parse_boot_argn("amtk_knobs", &knobs, sizeof(knobs)))
+			sc->sc_knobs = knobs;
+		int autoreset = 1;
+		if (PE_parse_boot_argn("amtk_autoreset", &autoreset, sizeof(autoreset))) {
+			if (autoreset == 0)
+				sc->sc_knobs &= ~MWX_KNOB_AUTORESET;
+			else
+				sc->sc_knobs |= MWX_KNOB_AUTORESET;
+		}
+	}
 
 	/*
 	 * We cannot read the MAC address without loading the
@@ -3351,6 +3475,214 @@ void
 mwx_reset_timeo(void *arg)
 {
 	mwx_reset((struct mwx_softc *)arg);
+}
+
+static uint64_t
+mwx_now_us(void)
+{
+	uint64_t now_ns = 0;
+	absolutetime_to_nanoseconds(mach_absolute_time(), &now_ns);
+	return now_ns / 1000ULL;
+}
+
+static void
+mwx_dump_dma_state(struct mwx_softc *sc, const char *why)
+{
+	if (!sc || !sc->sc_memh)
+		return;
+	MWX_DEV_LOG(sc,
+	    "dma state (%s): glo=0x%08x int_sta=0x%08x int_ena=0x%08x lpctl=0x%08x mcu_cmd=0x%08x misc=0x%08x\n",
+	    why ? why : "?",
+	    mwx_read(sc, MT_WFDMA0_GLO_CFG),
+	    mwx_read(sc, MT_WFDMA0_HOST_INT_STA),
+	    mwx_read(sc, MT_WFDMA0_HOST_INT_ENA),
+	    mwx_read(sc, MT_CONN_ON_LPCTL),
+	    mwx_read(sc, MT_MCU_CMD),
+	    mwx_read(sc, MT_CONN_ON_MISC));
+}
+
+static void
+mwx_scan_reset_rx_deaf(struct mwx_softc *sc)
+{
+	sc->sc_rx_deaf_scans = 0;
+	sc->sc_rx_deaf_channels = 0;
+	sc->sc_rx_deaf_mdrdy = 0;
+	sc->sc_rx_deaf_baseline = 0;
+}
+
+static bool
+mwx_request_fullreset(struct mwx_softc *sc, const char *reason,
+    uint32_t reason_code)
+{
+	const uint64_t cooldown_us = 30000000ULL;
+	uint64_t now;
+
+	if ((sc->sc_knobs & MWX_KNOB_AUTORESET) == 0 || sc->sc_resetting ||
+	    sc->sc_detaching || sc->sc_sys_suspended || sc->sc_nswq == NULL ||
+	    (sc->sc_ic.ic_if.if_flags & IFF_RUNNING) == 0)
+		return false;
+	now = mwx_now_us();
+	if (sc->sc_fullreset_last_at_us != 0 &&
+	    now >= sc->sc_fullreset_last_at_us &&
+	    now - sc->sc_fullreset_last_at_us < cooldown_us)
+		return false;
+	sc->sc_fullreset_last_reason = reason_code;
+	sc->sc_fullreset_last_at_us = now;
+	sc->sc_resetting = 1;
+	MWX_DEV_LOG(sc, "requesting full reset (%s, code=%u)\n",
+	    reason, reason_code);
+	task_add(sc->sc_nswq, &sc->sc_fullreset_task);
+	return true;
+}
+
+static bool
+mwx_scan_check_rx_deaf(struct mwx_softc *sc, uint32_t complete_ch,
+    uint32_t beacon_scan, uint32_t probe_sum, uint32_t mdrdy_sum)
+{
+	uint32_t rx_now = sc->sc_rx_pkt_normal + sc->sc_rx_pkt_normal_mcu;
+
+	if (complete_ch == 0)
+		return false;
+	if (beacon_scan > 0 || probe_sum > 0 || rx_now != sc->sc_scan_start_rx) {
+		mwx_scan_reset_rx_deaf(sc);
+		return false;
+	}
+	if (mdrdy_sum == 0)
+		return false;
+	if (sc->sc_rx_deaf_scans == 0 || rx_now != sc->sc_rx_deaf_baseline) {
+		sc->sc_rx_deaf_scans = 0;
+		sc->sc_rx_deaf_channels = 0;
+		sc->sc_rx_deaf_mdrdy = 0;
+		sc->sc_rx_deaf_baseline = rx_now;
+	}
+	sc->sc_rx_deaf_scans++;
+	sc->sc_rx_deaf_channels += complete_ch;
+	sc->sc_rx_deaf_mdrdy += mdrdy_sum;
+	if (sc->sc_rx_deaf_scans >= 2 && sc->sc_rx_deaf_channels >= 16 &&
+	    sc->sc_rx_deaf_mdrdy >= 64) {
+		MWX_DEV_LOG(sc,
+		    "deaf RX detected: scans=%u channels=%u mdrdy=%u rx=%u; requesting full reset\n",
+		    sc->sc_rx_deaf_scans, sc->sc_rx_deaf_channels,
+		    sc->sc_rx_deaf_mdrdy, rx_now);
+		mwx_scan_reset_rx_deaf(sc);
+		if (mwx_request_fullreset(sc, "deaf RX during scan",
+		    MWX_FULLRESET_DEAF_RX)) {
+			sc->sc_rx_deaf_resets++;
+			return true;
+		}
+	}
+	return false;
+}
+
+void
+mwx_fullreset_task(void *arg)
+{
+	struct mwx_softc *sc = (struct mwx_softc *)arg;
+	struct ifnet *ifp = &sc->sc_ic.ic_if;
+	int rv, s = splnet();
+
+	sc->sc_full_resets++;
+	MWX_DEV_LOG(sc, "full reset %u start reason=%u\n",
+	    sc->sc_full_resets, sc->sc_fullreset_last_reason);
+	mwx_dump_dma_state(sc, "before full reset");
+	sc->sc_resetting = 1;
+	mwx_scan_reset_rx_deaf(sc);
+	if (ifp->if_flags & IFF_RUNNING)
+		mwx_stop(ifp);
+	if ((mwx_read(sc, MT_CONN_ON_LPCTL) & PCIE_LPCR_HOST_OWN_SYNC) != 0)
+		(void)mwx_mcu_drv_pmctrl(sc);
+	sc->sc_fw_loaded = 0;
+	sc->sc_hard_reset = 1;
+	sc->sc_fw_restart = 1;
+	rv = mwx_init_hardware(sc);
+	if (rv != 0 && !sc->sc_detaching) {
+		MWX_DEV_LOG(sc, "full reset hardware init retry rv=%d\n", rv);
+		sc->sc_fw_loaded = 0;
+		sc->sc_hard_reset = 1;
+		rv = mwx_init_hardware(sc);
+	}
+	if (rv == 0) {
+		sc->sc_fw_loaded = 1;
+		sc->sc_hard_reset = 0;
+	}
+	sc->sc_fw_restart = 0;
+	sc->sc_resetting = 0;
+	if (rv == 0 && (ifp->if_flags & IFF_UP))
+		rv = mwx_init(ifp);
+	MWX_DEV_LOG(sc, "full reset done rv=%d\n", rv);
+	splx(s);
+}
+
+static bool
+mwx_dma_rx_pending(struct mwx_softc *sc, struct mwx_queue *q)
+{
+	uint32_t hw;
+
+	if (q->mq_count == 0 || q->mq_desc == NULL || q->mq_data == NULL)
+		return false;
+	hw = mwx_read(sc, q->mq_regbase + MT_DMA_DMA_IDX);
+	if (hw >= q->mq_count)
+		return false;
+	return hw != q->mq_cons;
+}
+
+void
+mwx_dma_timeo(void *arg)
+{
+	struct mwx_softc *sc = (struct mwx_softc *)arg;
+	struct ifnet *ifp = &sc->sc_ic.ic_if;
+	uint32_t glo, mcu_cmd;
+	const uint32_t dma_en =
+	    MT_WFDMA0_GLO_CFG_TX_DMA_EN | MT_WFDMA0_GLO_CFG_RX_DMA_EN;
+
+	if ((ifp->if_flags & IFF_RUNNING) == 0 || sc->sc_resetting ||
+	    sc->sc_detaching || sc->sc_suspended || sc->sc_sys_suspended)
+		return;
+
+	glo = mwx_read(sc, MT_WFDMA0_GLO_CFG);
+	if (glo == UINT32_MAX) {
+		if (!sc->sc_dma_stall_logged) {
+			sc->sc_dma_stall_logged = 1;
+			sc->sc_dma_stalls++;
+			MWX_DEV_LOG(sc, "dma watchdog: GLO_CFG reads all ones\n");
+		}
+		timeout_add_sec(&sc->sc_dma_to, 2);
+		return;
+	}
+	if ((glo & dma_en) != dma_en) {
+		if (!sc->sc_dma_stall_logged) {
+			sc->sc_dma_stall_logged = 1;
+			sc->sc_dma_stalls++;
+			mwx_dump_dma_state(sc, "WFDMA disabled");
+		}
+		if (mwx_request_fullreset(sc, "WFDMA disabled",
+		    MWX_FULLRESET_DMA_DISABLED))
+			return;
+		timeout_add_sec(&sc->sc_dma_to, 2);
+		return;
+	}
+
+	mcu_cmd = mwx_read(sc, MT_MCU_CMD);
+	if (mcu_cmd != UINT32_MAX &&
+	    (mcu_cmd & (MT_MCU_CMD_STOP_DMA | MT_MCU_CMD_STOP_DMA_FW_RELOAD))) {
+		sc->sc_ser_events++;
+		sc->sc_last_mcu_cmd = mcu_cmd;
+		mwx_write(sc, MT_MCU_CMD, mcu_cmd);
+		mwx_dump_dma_state(sc, "firmware SER (poll)");
+		if (mwx_request_fullreset(sc, "firmware SER",
+		    MWX_FULLRESET_SER))
+			return;
+	}
+
+	struct mwx_queue *rxqs[3] = { &sc->sc_rxq, &sc->sc_rxmcuq, &sc->sc_rxfwdlq };
+	for (int i = 0; i < 3; i++) {
+		if (mwx_dma_rx_pending(sc, rxqs[i])) {
+			sc->sc_rx_irq_rescues++;
+			(void)mwx_dma_rx_done(sc, rxqs[i]);
+		}
+	}
+	mwx_dma_tx_done(sc);
+	timeout_add_sec(&sc->sc_dma_to, 2);
 }
 
 void
@@ -3756,6 +4088,7 @@ mwx_queue_reset(struct mwx_softc *sc, struct mwx_queue *q)
 	mwx_write(sc, q->mq_regbase + MT_DMA_DMA_IDX, 0);
 	q->mq_cons = 0;
 	q->mq_prod = 0;
+	__atomic_store_n(&q->mq_cleanup_state, 0u, __ATOMIC_RELEASE);
 
 	/* free buffers */
 	for (i = 0; i < q->mq_count; i++) {
@@ -4039,10 +4372,8 @@ mwx_dma_txwi_enqueue(struct mwx_softc *sc, struct mwx_queue *q,
 	desc = &q->mq_desc[idx];
 
 	/* check if there is enough space */
-	if (1 > mwx_dma_free_slots(q)) {
-		bus_dmamap_unload(sc->sc_dmat, md->md_map);
+	if (1 > mwx_dma_free_slots(q))
 		return EBUSY;
-	}
 
 	md->md_txwi = mt;
 	md->md_mbuf = NULL;
@@ -4084,71 +4415,89 @@ mwx_dma_txwi_enqueue(struct mwx_softc *sc, struct mwx_queue *q,
 void
 mwx_dma_tx_cleanup(struct mwx_softc *sc, struct mwx_queue *q)
 {
+	enum { MQ_CLEANUP_IDLE = 0, MQ_CLEANUP_RUNNING = 1, MQ_CLEANUP_PENDING = 2 };
 	struct mwx_queue_data *md;
 	struct mwx_desc *desc;
 	int idx, last;
+	unsigned int prev = MQ_CLEANUP_IDLE;
 
-	if (!OSCompareAndSwap(0, 1, &q->mq_cleanup_busy))
-		return;
-
-	idx = q->mq_cons;
-	last = mwx_read(sc, q->mq_regbase + MT_DMA_DMA_IDX);
-
-	if (idx == last) {
-		OSCompareAndSwap(1, 0, &q->mq_cleanup_busy);
+	if (!__atomic_compare_exchange_n(&q->mq_cleanup_state, &prev,
+	    MQ_CLEANUP_RUNNING, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+		if (prev == MQ_CLEANUP_RUNNING)
+			__atomic_compare_exchange_n(&q->mq_cleanup_state, &prev,
+			    MQ_CLEANUP_PENDING, false, __ATOMIC_RELEASE, __ATOMIC_RELAXED);
 		return;
 	}
 
-	bus_dmamap_sync(sc->sc_dmat, q->mq_map, 0, q->mq_map->dm_mapsize,
-	     BUS_DMASYNC_PREWRITE);
+	do {
+		__atomic_store_n(&q->mq_cleanup_state, MQ_CLEANUP_RUNNING, __ATOMIC_RELEASE);
 
-	while (idx != last) {
-		md = &q->mq_data[idx];
-		desc = &q->mq_desc[idx];
+		idx = q->mq_cons;
+		last = mwx_read(sc, q->mq_regbase + MT_DMA_DMA_IDX);
 
-		if (md->md_mbuf != NULL) {
-			struct mbuf *m = md->md_mbuf;
-			md->md_mbuf = NULL;
-			bus_dmamap_sync(sc->sc_dmat, md->md_map, 0,
-			    md->md_map->dm_mapsize, BUS_DMASYNC_POSTWRITE);
-			bus_dmamap_unload(sc->sc_dmat, md->md_map);
-			if (m != NULL)
-				m_freem(m);
-		}
-		if (md->md_txwi != NULL) {
-			static uint32_t txwi_ack_log_count;
+		if (last < 0 || last >= (int)q->mq_count)
+			break;
 
-			/* TXWI cleanup is driven by the firmware TX free event. */
-			md->md_txwi = NULL;
-			if (txwi_ack_log_count < 32) {
-				MWX_DEV_LOG(sc, "txwi acked idx=%d\n", idx);
-				txwi_ack_log_count++;
+		if (idx != last) {
+			bus_dmamap_sync(sc->sc_dmat, q->mq_map, 0, q->mq_map->dm_mapsize,
+			    BUS_DMASYNC_PREWRITE);
+
+			while (idx != last) {
+				md = &q->mq_data[idx];
+				desc = &q->mq_desc[idx];
+
+				if (md->md_mbuf != NULL) {
+					struct mbuf *m = md->md_mbuf;
+					md->md_mbuf = NULL;
+					bus_dmamap_sync(sc->sc_dmat, md->md_map, 0,
+					    md->md_map->dm_mapsize, BUS_DMASYNC_POSTWRITE);
+					bus_dmamap_unload(sc->sc_dmat, md->md_map);
+					if (m != NULL)
+						m_freem(m);
+				}
+				if (md->md_txwi != NULL) {
+					static uint32_t txwi_ack_log_count;
+
+					/* TXWI cleanup is driven by the firmware TX free event. */
+					md->md_txwi = NULL;
+					if (txwi_ack_log_count < 32) {
+						MWX_DEV_LOG(sc, "txwi acked idx=%d\n", idx);
+						txwi_ack_log_count++;
+					}
+				}
+
+				/* clear DMA desc just to be sure */
+				desc->buf0 = 0;
+				desc->buf1 = 0;
+				desc->info = 0;
+				desc->ctrl = htole32(MT_DMA_CTL_DMA_DONE);
+
+				idx = (idx + 1) % q->mq_count;
+
+				/* check if more data made it in */
+				if (idx == last) {
+					int next_last = mwx_read(sc, q->mq_regbase + MT_DMA_DMA_IDX);
+					if (next_last < 0 || next_last >= (int)q->mq_count)
+						break;
+					last = next_last;
+				}
+			}
+
+			bus_dmamap_sync(sc->sc_dmat, q->mq_map, 0, q->mq_map->dm_mapsize,
+			    BUS_DMASYNC_POSTWRITE);
+
+			q->mq_cons = idx;
+			if (q->mq_wakeme) {
+				q->mq_wakeme = 0;
+				wakeup(q);
 			}
 		}
 
-		/* clear DMA desc just to be sure */
-		desc->buf0 = 0;
-		desc->buf1 = 0;
-		desc->info = 0;
-		desc->ctrl = htole32(MT_DMA_CTL_DMA_DONE);
-
-		idx = (idx + 1) % q->mq_count;
-
-		/* check if more data made it in */
-		/* XXX should we actually do that? */
-		if (idx == last)
-			last = mwx_read(sc, q->mq_regbase + MT_DMA_DMA_IDX);
-	}
-
-	bus_dmamap_sync(sc->sc_dmat, q->mq_map, 0, q->mq_map->dm_mapsize,
-	    BUS_DMASYNC_POSTWRITE);
-
-	q->mq_cons = idx;
-	if (q->mq_wakeme) {
-		q->mq_wakeme = 0;
-		wakeup(q);
-	}
-	OSCompareAndSwap(1, 0, &q->mq_cleanup_busy);
+		prev = MQ_CLEANUP_RUNNING;
+	} while (!__atomic_compare_exchange_n(&q->mq_cleanup_state, &prev,
+	    MQ_CLEANUP_IDLE, false, __ATOMIC_RELEASE, __ATOMIC_RELAXED));
+	if (last < 0 || last >= (int)q->mq_count)
+		__atomic_store_n(&q->mq_cleanup_state, MQ_CLEANUP_IDLE, __ATOMIC_RELEASE);
 }
 
 void
@@ -4309,7 +4658,22 @@ mwx_dma_rx_dequeue(struct mwx_softc *sc, struct mwx_queue *q,
 
 		/* only buf0 is used on RX rings */
 		ctrl = le32toh(desc->ctrl);
-		mbuf_setlen(m, MT_DNA_CTL_SD_GET_LEN0(ctrl));
+		uint32_t seglen = MT_DNA_CTL_SD_GET_LEN0(ctrl);
+		if (seglen == 0 || seglen > md->md_map->dm_mapsize) {
+			static uint32_t rx_badlen_log;
+			if (rx_badlen_log++ < 8)
+				MWX_DEV_LOG(sc, "rx slot %d invalid len=%u max=%u\n",
+				    idx, seglen, (uint32_t)md->md_map->dm_mapsize);
+			m_freem(m);
+			if (m0 != NULL) {
+				m_freem(m0);
+				m0 = mtail = NULL;
+			}
+			idx = (idx + 1) % q->mq_count;
+			broken = true;
+			break;
+		}
+		mbuf_setlen(m, seglen);
 #if MTK_PERF
 		mp_add(mp_rx_desc);
 		mp_add(mp_rx_desc_bytes, mbuf_len(m));
@@ -4744,6 +5108,7 @@ mwx_mcu_wait_resp_int(struct mwx_softc *sc, uint32_t cmd, int seq,
 		remaining_ms -= 10;
 	}
 	if (!sc->sc_mcu_wait[seq].mcu_done) {
+		sc->sc_mcu_timeouts++;
 		printf("%s: command %x timeout (seq=%d)\n", DEVNAME(sc), cmd, seq);
 		mwx_reset(sc);
 		return ETIMEDOUT;
@@ -4771,6 +5136,7 @@ mwx_mcu_wait_resp_msg(struct mwx_softc *sc, uint32_t cmd, int seq,
 		remaining_ms -= 10;
 	}
 	if (!sc->sc_mcu_wait[seq].mcu_done) {
+		sc->sc_mcu_timeouts++;
 		printf("%s: command %x timeout (seq=%d)\n", DEVNAME(sc), cmd, seq);
 		mwx_reset(sc);
 		return ETIMEDOUT;
@@ -4867,7 +5233,9 @@ mwx_dma_enable(struct mwx_softc *sc)
 
 	/* enable interrupts for TX/RX rings */
 	mwx_write(sc, MT_WFDMA0_HOST_INT_ENA, sc->sc_intr_mask);
-	mwx_set(sc, MT_MCU2HOST_SW_INT_ENA, MT_MCU_CMD_WAKE_RX_PCIE);
+	mwx_set(sc, MT_MCU2HOST_SW_INT_ENA,
+	    MT_MCU_CMD_WAKE_RX_PCIE | MT_MCU_CMD_STOP_DMA |
+	    MT_MCU_CMD_STOP_DMA_FW_RELOAD);
 	mwx_write(sc, MT_PCIE_MAC_INT_ENABLE, 0xff);
 }
 
@@ -5951,6 +6319,7 @@ mt7921_mcu_hw_scan(struct mwx_softc *sc, int bgscan)
 	memset(req, 0, sizeof(*req));
 
 	sc->sc_flags |= MWX_FLAG_SCANNING;
+	sc->sc_scan_start_rx = sc->sc_rx_pkt_normal + sc->sc_rx_pkt_normal_mcu;
 	sc->sc_scan_seq_num = (sc->sc_scan_seq_num + 1) & 0x7f;
 
 	req->seq_num = sc->sc_scan_seq_num /* | sc->sc_band_idx << 7 */;
@@ -5961,39 +6330,62 @@ mt7921_mcu_hw_scan(struct mwx_softc *sc, int bgscan)
 
 #ifdef AIRPORT_WCL
 	/*
-	 * A scan macOS asked for (AirportMtkWlan): active when it wants probes,
-	 * with its SSID (hidden networks), on its channels. Scans the driver
-	 * starts itself stay passive over every channel, as with SimpleMtkWlan.
-	 * Like Linux mt76: probing with no SSID is the wildcard (ssid_type 1).
+	 * Active WCL scans copy up to 4 primary + 6 extended SSID targets
+	 * (Instant Hotspot / hidden SSIDs). Explicit joins without a separate
+	 * scan request probe ic_des_essid and inspect ic_wcl_join_chan first.
 	 */
-	if (ic->ic_wcl_scan_requested &&
-	    AirportWCL::scanUsesProbes(true, ic->ic_wcl_scan_active)) {
-		req->scan_type = 1;
-		req->probe_req_num = 2;
-		if (ic->ic_wcl_scan_ssid_length > 0 &&
-		    ic->ic_wcl_scan_ssid_length <= IEEE80211_NWID_LEN) {
-			req->ssids[0].ssid_len = htole32(ic->ic_wcl_scan_ssid_length);
-			memcpy(req->ssids[0].ssid, ic->ic_wcl_scan_ssid,
-			    ic->ic_wcl_scan_ssid_length);
-			n_ssids = 1;
+	if (ic->ic_wcl_scan_requested && ic->ic_wcl_scan_active &&
+	    ic->ic_wcl_scan_target_count > 0 &&
+	    ic->ic_wcl_scan_target_count <= 10) {
+		for (unsigned i = 0; i < ic->ic_wcl_scan_target_count; i++) {
+			uint8_t slen = ic->ic_wcl_scan_target_lengths[i];
+			if (!slen || slen > IEEE80211_NWID_LEN)
+				continue;
+			auto *dst = (n_ssids < 4) ? &req->ssids[n_ssids] :
+			    &req->ext_ssids[n_ssids - 4];
+			dst->ssid_len = htole32(slen);
+			memcpy(dst->ssid, ic->ic_wcl_scan_targets[i], slen);
+			n_ssids++;
 		}
 	}
-#endif
-
-#ifdef NOTYET
-	for (i = 0; i < sreq->n_ssids; i++) {
-		if (!sreq->ssids[i].ssid_len)
-			continue;
-		req->ssids[i].ssid_len = htole32(sreq->ssids[i].ssid_len);
-		memcpy(req->ssids[i].ssid, sreq->ssids[i].ssid,
-		    sreq->ssids[i].ssid_len);
-		n_ssids++;
+	if (ic->ic_wcl_scan_requested && ic->ic_wcl_scan_active &&
+	    n_ssids == 0 && ic->ic_wcl_scan_ssid_length > 0 &&
+	    ic->ic_wcl_scan_ssid_length <= IEEE80211_NWID_LEN) {
+		req->ssids[0].ssid_len = htole32(ic->ic_wcl_scan_ssid_length);
+		memcpy(req->ssids[0].ssid, ic->ic_wcl_scan_ssid,
+		    ic->ic_wcl_scan_ssid_length);
+		n_ssids = 1;
+	}
+	if (!ic->ic_wcl_scan_requested && ic->ic_wcl_join_requested &&
+	    ic->ic_des_esslen > 0 && ic->ic_des_esslen <= IEEE80211_NWID_LEN) {
+		req->ssids[0].ssid_len = htole32(ic->ic_des_esslen);
+		memcpy(req->ssids[0].ssid, ic->ic_des_essid, ic->ic_des_esslen);
+		n_ssids = 1;
+	}
+	if (n_ssids || (ic->ic_wcl_scan_requested &&
+	    AirportWCL::scanUsesProbes(true, ic->ic_wcl_scan_active))) {
+		req->scan_type = 1;
+		req->probe_req_num = 2;
 	}
 #endif
 
 	req->ssid_type = n_ssids ? 0x4 : 0x1;
-	req->ssid_type_ext = n_ssids ? 1 : 0;
-	req->ssids_num = n_ssids;
+	req->ssid_type_ext = (n_ssids
+#ifdef AIRPORT_WCL
+	    && !(ic->ic_wcl_scan_requested && ic->ic_wcl_scan_wildcard)
+#endif
+	    ) ? 1 : 0;
+	req->ssids_num = (n_ssids < 4) ? n_ssids : 4;
+	req->ext_ssids_num = (n_ssids > 4) ? (n_ssids - 4) : 0;
+
+#ifdef AIRPORT_WCL
+	unsigned join_chan = 0;
+	if (!ic->ic_wcl_scan_requested && ic->ic_wcl_join_requested &&
+	    ic->ic_wcl_join_chan > 0 && ic->ic_wcl_join_chan <= IEEE80211_CHAN_MAX &&
+	    ic->ic_channels[ic->ic_wcl_join_chan].ic_flags != 0)
+		join_chan = ic->ic_wcl_join_chan;
+	ic->ic_wcl_join_chan = 0;
+#endif
 
 	/* Prefer-5 GHz mode visits 5 GHz first, so a dual-band SSID's 5 GHz node is known before its 2.4 GHz beacon. */
 	bool from5 = nmx_wifi_band != '2' && nmx_wifi_band != '5';
@@ -6007,6 +6399,12 @@ mt7921_mcu_hw_scan(struct mwx_softc *sc, int bgscan)
 
 		if (c->ic_flags == 0)
 			continue;
+#ifdef AIRPORT_WCL
+		if (join_chan) {
+			if (c != &ic->ic_channels[join_chan])
+				continue;
+		} else
+#endif
 		/* prefer-5 GHz: pass 0 takes the 5 GHz channels, pass 1 the 2.4 GHz ones */
 		if (from5 && (pass == 0) == IEEE80211_IS_CHAN_2GHZ(c))
 			continue;
@@ -6135,6 +6533,20 @@ mt7921_mcu_scan_event(struct mwx_softc *sc, struct mbuf *m)
 	uint32_t probe_sum = 0, mdrdy_sum = 0;
 	int i, nodes_before;
 
+	if (!(sc->sc_flags & MWX_FLAG_SCANNING)) {
+		MWX_DEV_LOG(sc, "scan done ignored: not scanning\n");
+		return;
+	}
+	if (mbuf_len(m) >= sizeof(*event)) {
+		event = mtod(m, struct mt76_connac_hw_scan_done *);
+		if (event->seq_num != sc->sc_scan_seq_num) {
+			MWX_DEV_LOG(sc,
+			    "scan done ignored: stale seq=%u expected=%u\n",
+			    event->seq_num, sc->sc_scan_seq_num);
+			return;
+		}
+	}
+
 	sc->sc_scan_done_count++;
 	nodes_before = mwx_count_nodes(ic);
 	sc->sc_scan_last_ieee80211_nodes = nodes_before;
@@ -6153,6 +6565,9 @@ mt7921_mcu_scan_event(struct mwx_softc *sc, struct mbuf *m)
 		    probe_sum, mdrdy_sum, le32toh(event->beacon_2g_num),
 		    le32toh(event->beacon_5g_num), nodes_before,
 		    sc->sc_rx_pkt_normal, sc->sc_rx_fill_fail);
+		if (mwx_scan_check_rx_deaf(sc, event->complete_channel_num,
+		    le32toh(event->beacon_scan_num), probe_sum, mdrdy_sum))
+			return;
 	} else {
 		MWX_DEV_LOG(sc,
 		    "scan done #%u short event len=%zu nodes_before=%d rx_norm=%u rx_fail=%u\n",
@@ -6600,6 +7015,14 @@ mt7921_mac_set_timing(struct mwx_softc *sc)
 	mwx_rmw(sc, MT_AGG_ACR0(0), val, MT_AGG_ACR_CFEND_RATE_MASK);
 	mwx_clear(sc, MT_ARB_SCR(0),
 	    MT_ARB_SCR_TX_DISABLE | MT_ARB_SCR_RX_DISABLE);
+}
+
+void
+mwx_update_slot(struct ieee80211com *ic)
+{
+	if (!(ic->ic_if.if_flags & IFF_RUNNING))
+		return;
+	mt7921_mac_set_timing((struct mwx_softc *)ic->ic_if.if_softc);
 }
 
 int
@@ -8403,12 +8826,18 @@ MtkMwx::detach(IOPCIDevice *device)
     com->sc_detaching = true;
     timeout_del(&com->sc_amsdu_to);
     timeout_del(&com->sc_reset_to);
+    timeout_del(&com->sc_dma_to);
     timeout_del(&com->sc_intr_to);
+    if (com->sc_nswq) {
+        task_del(com->sc_nswq, &com->sc_fullreset_task);
+        task_del(com->sc_nswq, &com->sc_syspm_task);
+    }
     /* Keep interrupts alive while in-flight MCU requests finish. */
     taskq_quiesce(com->sc_nswq);
     if (taskQueueOwned) taskq_quiesce(systq);
     if (ifp->if_flags & IFF_RUNNING) mwx_stop(ifp);
     timeout_free(&com->sc_reset_to);
+    timeout_free(&com->sc_dma_to);
     timeout_free(&com->sc_intr_to);
     /* No interrupt callback may access buffers during their destruction. */
     if (com->sc_ih) {
@@ -9167,6 +9596,306 @@ mt7921_mcu_set_associated_bss(struct mwx_softc *sc, int associated)
  * (deauth while the radio still works), mask interrupts and ignore the
  * hardware until resume().
  */
+enum {
+	MWX_SYSPM_STEP_NONE = 0,
+	MWX_SYSPM_STEP_DRV_OWN = 1,
+	MWX_SYSPM_STEP_HIF = 2,
+	MWX_SYSPM_STEP_DMA_IDLE = 3,
+	MWX_SYSPM_STEP_FW_OWN = 4,
+	MWX_SYSPM_STEP_REINIT = 5,
+	MWX_SYSPM_STEP_DONE = 6,
+};
+
+static int
+mwx_mcu_set_hif_suspend(struct mwx_softc *sc, int suspend)
+{
+	struct {
+		struct {
+			uint8_t		hif_type;
+			uint8_t		pad[3];
+		} __packed hdr;
+		struct {
+			uint16_t	tag;
+			uint16_t	len;
+			uint8_t		suspend;
+			uint8_t		pad[7];
+		} __packed hif_suspend;
+	} __packed req = {};
+
+	req.hdr.hif_type = 2;
+	req.hif_suspend.tag = htole16(0);
+	req.hif_suspend.len = htole16(sizeof(req.hif_suspend));
+	req.hif_suspend.suspend = suspend ? 1 : 0;
+	return mwx_mcu_send_wait(sc, MCU_UNI_CMD_HIF_CTRL, &req, sizeof(req));
+}
+
+static IOReturn
+mwx_syspm_quiesce_gated(OSObject *, void *arg, void *, void *, void *)
+{
+	struct mwx_softc *sc = (struct mwx_softc *)arg;
+	int rv = mwx_poll(sc, MT_WFDMA0_GLO_CFG, 0,
+	    MT_WFDMA0_GLO_CFG_TX_DMA_BUSY | MT_WFDMA0_GLO_CFG_RX_DMA_BUSY, 100);
+	if (rv != 0)
+		sc->sc_syspm_dma_busy = mwx_read(sc, MT_WFDMA0_GLO_CFG) &
+		    (MT_WFDMA0_GLO_CFG_TX_DMA_BUSY | MT_WFDMA0_GLO_CFG_RX_DMA_BUSY);
+	mwx_clear(sc, MT_WFDMA0_GLO_CFG,
+	    MT_WFDMA0_GLO_CFG_TX_DMA_EN | MT_WFDMA0_GLO_CFG_RX_DMA_EN);
+	mwx_write(sc, MT_WFDMA0_HOST_INT_ENA, 0);
+	mwx_write(sc, MT_PCIE_MAC_INT_ENABLE, 0);
+	mwx_barrier(sc);
+	return kIOReturnSuccess;
+}
+
+static IOReturn
+mwx_syspm_unquiesce_gated(OSObject *, void *arg, void *, void *, void *)
+{
+	struct mwx_softc *sc = (struct mwx_softc *)arg;
+
+	mwx_write(sc, MT_PCIE_MAC_INT_ENABLE, 0xff);
+	mwx_write(sc, MT_WFDMA0_HOST_INT_ENA, sc->sc_intr_mask);
+	mwx_set(sc, MT_MCU2HOST_SW_INT_ENA,
+	    MT_MCU_CMD_WAKE_RX_PCIE | MT_MCU_CMD_STOP_DMA |
+	    MT_MCU_CMD_STOP_DMA_FW_RELOAD);
+	mwx_set(sc, MT_WFDMA0_GLO_CFG,
+	    MT_WFDMA0_GLO_CFG_TX_DMA_EN | MT_WFDMA0_GLO_CFG_RX_DMA_EN);
+	mwx_barrier(sc);
+	return kIOReturnSuccess;
+}
+
+static IOReturn
+mwx_dma_reinit_gated(OSObject *, void *arg, void *, void *, void *)
+{
+	struct mwx_softc *sc = (struct mwx_softc *)arg;
+	int rv = 0;
+	if (!(mwx_read(sc, MT_WFDMA_DUMMY_CR) & MT_WFDMA_NEED_REINIT)) {
+		mwx_write(sc, MT_WFDMA0_HOST_INT_ENA, 0);
+		mwx_write(sc, MT_PCIE_MAC_INT_ENABLE, 0);
+		rv = mwx_dma_reset(sc, 0);
+	}
+	return rv == 0 ? kIOReturnSuccess : kIOReturnIOError;
+}
+
+static int
+mwx_dma_reinit_cond(struct mwx_softc *sc)
+{
+	pci_intr_handle_t ih = (pci_intr_handle_t)sc->sc_ih;
+	if (mwx_read(sc, MT_WFDMA_DUMMY_CR) & MT_WFDMA_NEED_REINIT)
+		return 0;
+	if (sc->sc_ic.ic_if.if_flags & IFF_RUNNING)
+		return EBUSY;
+	if (!ih || !ih->workloop || !sc->sc_txq.mq_map ||
+	    !sc->sc_txmcuq.mq_map || !sc->sc_txfwdlq.mq_map ||
+	    !sc->sc_rxq.mq_map || !sc->sc_rxmcuq.mq_map ||
+	    !sc->sc_rxfwdlq.mq_map)
+		return ENXIO;
+	return ih->workloop->runAction(mwx_dma_reinit_gated, ih, sc) ==
+	    kIOReturnSuccess ? 0 : EIO;
+}
+
+static int
+mwx_syspm_run_gated(struct mwx_softc *sc, IOWorkLoop::Action action)
+{
+	pci_intr_handle_t ih = (pci_intr_handle_t)sc->sc_ih;
+	if (!ih || !ih->workloop)
+		return ENXIO;
+	return ih->workloop->runAction(action, ih, sc) ==
+	    kIOReturnSuccess ? 0 : ETIMEDOUT;
+}
+
+static int
+mwx_sys_suspend(struct mwx_softc *sc)
+{
+	struct ifnet *ifp = &sc->sc_ic.ic_if;
+	int rv;
+
+	if (!sc->sc_fw_loaded || sc->sc_sys_suspended || !sc->sc_memh)
+		return 0;
+	if (ifp->if_flags & IFF_RUNNING)
+		mwx_stop(ifp);
+	sc->sc_syspm_last_step = MWX_SYSPM_STEP_DRV_OWN;
+	if ((rv = mwx_ensure_drv_own(sc, "sys_suspend")) != 0)
+		return rv;
+	sc->sc_syspm_last_step = MWX_SYSPM_STEP_HIF;
+	if ((rv = mwx_mcu_set_hif_suspend(sc, 1)) != 0)
+		return rv;
+	mwx_mcu_set_deep_sleep(sc, 1);
+	sc->sc_syspm_last_step = MWX_SYSPM_STEP_DMA_IDLE;
+	sc->sc_sys_suspended = 1;
+	sc->sc_suspended = 1;
+	OSSynchronizeIO();
+	(void)mwx_syspm_run_gated(sc, mwx_syspm_quiesce_gated);
+	sc->sc_syspm_last_step = MWX_SYSPM_STEP_FW_OWN;
+	if ((rv = mwx_mcu_fw_pmctrl(sc)) != 0)
+		return rv;
+	sc->sc_syspm_last_step = MWX_SYSPM_STEP_DONE;
+	return 0;
+}
+
+static int
+mwx_sys_resume_reload(struct mwx_softc *sc, const char *why)
+{
+	sc->sc_syspm_fw_reloads++;
+	MWX_DEV_LOG(sc, "syspm: %s, reloading firmware misc=0x%08x\n",
+	    why, mwx_read(sc, MT_CONN_ON_MISC));
+	sc->sc_sys_suspended = 0;
+	sc->sc_suspended = 0;
+	OSSynchronizeIO();
+	mwx_pci_disable_aspm(sc, sc->sc_tag);
+	task_del(sc->sc_nswq, &sc->sc_reset_task);
+	timeout_del(&sc->sc_reset_to);
+	sc->sc_fw_loaded = 0;
+	sc->sc_hard_reset = 1;
+	mwx_fullreset_task(sc);
+	if ((mwx_read(sc, MT_CONN_ON_MISC) & MT_TOP_MISC2_FW_N9_RDY) !=
+	    MT_TOP_MISC2_FW_N9_RDY) {
+		MWX_DEV_LOG(sc, "syspm: reload failed misc=0x%08x\n",
+		    mwx_read(sc, MT_CONN_ON_MISC));
+		return EIO;
+	}
+	sc->sc_syspm_last_step = MWX_SYSPM_STEP_DONE;
+	return 0;
+}
+
+static int
+mwx_sys_resume(struct mwx_softc *sc)
+{
+	int rv, rv2;
+
+	if (!sc->sc_sys_suspended && !sc->sc_suspended)
+		return 0;
+	mwx_pci_disable_aspm(sc, sc->sc_tag);
+	sc->sc_syspm_last_step = MWX_SYSPM_STEP_DRV_OWN;
+	rv = mwx_ensure_drv_own(sc, "sys_resume");
+	if (rv == 0 && (mwx_read(sc, MT_CONN_ON_MISC) & MT_TOP_MISC2_FW_N9_RDY) !=
+	    MT_TOP_MISC2_FW_N9_RDY) {
+		(void)mwx_syspm_run_gated(sc, mwx_syspm_unquiesce_gated);
+		return mwx_sys_resume_reload(sc, "firmware lost in S3 sleep");
+	}
+	if (rv == 0) {
+		sc->sc_syspm_last_step = MWX_SYSPM_STEP_REINIT;
+		if (!(mwx_read(sc, MT_WFDMA_DUMMY_CR) & MT_WFDMA_NEED_REINIT))
+			sc->sc_syspm_dma_reinit++;
+		rv = mwx_dma_reinit_cond(sc);
+	}
+	(void)mwx_syspm_run_gated(sc, mwx_syspm_unquiesce_gated);
+	sc->sc_sys_suspended = 0;
+	sc->sc_suspended = 0;
+	OSSynchronizeIO();
+	if (rv != 0)
+		return mwx_sys_resume_reload(sc, "DMA reinit failed on wake");
+	sc->sc_syspm_last_step = MWX_SYSPM_STEP_HIF;
+	rv2 = mwx_mcu_set_hif_suspend(sc, 0);
+	if (rv2 != 0)
+		return mwx_sys_resume_reload(sc, "HIF resume failed");
+	sc->sc_syspm_last_step = MWX_SYSPM_STEP_DONE;
+	return 0;
+}
+
+void
+mwx_syspm_task(void *arg)
+{
+	struct mwx_softc *sc = (struct mwx_softc *)arg;
+	SInt32 req = sc->sc_syspm_req;
+	int rv;
+
+	OSSynchronizeIO();
+	if (sc->sc_detaching)
+		rv = ENXIO;
+	else if (sc->sc_syspm_want) {
+		rv = mwx_sys_suspend(sc);
+		sc->sc_syspm_suspends++;
+	} else {
+		rv = mwx_sys_resume(sc);
+		sc->sc_syspm_resumes++;
+	}
+	if (rv != 0) {
+		sc->sc_syspm_failures++;
+		sc->sc_syspm_last_error = rv;
+	}
+	sc->sc_syspm_result = rv;
+	OSSynchronizeIO();
+	sc->sc_syspm_done = req;
+}
+
+static bool
+mwx_syspm_enabled(void)
+{
+	static int enabled = -1;
+	if (enabled < 0) {
+		int value = 1;
+		PE_parse_boot_argn("amtk_syspm", &value, sizeof(value));
+		enabled = value != 0;
+	}
+	return enabled != 0;
+}
+
+IOReturn
+MtkMwx::systemPower(bool doSuspend)
+{
+	if (!com || com->sc_detaching || !com->sc_nswq)
+		return kIOReturnNotAttached;
+	if (!mwx_syspm_enabled()) {
+		if (doSuspend)
+			this->suspend();
+		else
+			this->resume();
+		return kIOReturnSuccess;
+	}
+	if (!doSuspend && !com->sc_sys_suspended && !com->sc_suspended)
+		return kIOReturnSuccess;
+	com->sc_syspm_want = doSuspend ? 1 : 0;
+	OSSynchronizeIO();
+	SInt32 requested = OSIncrementAtomic(&com->sc_syspm_req) + 1;
+	task_add(com->sc_nswq, &com->sc_syspm_task);
+	for (unsigned i = 0; i < 600; i++) {
+		OSSynchronizeIO();
+		if (com->sc_syspm_done == requested)
+			return com->sc_syspm_result ? kIOReturnIOError : kIOReturnSuccess;
+		mwxSleepNsec(com, 0, "mwx-syspm", MSEC_TO_NSEC(10));
+		if (com->sc_detaching)
+			return kIOReturnNotAttached;
+	}
+	return kIOReturnTimeout;
+}
+
+void
+MtkMwx::systemPowerStats(uint32_t out[9])
+{
+	memset(out, 0, sizeof(uint32_t) * 9);
+	if (!com)
+		return;
+	out[0] = com->sc_syspm_suspends;
+	out[1] = com->sc_syspm_resumes;
+	out[2] = com->sc_syspm_failures;
+	out[3] = (uint32_t)com->sc_syspm_last_error;
+	out[4] = com->sc_syspm_last_step;
+	out[5] = com->sc_syspm_dma_busy;
+	out[6] = com->sc_syspm_dma_reinit;
+	out[7] = (uint32_t)(com->sc_sys_suspended ? 1 : 0);
+	out[8] = com->sc_syspm_fw_reloads;
+}
+
+void
+MtkMwx::publishHealthDiagnostics()
+{
+	if (!com || !mwxController())
+		return;
+	mwxController()->setProperty("MTKWiFiDMAStalls", com->sc_dma_stalls, 32);
+	mwxController()->setProperty("MTKWiFiFullResets", com->sc_full_resets, 32);
+	mwxController()->setProperty("MTKWiFiFullResetLastReason", com->sc_fullreset_last_reason, 32);
+	mwxController()->setProperty("MTKWiFiSEREvents", com->sc_ser_events, 32);
+	mwxController()->setProperty("MTKWiFiRxIRQRescues", com->sc_rx_irq_rescues, 32);
+	mwxController()->setProperty("MTKWiFiRxDeafResets", com->sc_rx_deaf_resets, 32);
+	mwxController()->setProperty("MTKWiFiRxDeafScans", com->sc_rx_deaf_scans, 32);
+	mwxController()->setProperty("MTKWiFiRxNormalPackets", com->sc_rx_pkt_normal, 32);
+	mwxController()->setProperty("MTKWiFiRxNormalMCUPackets", com->sc_rx_pkt_normal_mcu, 32);
+	mwxController()->setProperty("MTKWiFiRxFillFail", com->sc_rx_fill_fail, 32);
+	mwxController()->setProperty("MTKWiFiMCUTimeouts", com->sc_mcu_timeouts, 32);
+	mwxController()->setProperty("MTKWiFiLastMCUCmd", com->sc_last_mcu_cmd, 32);
+	mwxController()->setProperty("MTKWiFiAutoResetEnabled",
+	    (com->sc_knobs & MWX_KNOB_AUTORESET) != 0);
+}
+
 void
 MtkMwx::suspend()
 {
@@ -9201,7 +9930,9 @@ MtkMwx::resume()
 	MWX_DEV_LOG(sc, "resume lpctl=0x%08x\n", mwx_read(sc, MT_CONN_ON_LPCTL));
 	mwx_ensure_drv_own(sc, "resume");
 	mwx_pci_disable_aspm(sc, sc->sc_tag);
-	mwx_set(sc, MT_MCU2HOST_SW_INT_ENA, MT_MCU_CMD_WAKE_RX_PCIE);
+	mwx_set(sc, MT_MCU2HOST_SW_INT_ENA,
+	    MT_MCU_CMD_WAKE_RX_PCIE | MT_MCU_CMD_STOP_DMA |
+	    MT_MCU_CMD_STOP_DMA_FW_RELOAD);
 	mwx_write(sc, MT_WFDMA0_HOST_INT_ENA, 0);
 	mwx_write(sc, MT_PCIE_MAC_INT_ENABLE, 0xff);
 	sc->sc_fw_loaded = 0;

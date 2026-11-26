@@ -1428,6 +1428,9 @@ ieee80211_end_scan(struct _ifnet *ifp)
     int bgscan = ((ic->ic_flags & IEEE80211_F_BGSCAN) &&
                   ic->ic_opmode == IEEE80211_M_STA &&
                   ic->ic_state == IEEE80211_S_RUN);
+    /* Clear stale F_BGSCAN if state left RUN before scan completion. */
+    if (!bgscan && (ic->ic_flags & IEEE80211_F_BGSCAN))
+        ic->ic_flags &= ~IEEE80211_F_BGSCAN;
     int roamscan = bgscan &&
                 (ic->ic_flags & IEEE80211_F_DISABLE_BG_AUTO_CONNECT) == 0;
     

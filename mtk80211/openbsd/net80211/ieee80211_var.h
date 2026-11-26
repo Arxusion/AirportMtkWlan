@@ -78,6 +78,7 @@
 
 #include <sys/kpi_mbuf.h>
 #include <net80211/ieee80211.h>
+#include <net80211/ieee80211_11d.h>
 #include <net80211/ieee80211_crypto.h>
 #include <net80211/ieee80211_ioctl.h>		/* for ieee80211_stats */
 #include <net80211/ieee80211_node.h>
@@ -457,11 +458,23 @@ struct ieee80211com {
     uint8_t ic_wcl_scan_ssid[32];
     bool ic_wcl_scan_restricted;
     uint8_t ic_wcl_scan_channels[32];
+    uint8_t ic_wcl_scan_target_count;
+    uint8_t ic_wcl_scan_target_lengths[10];
+    uint8_t ic_wcl_scan_targets[10][32];
+    bool ic_wcl_scan_wildcard;
+    uint16_t ic_wcl_join_chan;
+    uint8_t ic_wcl_apple_ie;
+    uint8_t ic_wcl_hotspot_flag;
     uint32_t ic_wcl_scan_away_time_ms;
     uint64_t ic_wcl_tx_packets[4];
     uint64_t ic_wcl_rx_packets[4];
     bool ic_wcl_scan_idle;   /* scan finished, nothing asked for: wait for macOS */
 #endif
+    u_int8_t ic_11d_bss_cc[2];
+    struct ieee80211_11d_tally ic_11d_seen[IEEE80211_11D_MAX_SLOTS];
+    u_int32_t ic_11d_elements;
+    bool ic_auth_comeback_pending;
+    bool ic_auth_comeback_retried;
     /* The channel width has changed (20<->2040) */
     void            (*ic_update_chw)(struct ieee80211com *);
     void            (*ic_event_handler)(struct ieee80211com *, int, void *);
@@ -709,6 +722,8 @@ struct ieee80211_ess {
 #define IEEE80211_EVT_DRIVER_READY 6
 #define IEEE80211_EVT_DRIVER_STOPPED 7
 #define IEEE80211_EVT_DRIVER_RESET_BEGIN 8
+#define IEEE80211_EVT_SCAN_ABORTED 9
+#define IEEE80211_EVT_STATE_CHANGED 10
 struct ieee80211_beacon_event {
     const struct ieee80211_node *node;
     const uint8_t *ies;

@@ -34,7 +34,7 @@ puts structs
 print <<'CPP'
 struct ieee80211_channel {unsigned ic_flags,ic_freq;};
 struct ieee80211com {ieee80211_channel ic_channels[256];};
-struct mwx_softc {ieee80211com sc_ic;unsigned sc_flags;uint8_t sc_scan_seq_num;};
+struct mwx_softc {ieee80211com sc_ic;unsigned sc_flags;uint8_t sc_scan_seq_num;uint32_t sc_rx_pkt_normal,sc_rx_pkt_normal_mcu,sc_scan_start_rx;};
 struct mbuf {unsigned char bytes[sizeof(mt76_connac_hw_scan_req)];};
 #define mtod(m,T) reinterpret_cast<T>((m)->bytes)
 #define IEEE80211_IS_CHAN_2GHZ(c) ((c)->ic_freq<100)

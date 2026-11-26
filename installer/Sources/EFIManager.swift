@@ -219,10 +219,7 @@ public class EFIManager {
         let searchDirs = [
             Bundle.main.resourceURL?.appendingPathComponent("kexts"),
             Bundle.main.resourceURL?.appendingPathComponent("kexts/bluetooth"),
-            URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("build/Release"),
-            URL(fileURLWithPath: "/Volumes/MacExtended/Developer/projects/AirportMtkWlan/build/Release"),
-            URL(fileURLWithPath: "/Users/yash/Desktop/EFI/OC/Kexts"),
-            URL(fileURLWithPath: "/Volumes/MacExtended/EFI/OC/Kexts")
+            URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("build/Release")
         ].compactMap { $0 }
         
         for dir in searchDirs {
@@ -241,7 +238,7 @@ public class EFIManager {
     public func install(
         flavor: DriverFlavor,
         destination: EFIDestination,
-        installBluetooth: Bool = true,
+        installBluetooth: Bool = false,
         autoConfig: Bool,
         backupPlist: Bool,
         logger: @escaping (String) -> Void
@@ -533,10 +530,16 @@ public class EFIManager {
         process.waitUntilExit()
         
         let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        if output.contains("AirportMtkWlan") {
-            return DriverStatus(isLoaded: true, loadedVersion: "2.2.1", kextIdentifier: "com.arxusion.AirportMtkWlan")
-        } else if output.contains("SimpleMtkWlan") {
-            return DriverStatus(isLoaded: true, loadedVersion: "2.2.1", kextIdentifier: "com.arxusion.SimpleMtkWlan")
+        for line in output.components(separatedBy: .newlines) {
+            if line.contains("AirportMtkWlan") || line.contains("SimpleMtkWlan") {
+                let parts = line.split(whereSeparator: { $0.isWhitespace })
+                let ident = parts.first(where: { $0.contains("AirportMtkWlan") || $0.contains("SimpleMtkWlan") }).map(String.init)
+                var ver: String? = nil
+                if let lp = line.firstIndex(of: "("), let rp = line[lp...].firstIndex(of: ")") {
+                    ver = String(line[line.index(after: lp)..<rp])
+                }
+                return DriverStatus(isLoaded: true, loadedVersion: ver, kextIdentifier: ident)
+            }
         }
         return DriverStatus(isLoaded: false, loadedVersion: nil, kextIdentifier: nil)
     }
@@ -572,6 +575,15 @@ public class EFIManager {
 
     // MARK: - Diagnostic Log Grabber
 
+    public func sysctlString(_ key: String) -> String {
+        var size = 0
+        sysctlbyname(key, nil, &size, nil, 0)
+        guard size > 0 else { return "Unknown" }
+        var buf = [CChar](repeating: 0, count: size)
+        guard sysctlbyname(key, &buf, &size, nil, 0) == 0 else { return "Unknown" }
+        return String(cString: buf)
+    }
+
     public func findLogGrabberScript() -> URL? {
         let fm = FileManager.default
         var candidates: [URL] = []
@@ -579,7 +591,6 @@ public class EFIManager {
             candidates.append(bundleScript)
         }
         candidates.append(URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent("tools/mtk-grab-logs.sh"))
-        candidates.append(URL(fileURLWithPath: "/Users/yash/nmx-build/wifi5/src/tools/mtk-grab-logs.sh"))
         return candidates.first(where: { fm.fileExists(atPath: $0.path) })
     }
 
@@ -694,9 +705,7 @@ public class EFIManager {
         
         // 2. Check local build directory relative to executable or current working directory
         let searchPaths = [
-            URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("build/Release/" + (flavor == .tahoe ? "tahoe/AirportMtkWlan.kext" : flavor == .sequoia ? "sequoia/AirportMtkWlan.kext" : "SimpleMtkWlan.kext")),
-            URL(fileURLWithPath: "/Users/yash/nmx-build/wifi5/src/build/Release/" + (flavor == .tahoe ? "tahoe/AirportMtkWlan.kext" : flavor == .sequoia ? "sequoia/AirportMtkWlan.kext" : "SimpleMtkWlan.kext")),
-            URL(fileURLWithPath: "/Volumes/MacExtended/Patches/" + flavor.kextName)
+            URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("build/Release/" + (flavor == .tahoe ? "tahoe/AirportMtkWlan.kext" : flavor == .sequoia ? "sequoia/AirportMtkWlan.kext" : "SimpleMtkWlan.kext"))
         ]
         
         for u in searchPaths {

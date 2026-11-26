@@ -1740,8 +1740,10 @@ ieee80211_recv_probe_resp(struct ieee80211com *ic, mbuf_t m,
     const uint8_t *hecap;
     const uint8_t *heopmode;
     const uint8_t *mde;
+    const uint8_t *countryie;
     u_int16_t capinfo, bintval;
     u_int8_t chan, bchan, erp, dtim_count, dtim_period;
+    uint8_t country[2];
     int is_new;
     
     /*
@@ -1779,7 +1781,7 @@ ieee80211_recv_probe_resp(struct ieee80211com *ic, mbuf_t m,
     bintval = LE_READ_2(frm); frm += 2;
     capinfo = LE_READ_2(frm); frm += 2;
     
-    ssid = rates = xrates = edcaie = wmmie = rsnie = wpaie = csa = vhtcap = vhtopmode = hecap = heopmode = mde = NULL;
+    ssid = rates = xrates = edcaie = wmmie = rsnie = wpaie = csa = vhtcap = vhtopmode = hecap = heopmode = mde = countryie = NULL;
     htcaps = htop = NULL;
     if (rxi->rxi_chan)
          bchan = rxi->rxi_chan;
@@ -1809,6 +1811,9 @@ ieee80211_recv_probe_resp(struct ieee80211com *ic, mbuf_t m,
                     break;
                 }
                 chan = frm[2];
+                break;
+            case IEEE80211_ELEMID_COUNTRY:
+                countryie = frm;
                 break;
             case IEEE80211_ELEMID_XRATES:
                 xrates = frm;
@@ -1960,7 +1965,18 @@ ieee80211_recv_probe_resp(struct ieee80211com *ic, mbuf_t m,
         is_new = 0;
     
     ni->ni_chan = &ic->ic_channels[chan];
-    
+
+    if (ieee80211_parse_11d_country(countryie, country)) {
+        ic->ic_11d_elements++;
+        ieee80211_record_11d_country(ic->ic_11d_seen, ni->ni_11d_cc, country);
+        if (ic->ic_opmode == IEEE80211_M_STA &&
+            ic->ic_state == IEEE80211_S_RUN &&
+            ni == ic->ic_bss) {
+            ic->ic_11d_bss_cc[0] = country[0];
+            ic->ic_11d_bss_cc[1] = country[1];
+        }
+    }
+
     if (htcaps)
         ieee80211_setup_htcaps(ni, htcaps + 2, htcaps[1]);
     if (htop && !ieee80211_setup_htop(ni, htop + 2, htop[1], 1))
@@ -2775,11 +2791,18 @@ ieee80211_recv_assoc_resp(struct ieee80211com *ic, mbuf_t m,
     status =  LE_READ_2(frm); frm += 2;
 
     ic->ic_assoc_status = status;
+#ifdef AIRPORT_WCL
+    /* WCL consumes ASSOC_DONE only once RUN firmware setup succeeds, or immediately on failure. */
+    if (status != IEEE80211_STATUS_SUCCESS && ic->ic_event_handler) {
+        (*ic->ic_event_handler)(ic, IEEE80211_EVT_STA_ASSOC_DONE, NULL);
+    }
+#else
     if (status == IEEE80211_STATUS_SUCCESS) {
         if (ic->ic_event_handler) {
             (*ic->ic_event_handler)(ic, IEEE80211_EVT_STA_ASSOC_DONE, NULL);
         }
     }
+#endif
     
     if (status != IEEE80211_STATUS_SUCCESS) {
         if (ifp->if_flags & IFF_DEBUG)

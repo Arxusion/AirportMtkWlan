@@ -7,7 +7,7 @@ set -u
 set -o pipefail
 umask 077
 
-TOOL_VERSION="2.1.2"
+TOOL_VERSION="2.3.0"
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
 
@@ -181,6 +181,26 @@ lshow() {
     kill "$w" 2>/dev/null || true
     wait "$w" 2>/dev/null || true
     return "$rc"
+}
+
+# Drain stdin after hitting byte cap so upstream generators never hit SIGPIPE under pipefail.
+cap_bytes() {
+    local max_b=${1:-2097152}
+    awk -v lim="$max_b" '
+        BEGIN { total = 0; capped = 0 }
+        {
+            if (total < lim) {
+                print
+                total += length($0) + 1
+            } else {
+                capped++
+            }
+        }
+        END {
+            if (capped > 0) {
+                printf "... (%d lines truncated after %d-byte log cap)\n", capped, lim
+            }
+        }'
 }
 
 headtail() {
@@ -435,6 +455,10 @@ fi
     echo "csr-active-config: $(nvram 7C436110-AB2A-4BBB-A880-FE41995C9F82:csr-active-config 2>/dev/null | cut -f2- || echo '(not set)')"
     echo "opencore-version: $(nvram 4D1FDA02-38C7-4A6A-9CC6-4BCCA8B30102:opencore-version 2>/dev/null | cut -f2- || echo '(absent)')"
     echo "opencore-boot-path: $(nvram 4D1FDA02-38C7-4A6A-9CC6-4BCCA8B30102:boot-path 2>/dev/null | cut -f2- || echo '(absent)')"
+    echo "mtk-wifi-band: $(nvram 7C436110-AB2A-4BBB-A880-FE41995C9F82:mtk-wifi-band 2>/dev/null | cut -f2- || echo '(not set)')"
+    echo "mtk-wifi-cc: $(nvram 7C436110-AB2A-4BBB-A880-FE41995C9F82:mtk-wifi-cc 2>/dev/null | cut -f2- || echo '(not set)')"
+    echo "nmx-wifi-band: $(nvram 7C436110-AB2A-4BBB-A880-FE41995C9F82:nmx-wifi-band 2>/dev/null | cut -f2- || echo '(not set)')"
+    echo "nmx-wifi-cc: $(nvram 7C436110-AB2A-4BBB-A880-FE41995C9F82:nmx-wifi-cc 2>/dev/null | cut -f2- || echo '(not set)')"
     echo
     echo "== IOMMU / AppleVTD"
     bounded 10 ioreg -r -c AppleVTD -d 1 2>&1 | head -n 40 || true
@@ -477,10 +501,13 @@ IOREG_PCI=$(run_or_fixture "ioreg_pci.txt" bounded 25 ioreg -r -c IOPCIDevice -l
     done
     echo
     echo "=== Driver & IO80211 Registry Objects ==="
-    for cls in AirportItlwm SimpleMtkWlan IOPCIEDeviceWrapper IO80211Controller IO80211InfraInterface IO80211Interface; do
+    for cls in AirportItlwm SimpleMtkWlan IOPCIEDeviceWrapper IO80211Controller IO80211InfraInterface IO80211Interface IO80211AWDLPeerManager; do
         echo "-- class: $cls"
-        bounded 10 ioreg -r -c "$cls" -l -w0 2>&1 | grep -v '"MtkDebugLog"' | head -n 120 || true
+        bounded 10 ioreg -r -c "$cls" -l -w0 2>&1 | grep -v '"MtkDebugLog"' | head -n 160 || true
     done
+    echo
+    echo "=== MTK Wi-Fi Telemetry & Country Properties ==="
+    printf '%s\n' "$IOREG_PCI" | grep -E '"(MTKWiFi|MTKSleep|MTKWake|MtkThroughput|IOClass|CFBundleVersion)' || echo "(no MTK telemetry properties found)"
     echo
     echo "=== USB MediaTek / Bluetooth Combo Check ==="
     bounded 15 ioreg -p IOUSB -l -w0 2>&1 | awk '
@@ -571,6 +598,209 @@ WIFI_IFACES=$(printf '%s\n' "$HW_PORTS" | awk '/Hardware Port: Wi-Fi/{getline; i
 } > "$ROOT_DIR/04-network-wifi-state.txt" 2>&1
 redact_file_inplace "$ROOT_DIR/04-network-wifi-state.txt"
 
+# --- Section 8: OpenCore EFI Config & Logs ---
+progress "Inspecting OpenCore config and kext inventory..."
+{
+    echo "=== OpenCore EFI Scan ==="
+    if [ -n "$FIXTURE_DIR" ] && [ -f "$FIXTURE_DIR/config.plist" ]; then
+        echo "fixture: config.plist sanitized"
+        sanitize_config_plist "$FIXTURE_DIR/config.plist" "$ROOT_DIR/08-efi-opencore/fixture-config.plist.xml" || warn_msg "failed to sanitize fixture config.plist"
+    elif [ "$NO_EFI" -eq 1 ]; then
+        echo "(skipped: --no-efi passed)"
+    else
+        # Always check already-mounted EFI/OC folders safely (read-only)
+        found_oc=0
+        for vol in /Volumes/*; do
+            [ -d "$vol" ] || continue
+            for cand in "$vol/EFI/OC" "$vol/OC"; do
+                [ -f "$cand/config.plist" ] || continue
+                found_oc=1
+                safe_v=$(printf '%s' "$(basename "$vol")" | tr -c 'A-Za-z0-9._-' '_')
+                echo "mounted: $cand (volume=$safe_v)"
+                if [ -r "$cand/config.plist" ]; then
+                    sanitize_config_plist "$cand/config.plist" "$ROOT_DIR/08-efi-opencore/${safe_v}-config.plist.xml" || true
+                else
+                    echo "  (config.plist unreadable without admin privileges)"
+                fi
+                if [ -d "$cand/Kexts" ]; then
+                    echo "  Kexts/ listing:"
+                    ls -la "$cand/Kexts" 2>/dev/null | sed 's/^/    /'
+                    for k in AirportMtkWlan.kext SimpleMtkWlan.kext itlwm.kext AirportMtkBtPatcher.kext AirportMtkBtFw.kext SimpleMtkBtPatcher.kext SimpleMtkBtFw.kext; do
+                        if [ -d "$cand/Kexts/$k" ]; then
+                            ver=$(plutil -extract CFBundleShortVersionString raw -o - "$cand/Kexts/$k/Contents/Info.plist" 2>/dev/null || echo "?")
+                            bin="$cand/Kexts/$k/Contents/MacOS/${k%.kext}"
+                            sha=$([ -f "$bin" ] && shasum -a 256 "$bin" 2>/dev/null | awk '{print $1}' || echo "?")
+                            echo "  -> $k version=$ver sha256=$sha"
+                        fi
+                    done
+                fi
+                find "$vol" -maxdepth 2 -type f \( -name 'opencore-*.txt' -o -name 'boot*.log' -o -name 'panic-*.txt' \) -exec stat -f '%m %N' {} + 2>/dev/null \
+                    | sort -rn | head -n 4 | cut -d' ' -f2- | while IFS= read -r lf; do
+                    [ -n "$lf" ] || continue
+                    safe_lf=$(printf '%s' "$(basename "$lf")" | tr -c 'A-Za-z0-9._-' '_')
+                    head -c 262144 "$lf" > "$ROOT_DIR/08-efi-opencore/${safe_v}-${safe_lf}" 2>/dev/null && redact_file_inplace "$ROOT_DIR/08-efi-opencore/${safe_v}-${safe_lf}" || true
+                done
+            done
+        done
+        # If running as root without --no-efi and not in quick mode, check OpenCore boot-path ESP if unmounted
+        if [ "$NO_EFI" -eq 0 ] && [ "$MODE" = "full" ] && [ "$(id -u)" -eq 0 ]; then
+            bpart=$(booted_part || true)
+            if [ -n "$bpart" ]; then
+                cur_mp=$(diskutil info "$bpart" 2>/dev/null | awk -F': *' '/Mount Point:/{print $2; exit}')
+                if [ -z "$cur_mp" ]; then
+                    if diskutil mount "$bpart" >/dev/null 2>&1; then
+                        MOUNTED_BY_US="$MOUNTED_BY_US $bpart"
+                        cur_mp=$(diskutil info "$bpart" 2>/dev/null | awk -F': *' '/Mount Point:/{print $2; exit}')
+                        ocrel=$(boot_ocrel)
+                        ocrel=${ocrel:-EFI/OC}
+                        if [ -n "$cur_mp" ] && [ -f "$cur_mp/$ocrel/config.plist" ]; then
+                            found_oc=1
+                            echo "booted-esp: $bpart -> /$ocrel"
+                            sanitize_config_plist "$cur_mp/$ocrel/config.plist" "$ROOT_DIR/08-efi-opencore/${bpart}-config.plist.xml" || true
+                            if [ -d "$cur_mp/$ocrel/Kexts" ]; then
+                                ls -la "$cur_mp/$ocrel/Kexts" 2>/dev/null | sed 's/^/    /'
+                                for k in AirportMtkWlan.kext SimpleMtkWlan.kext itlwm.kext AirportMtkBtPatcher.kext AirportMtkBtFw.kext SimpleMtkBtPatcher.kext SimpleMtkBtFw.kext; do
+                                    if [ -d "$cur_mp/$ocrel/Kexts/$k" ]; then
+                                        ver=$(plutil -extract CFBundleShortVersionString raw -o - "$cur_mp/$ocrel/Kexts/$k/Contents/Info.plist" 2>/dev/null || echo "?")
+                                        bin="$cur_mp/$ocrel/Kexts/$k/Contents/MacOS/${k%.kext}"
+                                        sha=$([ -f "$bin" ] && shasum -a 256 "$bin" 2>/dev/null | awk '{print $1}' || echo "?")
+                                        echo "  -> $k version=$ver sha256=$sha"
+                                    fi
+                                done
+                            fi
+                            find "$cur_mp" -maxdepth 1 -type f \( -name 'opencore-*.txt' -o -name 'panic-*.txt' \) -exec stat -f '%m %N' {} + 2>/dev/null \
+                                | sort -rn | head -n 4 | cut -d' ' -f2- | while IFS= read -r lf; do
+                                [ -n "$lf" ] || continue
+                                safe_lf=$(printf '%s' "$(basename "$lf")" | tr -c 'A-Za-z0-9._-' '_')
+                                head -c 262144 "$lf" > "$ROOT_DIR/08-efi-opencore/${bpart}-${safe_lf}" 2>/dev/null && redact_file_inplace "$ROOT_DIR/08-efi-opencore/${bpart}-${safe_lf}" || true
+                            done
+                        fi
+                    fi
+                fi
+            fi
+        fi
+        [ "$found_oc" -eq 1 ] || echo "(no mounted OpenCore config.plist readable; mount EFI or run Full Logs mode if needed)"
+    fi
+} > "$ROOT_DIR/08-efi-opencore/disks-efi-scan.txt" 2>&1
+redact_file_inplace "$ROOT_DIR/08-efi-opencore/disks-efi-scan.txt"
+
+# --- Section 9: Panics & Crash Reports ---
+progress "Checking recent panic and Wi-Fi daemon crash logs..."
+PANIC_COUNT=0
+CRASH_COUNT=0
+mkdir -p "$ROOT_DIR/09-crashes-panics"
+diag_dirs=(
+    "/Library/Logs/DiagnosticReports"
+    "/Library/Logs/DiagnosticReports/Retired"
+    "/private/var/db/PanicReporter"
+)
+if [ -n "$TARGET_HOME" ]; then
+    diag_dirs+=(
+        "$TARGET_HOME/Library/Logs/DiagnosticReports"
+        "$TARGET_HOME/Library/Logs/DiagnosticReports/Retired"
+    )
+fi
+if [ -n "$FIXTURE_DIR" ] && [ -d "$FIXTURE_DIR/DiagnosticReports" ]; then
+    diag_dirs=("$FIXTURE_DIR/DiagnosticReports")
+    [ -d "$FIXTURE_DIR/PanicReporter" ] && diag_dirs+=("$FIXTURE_DIR/PanicReporter")
+fi
+
+collect_recent_into() {
+    local prefix=$1 limit=$2
+    shift 2
+    local recent=() seen=() f i dup existing count=0 dst
+    for f in "$@"; do
+        [ -f "$f" ] && [ ! -L "$f" ] || continue
+        dup=0
+        for existing in ${seen[@]+"${seen[@]}"}; do
+            if [ "$existing" = "$f" ]; then
+                dup=1
+                break
+            fi
+        done
+        [ "$dup" -eq 0 ] || continue
+        seen+=("$f")
+        i=0
+        while [ "$i" -lt "${#recent[@]}" ] && [ ! "$f" -nt "${recent[$i]}" ]; do
+            i=$((i + 1))
+        done
+        [ "$i" -lt "$limit" ] || continue
+        recent=("${recent[@]:0:$i}" "$f" "${recent[@]:$i}")
+        recent=("${recent[@]:0:$limit}")
+    done
+    for f in ${recent[@]+"${recent[@]}"}; do
+        count=$((count + 1))
+        dst="$ROOT_DIR/09-crashes-panics/${prefix}-${count}-$(printf '%s' "$(basename "$f")" | tr -c 'A-Za-z0-9._-' '_')"
+        head -c 524288 "$f" > "$dst" 2>/dev/null && redact_file_inplace "$dst" || true
+    done
+    printf '%s' "$count"
+}
+
+add_panic_matches_in_dir() {
+    local dir=$1
+    for f in "$dir"/.contents.panic "$dir"/*.panic "$dir"/*.contents.panic "$dir"/panic*.ips "$dir"/*Panic*.ips "$dir"/Kernel-*.ips; do
+        panic_candidates+=("$f")
+    done
+}
+
+shopt -s nullglob
+panic_candidates=()
+crash_candidates=()
+for d in "${diag_dirs[@]}"; do
+    [ -d "$d" ] || continue
+    add_panic_matches_in_dir "$d"
+    for sub in "$d"/*; do
+        [ -d "$sub" ] && [ ! -L "$sub" ] || continue
+        add_panic_matches_in_dir "$sub"
+    done
+    for f in "$d"/airportd*.ips "$d"/WiFiAgent*.ips "$d"/wifip2pd*.ips "$d"/wifivelocityd*.ips "$d"/AirportMtkWlan*.ips "$d"/SimpleMtkWlan*.ips "$d"/kernelmanagerd*.ips "$d"/wifid*.ips "$d"/airportd*.crash "$d"/kernelmanagerd*.crash "$d"/SimpleMtkWlan*.crash; do
+        crash_candidates+=("$f")
+    done
+done
+shopt -u nullglob
+
+if [ -n "$FIXTURE_DIR" ] && [ -f "$FIXTURE_DIR/panic.log" ]; then
+    panic_candidates+=("$FIXTURE_DIR/panic.log")
+elif [ -z "$FIXTURE_DIR" ] && [ -f "/private/var/log/panic.log" ]; then
+    panic_candidates+=("/private/var/log/panic.log")
+fi
+
+PANIC_COUNT=$(collect_recent_into "panic" 5 ${panic_candidates[@]+"${panic_candidates[@]}"})
+CRASH_COUNT=$(collect_recent_into "crash" 6 ${crash_candidates[@]+"${crash_candidates[@]}"})
+
+PANIC_CHECK_FILE="$ROOT_DIR/09-crashes-panics/00-panic-and-shutdown-check.txt"
+{
+    echo "=== Panic, Kernel & Wi-Fi Diagnostic Reports Inventory ==="
+    for d in "${diag_dirs[@]}"; do
+        echo "-- $d --"
+        if [ -d "$d" ]; then
+            matches=$(find "$d" -maxdepth 2 -type f \( -iname '*panic*' -o -iname '*kernel*' -o -iname '*airport*' -o -iname '*wifi*' -o -iname '*mtk*' -o -iname '*itlwm*' -o -iname '*shutdown*' \) -exec ls -ld {} + 2>/dev/null || true)
+            if [ -n "$matches" ]; then
+                printf '%s\n' "$matches"
+            else
+                echo "(no matching panic/kernel/wifi/shutdown files)"
+            fi
+        else
+            echo "(not present)"
+        fi
+    done
+    echo
+    echo "=== NVRAM Panic & Wake-Failure Indicators ==="
+    if [ -n "$FIXTURE_DIR" ] && [ -f "$FIXTURE_DIR/nvram_panic.txt" ]; then
+        cat "$FIXTURE_DIR/nvram_panic.txt"
+    elif [ -n "$FIXTURE_DIR" ]; then
+        echo "(no fixture nvram_panic)"
+    else
+        for k in aapl,panic-info panic-info 7C436110-AB2A-4BBB-A880-FE41995C9F82:wake-failure; do
+            printf '%s: ' "$k"
+            nvram "$k" 2>&1 | head -c 4096 || true
+            echo
+        done
+        nvram -p 2>/dev/null | awk 'tolower($0) ~ /panic|wake-failure/ { print $1, substr($0, length($1)+1, 200) }' || echo "(nvram -p unreadable)"
+    fi
+} > "$PANIC_CHECK_FILE" 2>&1
+redact_file_inplace "$PANIC_CHECK_FILE"
+
 # --- Section 5: Kernel Logs (Current Boot + dmesg) ---
 progress "Collecting kernel Wi-Fi and driver logs..."
 {
@@ -592,7 +822,7 @@ progress "Collecting kernel Wi-Fi and driver logs..."
             lshow 25 --last 30m --style compact --predicate "$PRED_KERNEL" 2>&1 || true
         fi
     fi
-} | squash_repeats | headtail 1500 1500 > "$ROOT_DIR/05-kernel-log-boot.txt" 2>&1
+} | cap_bytes 2097152 | squash_repeats | headtail 1500 1500 > "$ROOT_DIR/05-kernel-log-boot.txt" 2>&1
 
 {
     echo
@@ -606,6 +836,37 @@ progress "Collecting kernel Wi-Fi and driver logs..."
     fi
 } >> "$ROOT_DIR/05-kernel-log-boot.txt" 2>&1
 redact_file_inplace "$ROOT_DIR/05-kernel-log-boot.txt"
+
+# --- Shutdown Cause Verdict (needs Section 5 or bounded fallback) ---
+{
+    echo
+    echo "=== Previous Shutdown Cause (boot log) ==="
+    if [ -n "$FIXTURE_DIR" ] && [ -f "$FIXTURE_DIR/shutdown_cause.txt" ]; then
+        cat "$FIXTURE_DIR/shutdown_cause.txt"
+    elif [ -n "$FIXTURE_DIR" ]; then
+        echo "(no fixture shutdown_cause)"
+    else
+        boot_sc=$(grep -i 'shutdown cause:' "$ROOT_DIR/05-kernel-log-boot.txt" 2>/dev/null | tail -n 5 || true)
+        if [ -n "$boot_sc" ]; then
+            printf '%s\n' "$boot_sc"
+        elif [ -n "$BOOT_SEC" ]; then
+            lshow 10 --start "$(date -r "$BOOT_SEC" '+%Y-%m-%d %H:%M:%S')" \
+                     --end "$(date -r $((BOOT_SEC + 300)) '+%Y-%m-%d %H:%M:%S')" \
+                     --style compact --predicate 'process == "kernel" AND (eventMessage CONTAINS[c] "Previous shutdown cause" OR eventMessage CONTAINS[c] "shutdown cause")' 2>&1 || true
+        else
+            lshow 10 --last 30m --style compact --predicate 'process == "kernel" AND (eventMessage CONTAINS[c] "Previous shutdown cause" OR eventMessage CONTAINS[c] "shutdown cause")' 2>&1 || true
+        fi
+    fi
+} >> "$PANIC_CHECK_FILE" 2>&1
+redact_file_inplace "$PANIC_CHECK_FILE"
+LOCAL_HOST=$(scutil --get LocalHostName 2>/dev/null || true)
+if [ -n "$LOCAL_HOST" ] && [ "${#LOCAL_HOST}" -ge 3 ]; then
+    LOCAL_HOST_ENV="$LOCAL_HOST" /usr/bin/perl -i -pe 'my $h = $ENV{LOCAL_HOST_ENV}; s/\Q$h\E/<HOST>/gi if defined $h && length($h) >= 3;' "$PANIC_CHECK_FILE" 2>/dev/null || true
+fi
+LAST_SHUTDOWN_CAUSE=$(grep -i 'Previous shutdown cause:' "$PANIC_CHECK_FILE" 2>/dev/null | tail -n 1 | sed -E 's/.*[Pp]revious shutdown cause:[[:space:]]*//' | tr -s ' ' | cut -c1-40 || true)
+[ -n "$LAST_SHUTDOWN_CAUSE" ] || LAST_SHUTDOWN_CAUSE="unknown"
+
+
 
 # --- Section 6: macOS Wi-Fi Daemon & KernelManager Logs ---
 progress "Collecting airportd, WiFiAgent, and kernelmanagerd logs..."
@@ -625,12 +886,12 @@ progress "Collecting airportd, WiFiAgent, and kernelmanagerd logs..."
         echo "=== Kext Manager & Wi-Fi Errors/Lifecycle (last 1h) ==="
         lshow 15 --last 1h --style compact --predicate \
             '((process == "kernelmanagerd" OR process == "kextd") AND (messageType == error OR messageType == fault OR eventMessage CONTAINS[c] "mtk" OR eventMessage CONTAINS[c] "airport" OR eventMessage CONTAINS[c] "itlwm" OR eventMessage CONTAINS[c] "80211")) OR ((process == "airportd" OR process == "WiFiAgent" OR process == "wifip2pd" OR process == "wifivelocityd") AND (messageType == error OR messageType == fault OR eventMessage CONTAINS[c] "mtk" OR eventMessage CONTAINS[c] "assoc" OR eventMessage CONTAINS[c] "power"))' \
-            2>&1 | awk '!/INTERFACE ADDED EVENT|role=awdl/' | squash_repeats | headtail 600 1200 || true
+            2>&1 | awk '!/INTERFACE ADDED EVENT/' | cap_bytes 2097152 | squash_repeats | headtail 600 1200 || true
         echo
         echo "=== Wi-Fi Userspace Daemons (last 30m, de-spammed) ==="
         lshow 20 --last 30m --style compact --predicate \
             'process == "airportd" OR process == "WiFiAgent" OR process == "wifip2pd" OR process == "wifivelocityd" OR subsystem == "com.apple.wifi" OR (process == "kernelmanagerd" AND (eventMessage CONTAINS[c] "mtk" OR eventMessage CONTAINS[c] "airport" OR eventMessage CONTAINS[c] "80211"))' \
-            2>&1 | awk '!/(\[GET INTF NAME\]|APPLE80211_M_RSSI_CHANGED|Per-MLO link stats|Incoming QoS|INTERFACE ADDED EVENT|role=awdl)/' | squash_repeats | headtail 800 1600 || true
+            2>&1 | awk '!/(\[GET INTF NAME\]|APPLE80211_M_RSSI_CHANGED|Per-MLO link stats|Incoming QoS|INTERFACE ADDED EVENT)/' | cap_bytes 2097152 | squash_repeats | headtail 800 1600 || true
     fi
 } > "$ROOT_DIR/06-wifi-userspace-logs.txt" 2>&1
 redact_file_inplace "$ROOT_DIR/06-wifi-userspace-logs.txt"
@@ -803,12 +1064,12 @@ for i in range(min(3, len(distinct_starts))):
             echo "=== Previous Boot Focused Driver, Panic & Shutdown Cause ($B1_START_FMT to $B1_END_FMT) ==="
             lshow 20 --start "$B1_START_FMT" --end "$B1_END_FMT" \
                      --style compact --predicate "$PRED_MULTI_BOOT" 2>&1 \
-                | squash_repeats | headtail 800 1500 || true
+                | cap_bytes 2097152 | squash_repeats | headtail 800 1500 || true
             echo
             echo "=== Previous Boot Wi-Fi Stack Kernel Log Tail ($B1_START_FMT to $B1_END_FMT) ==="
             lshow 25 --start "$B1_START_FMT" --end "$B1_END_FMT" \
                      --style compact --predicate 'process == "kernel" AND (eventMessage CONTAINS[c] "mtk" OR eventMessage CONTAINS[c] "mwx" OR eventMessage CONTAINS[c] "airport" OR eventMessage CONTAINS[c] "itlwm" OR eventMessage CONTAINS[c] "80211" OR eventMessage CONTAINS[c] "skywalk" OR eventMessage CONTAINS[c] "panic" OR eventMessage CONTAINS[c] "shutdown cause" OR eventMessage CONTAINS[c] "outside of kext range")' 2>&1 \
-                | squash_repeats | headtail 800 2200 || true
+                | cap_bytes 2097152 | squash_repeats | headtail 800 2200 || true
         else
             echo "(skipped: boottime not available)"
         fi
@@ -839,7 +1100,7 @@ for i in range(min(3, len(distinct_starts))):
             echo "=== Prior Boot (2 boots ago) Focused Driver & Kernel Log ($B2_START_FMT to $B2_END_FMT) ==="
             lshow 20 --start "$B2_START_FMT" --end "$B2_END_FMT" \
                      --style compact --predicate "$PRED_MULTI_BOOT" 2>&1 \
-                | squash_repeats | headtail 800 1500 || true
+                | cap_bytes 2097152 | squash_repeats | headtail 800 1500 || true
         else
             echo "(skipped: boottime not available)"
         fi
@@ -854,233 +1115,6 @@ for i in range(min(3, len(distinct_starts))):
         redact_file_inplace "$BOOT_LOGS_DIR/boot-2-prior/03-opencore-boot.txt"
     fi
 fi
-
-# --- Section 8: OpenCore EFI Config & Logs ---
-progress "Inspecting OpenCore config and kext inventory..."
-{
-    echo "=== OpenCore EFI Scan ==="
-    if [ -n "$FIXTURE_DIR" ] && [ -f "$FIXTURE_DIR/config.plist" ]; then
-        echo "fixture: config.plist sanitized"
-        sanitize_config_plist "$FIXTURE_DIR/config.plist" "$ROOT_DIR/08-efi-opencore/fixture-config.plist.xml" || warn_msg "failed to sanitize fixture config.plist"
-    elif [ "$NO_EFI" -eq 1 ]; then
-        echo "(skipped: --no-efi passed)"
-    else
-        # Always check already-mounted EFI/OC folders safely (read-only)
-        found_oc=0
-        for vol in /Volumes/*; do
-            [ -d "$vol" ] || continue
-            for cand in "$vol/EFI/OC" "$vol/OC"; do
-                [ -f "$cand/config.plist" ] || continue
-                found_oc=1
-                safe_v=$(printf '%s' "$(basename "$vol")" | tr -c 'A-Za-z0-9._-' '_')
-                echo "mounted: $cand (volume=$safe_v)"
-                if [ -r "$cand/config.plist" ]; then
-                    sanitize_config_plist "$cand/config.plist" "$ROOT_DIR/08-efi-opencore/${safe_v}-config.plist.xml" || true
-                else
-                    echo "  (config.plist unreadable without admin privileges)"
-                fi
-                if [ -d "$cand/Kexts" ]; then
-                    echo "  Kexts/ listing:"
-                    ls -la "$cand/Kexts" 2>/dev/null | sed 's/^/    /'
-                    for k in AirportMtkWlan.kext SimpleMtkWlan.kext itlwm.kext AirportMtkBtPatcher.kext AirportMtkBtFw.kext; do
-                        if [ -d "$cand/Kexts/$k" ]; then
-                            ver=$(plutil -extract CFBundleShortVersionString raw -o - "$cand/Kexts/$k/Contents/Info.plist" 2>/dev/null || echo "?")
-                            bin="$cand/Kexts/$k/Contents/MacOS/${k%.kext}"
-                            sha=$([ -f "$bin" ] && shasum -a 256 "$bin" 2>/dev/null | awk '{print $1}' || echo "?")
-                            echo "  -> $k version=$ver sha256=$sha"
-                        fi
-                    done
-                fi
-                find "$vol" -maxdepth 2 -type f \( -name 'opencore-*.txt' -o -name 'boot*.log' -o -name 'panic-*.txt' \) -exec stat -f '%m %N' {} + 2>/dev/null \
-                    | sort -rn | head -n 4 | cut -d' ' -f2- | while IFS= read -r lf; do
-                    [ -n "$lf" ] || continue
-                    safe_lf=$(printf '%s' "$(basename "$lf")" | tr -c 'A-Za-z0-9._-' '_')
-                    head -c 262144 "$lf" > "$ROOT_DIR/08-efi-opencore/${safe_v}-${safe_lf}" 2>/dev/null && redact_file_inplace "$ROOT_DIR/08-efi-opencore/${safe_v}-${safe_lf}" || true
-                done
-            done
-        done
-        # If running as root without --no-efi and not in quick mode, check OpenCore boot-path ESP if unmounted
-        if [ "$NO_EFI" -eq 0 ] && [ "$MODE" = "full" ] && [ "$(id -u)" -eq 0 ]; then
-            bpart=$(booted_part || true)
-            if [ -n "$bpart" ]; then
-                cur_mp=$(diskutil info "$bpart" 2>/dev/null | awk -F': *' '/Mount Point:/{print $2; exit}')
-                if [ -z "$cur_mp" ]; then
-                    if diskutil mount "$bpart" >/dev/null 2>&1; then
-                        MOUNTED_BY_US="$MOUNTED_BY_US $bpart"
-                        cur_mp=$(diskutil info "$bpart" 2>/dev/null | awk -F': *' '/Mount Point:/{print $2; exit}')
-                        ocrel=$(boot_ocrel)
-                        ocrel=${ocrel:-EFI/OC}
-                        if [ -n "$cur_mp" ] && [ -f "$cur_mp/$ocrel/config.plist" ]; then
-                            found_oc=1
-                            echo "booted-esp: $bpart -> /$ocrel"
-                            sanitize_config_plist "$cur_mp/$ocrel/config.plist" "$ROOT_DIR/08-efi-opencore/${bpart}-config.plist.xml" || true
-                            if [ -d "$cur_mp/$ocrel/Kexts" ]; then
-                                ls -la "$cur_mp/$ocrel/Kexts" 2>/dev/null | sed 's/^/    /'
-                                for k in AirportMtkWlan.kext SimpleMtkWlan.kext itlwm.kext AirportMtkBtPatcher.kext AirportMtkBtFw.kext; do
-                                    if [ -d "$cur_mp/$ocrel/Kexts/$k" ]; then
-                                        ver=$(plutil -extract CFBundleShortVersionString raw -o - "$cur_mp/$ocrel/Kexts/$k/Contents/Info.plist" 2>/dev/null || echo "?")
-                                        bin="$cur_mp/$ocrel/Kexts/$k/Contents/MacOS/${k%.kext}"
-                                        sha=$([ -f "$bin" ] && shasum -a 256 "$bin" 2>/dev/null | awk '{print $1}' || echo "?")
-                                        echo "  -> $k version=$ver sha256=$sha"
-                                    fi
-                                done
-                            fi
-                            find "$cur_mp" -maxdepth 1 -type f \( -name 'opencore-*.txt' -o -name 'panic-*.txt' \) -exec stat -f '%m %N' {} + 2>/dev/null \
-                                | sort -rn | head -n 4 | cut -d' ' -f2- | while IFS= read -r lf; do
-                                [ -n "$lf" ] || continue
-                                safe_lf=$(printf '%s' "$(basename "$lf")" | tr -c 'A-Za-z0-9._-' '_')
-                                head -c 262144 "$lf" > "$ROOT_DIR/08-efi-opencore/${bpart}-${safe_lf}" 2>/dev/null && redact_file_inplace "$ROOT_DIR/08-efi-opencore/${bpart}-${safe_lf}" || true
-                            done
-                        fi
-                    fi
-                fi
-            fi
-        fi
-        [ "$found_oc" -eq 1 ] || echo "(no mounted OpenCore config.plist readable; mount EFI or run Full Logs mode if needed)"
-    fi
-} > "$ROOT_DIR/08-efi-opencore/disks-efi-scan.txt" 2>&1
-redact_file_inplace "$ROOT_DIR/08-efi-opencore/disks-efi-scan.txt"
-
-# --- Section 9: Panics & Crash Reports ---
-progress "Checking recent panic and Wi-Fi daemon crash logs..."
-PANIC_COUNT=0
-CRASH_COUNT=0
-mkdir -p "$ROOT_DIR/09-crashes-panics"
-diag_dirs=(
-    "/Library/Logs/DiagnosticReports"
-    "/Library/Logs/DiagnosticReports/Retired"
-    "/private/var/db/PanicReporter"
-)
-if [ -n "$TARGET_HOME" ]; then
-    diag_dirs+=(
-        "$TARGET_HOME/Library/Logs/DiagnosticReports"
-        "$TARGET_HOME/Library/Logs/DiagnosticReports/Retired"
-    )
-fi
-if [ -n "$FIXTURE_DIR" ] && [ -d "$FIXTURE_DIR/DiagnosticReports" ]; then
-    diag_dirs=("$FIXTURE_DIR/DiagnosticReports")
-    [ -d "$FIXTURE_DIR/PanicReporter" ] && diag_dirs+=("$FIXTURE_DIR/PanicReporter")
-fi
-
-collect_recent_into() {
-    local prefix=$1 limit=$2
-    shift 2
-    local recent=() seen=() f i dup existing count=0 dst
-    for f in "$@"; do
-        [ -f "$f" ] && [ ! -L "$f" ] || continue
-        dup=0
-        for existing in ${seen[@]+"${seen[@]}"}; do
-            if [ "$existing" = "$f" ]; then
-                dup=1
-                break
-            fi
-        done
-        [ "$dup" -eq 0 ] || continue
-        seen+=("$f")
-        i=0
-        while [ "$i" -lt "${#recent[@]}" ] && [ ! "$f" -nt "${recent[$i]}" ]; do
-            i=$((i + 1))
-        done
-        [ "$i" -lt "$limit" ] || continue
-        recent=("${recent[@]:0:$i}" "$f" "${recent[@]:$i}")
-        recent=("${recent[@]:0:$limit}")
-    done
-    for f in ${recent[@]+"${recent[@]}"}; do
-        count=$((count + 1))
-        dst="$ROOT_DIR/09-crashes-panics/${prefix}-${count}-$(printf '%s' "$(basename "$f")" | tr -c 'A-Za-z0-9._-' '_')"
-        head -c 524288 "$f" > "$dst" 2>/dev/null && redact_file_inplace "$dst" || true
-    done
-    printf '%s' "$count"
-}
-
-add_panic_matches_in_dir() {
-    local dir=$1
-    for f in "$dir"/.contents.panic "$dir"/*.panic "$dir"/*.contents.panic "$dir"/panic*.ips "$dir"/*Panic*.ips "$dir"/Kernel-*.ips; do
-        panic_candidates+=("$f")
-    done
-}
-
-shopt -s nullglob
-panic_candidates=()
-crash_candidates=()
-for d in "${diag_dirs[@]}"; do
-    [ -d "$d" ] || continue
-    add_panic_matches_in_dir "$d"
-    for sub in "$d"/*; do
-        [ -d "$sub" ] && [ ! -L "$sub" ] || continue
-        add_panic_matches_in_dir "$sub"
-    done
-    for f in "$d"/airportd*.ips "$d"/WiFiAgent*.ips "$d"/wifip2pd*.ips "$d"/wifivelocityd*.ips "$d"/AirportMtkWlan*.ips "$d"/SimpleMtkWlan*.ips "$d"/kernelmanagerd*.ips "$d"/wifid*.ips "$d"/airportd*.crash "$d"/kernelmanagerd*.crash "$d"/SimpleMtkWlan*.crash; do
-        crash_candidates+=("$f")
-    done
-done
-shopt -u nullglob
-
-if [ -n "$FIXTURE_DIR" ] && [ -f "$FIXTURE_DIR/panic.log" ]; then
-    panic_candidates+=("$FIXTURE_DIR/panic.log")
-elif [ -z "$FIXTURE_DIR" ] && [ -f "/private/var/log/panic.log" ]; then
-    panic_candidates+=("/private/var/log/panic.log")
-fi
-
-PANIC_COUNT=$(collect_recent_into "panic" 5 ${panic_candidates[@]+"${panic_candidates[@]}"})
-CRASH_COUNT=$(collect_recent_into "crash" 6 ${crash_candidates[@]+"${crash_candidates[@]}"})
-
-PANIC_CHECK_FILE="$ROOT_DIR/09-crashes-panics/00-panic-and-shutdown-check.txt"
-{
-    echo "=== Panic, Kernel & Wi-Fi Diagnostic Reports Inventory ==="
-    for d in "${diag_dirs[@]}"; do
-        echo "-- $d --"
-        if [ -d "$d" ]; then
-            matches=$(find "$d" -maxdepth 2 -type f \( -iname '*panic*' -o -iname '*kernel*' -o -iname '*airport*' -o -iname '*wifi*' -o -iname '*mtk*' -o -iname '*itlwm*' -o -iname '*shutdown*' \) -exec ls -ld {} + 2>/dev/null || true)
-            if [ -n "$matches" ]; then
-                printf '%s\n' "$matches"
-            else
-                echo "(no matching panic/kernel/wifi/shutdown files)"
-            fi
-        else
-            echo "(not present)"
-        fi
-    done
-    echo
-    echo "=== NVRAM Panic & Wake-Failure Indicators ==="
-    if [ -n "$FIXTURE_DIR" ] && [ -f "$FIXTURE_DIR/nvram_panic.txt" ]; then
-        cat "$FIXTURE_DIR/nvram_panic.txt"
-    elif [ -n "$FIXTURE_DIR" ]; then
-        echo "(no fixture nvram_panic)"
-    else
-        for k in aapl,panic-info panic-info 7C436110-AB2A-4BBB-A880-FE41995C9F82:wake-failure; do
-            printf '%s: ' "$k"
-            nvram "$k" 2>&1 | head -c 4096 || true
-            echo
-        done
-        nvram -p 2>/dev/null | awk 'tolower($0) ~ /panic|wake-failure/ { print $1, substr($0, length($1)+1, 200) }' || echo "(nvram -p unreadable)"
-    fi
-    echo
-    echo "=== Previous Shutdown Cause (boot log) ==="
-    if [ -n "$FIXTURE_DIR" ] && [ -f "$FIXTURE_DIR/shutdown_cause.txt" ]; then
-        cat "$FIXTURE_DIR/shutdown_cause.txt"
-    elif [ -n "$FIXTURE_DIR" ]; then
-        echo "(no fixture shutdown_cause)"
-    else
-        boot_sc=$(grep -i 'shutdown cause:' "$ROOT_DIR/05-kernel-log-boot.txt" 2>/dev/null | tail -n 5 || true)
-        if [ -n "$boot_sc" ]; then
-            printf '%s\n' "$boot_sc"
-        elif [ -n "$BOOT_SEC" ]; then
-            lshow 10 --start "$(date -r "$BOOT_SEC" '+%Y-%m-%d %H:%M:%S')" \
-                     --end "$(date -r $((BOOT_SEC + 300)) '+%Y-%m-%d %H:%M:%S')" \
-                     --style compact --predicate 'process == "kernel" AND (eventMessage CONTAINS[c] "Previous shutdown cause" OR eventMessage CONTAINS[c] "shutdown cause")' 2>&1 || true
-        else
-            lshow 10 --last 30m --style compact --predicate 'process == "kernel" AND (eventMessage CONTAINS[c] "Previous shutdown cause" OR eventMessage CONTAINS[c] "shutdown cause")' 2>&1 || true
-        fi
-    fi
-} > "$PANIC_CHECK_FILE" 2>&1
-redact_file_inplace "$PANIC_CHECK_FILE"
-LOCAL_HOST=$(scutil --get LocalHostName 2>/dev/null || true)
-if [ -n "$LOCAL_HOST" ] && [ "${#LOCAL_HOST}" -ge 3 ]; then
-    LOCAL_HOST_ENV="$LOCAL_HOST" /usr/bin/perl -i -pe 'my $h = $ENV{LOCAL_HOST_ENV}; s/\Q$h\E/<HOST>/gi if defined $h && length($h) >= 3;' "$PANIC_CHECK_FILE" 2>/dev/null || true
-fi
-LAST_SHUTDOWN_CAUSE=$(grep -i 'Previous shutdown cause:' "$PANIC_CHECK_FILE" 2>/dev/null | tail -n 1 | sed -E 's/.*[Pp]revious shutdown cause:[[:space:]]*//' | tr -s ' ' | cut -c1-40 || true)
-[ -n "$LAST_SHUTDOWN_CAUSE" ] || LAST_SHUTDOWN_CAUSE="unknown"
 
 # --- Section 10: Installer / UI Session Log ---
 if [ -n "$SESSION_LOG" ] && [ -f "$SESSION_LOG" ] && [ ! -L "$SESSION_LOG" ]; then
@@ -1122,6 +1156,10 @@ BOOT_ARGS_RAW=$(nvram boot-args 2>/dev/null | cut -f2- || echo "none")
 [ -n "$BOOT_ARGS_RAW" ] || BOOT_ARGS_RAW="none"
 MTK_DBG_LINES=$(wc -l < "$ROOT_DIR/03-mtk-debug-log.txt" 2>/dev/null | tr -d ' ' || echo 0)
 WIFI_PWR=$(grep -m1 'Wi-Fi Power' "$ROOT_DIR/04-network-wifi-state.txt" 2>/dev/null | tr -s ' ' || echo "unknown")
+MTK_COUNTRY=$(grep -E '"MTKWiFiCountry(|Source)" = ' "$ROOT_DIR/02-hardware-pci-ioreg.txt" 2>/dev/null | tr '\n' ';' | tr -s ' ' | sed 's/;$//' || true)
+[ -n "$MTK_COUNTRY" ] || MTK_COUNTRY="unset"
+MTK_HEALTH=$(grep -E '"MTKWiFi(DMAStalls|FullResets|SEREvents|RxDeafResets|MCUTimeouts|AutoResetEnabled)" = ' "$ROOT_DIR/02-hardware-pci-ioreg.txt" 2>/dev/null | tr '\n' ';' | tr -s ' ' | sed 's/;$//' || true)
+[ -n "$MTK_HEALTH" ] || MTK_HEALTH="unavailable"
 
 {
     echo "=== AirportMtkWlan Diagnostic Summary ==="
@@ -1136,6 +1174,8 @@ WIFI_PWR=$(grep -m1 'Wi-Fi Power' "$ROOT_DIR/04-network-wifi-state.txt" 2>/dev/n
     echo "diag: auxkc-conflict $AUXKC_CONFLICT"
     echo "diag: wifi-interfaces ${WIFI_IFACES:-absent}"
     echo "diag: wifi-power $WIFI_PWR"
+    echo "diag: mtk-country $MTK_COUNTRY"
+    echo "diag: mtk-health $MTK_HEALTH"
     echo "diag: mtkdebuglog-lines $MTK_DBG_LINES"
     echo "diag: panics-found $PANIC_COUNT crashes-found $CRASH_COUNT"
     echo "diag: last-shutdown-cause $LAST_SHUTDOWN_CAUSE"

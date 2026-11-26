@@ -122,6 +122,10 @@ public:
                                UInt64                  speed        = 0,
                                OSData *                data         = 0) override;
     static IOReturn setLinkStateGated(OSObject *target, void *arg0, void *arg1, void *arg2, void *arg3);
+    void setEAPOLTransport(bool enabled);
+    static IOReturn setEAPOLTransportGated(OSObject *target, void *arg0, void *, void *, void *);
+    bool countryCodeAnnounceNeeded();
+    void publishSystemPowerStats(MtkMwx *hal);
     
     static IOReturn tsleepHandler(OSObject* owner, void* arg0 = 0, void* arg1 = 0, void* arg2 = 0, void* arg3 = 0);
     static void eventHandler(struct ieee80211com *, int, void *);
@@ -276,6 +280,12 @@ public:
     UInt32 currentStatus;
     bool disassocIsVoluntary;
     char geo_location_cc[3];
+    bool eapolTransportActive = false;
+    char reported11dBss[3] = {};
+    char reported11dScan[3] = {};
+    uint32_t reported11dElements = 0;
+    char reportedCountryCc[3] = {};
+    char reportedCountrySource[16] = {};
     
     //pm
     thread_call_t powerOnThreadCall;

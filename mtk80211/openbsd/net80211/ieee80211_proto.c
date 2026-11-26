@@ -1315,6 +1315,19 @@ ieee80211_auth_open(struct ieee80211com *ic, const struct ieee80211_frame *wh,
 			    ic->ic_state, seq));
 			return;
 		}
+		if (status == IEEE80211_STATUS_TRY_AGAIN_LATER &&
+		    ni == ic->ic_bss && (ni->ni_flags & IEEE80211_NODE_MFP) &&
+		    IEEE80211_ADDR_EQ(wh->i_addr2, ni->ni_bssid) &&
+		    IEEE80211_ADDR_EQ(wh->i_addr3, ni->ni_bssid) &&
+		    !ieee80211_is_sae_akm((enum ieee80211_akm)ni->ni_rsnakms) &&
+		    !ic->ic_auth_comeback_retried) {
+			if (!ic->ic_auth_comeback_pending) {
+				ic->ic_auth_comeback_pending = true;
+				ic->ic_mgt_timer = 2;
+				ifp->if_timer = 1;
+			}
+			return;
+		}
 		if (ic->ic_flags & IEEE80211_F_RSNON) {
 			/* XXX not here! */
 			ic->ic_bss->ni_flags &= ~IEEE80211_NODE_TXRXPROT;
@@ -1426,6 +1439,10 @@ ieee80211_newstate(struct ieee80211com *ic, enum ieee80211_state nstate,
 		XYLog("%s: %s -> %s\n", ifp->if_xname,
 		    ieee80211_state_name[ostate], ieee80211_state_name[nstate]);
 	ic->ic_state = nstate;			/* state transition */
+	if (ic->ic_auth_comeback_pending)
+		ic->ic_mgt_timer = 0;
+	ic->ic_auth_comeback_pending = false;
+	ic->ic_auth_comeback_retried = false;
 	ni = ic->ic_bss;			/* NB: no reference held */
 	ieee80211_set_link_state(ic, LINK_STATE_DOWN);
 	ic->ic_xflags &= ~IEEE80211_F_TX_MGMT_ONLY;
@@ -1697,6 +1714,8 @@ justcleanup:
                     " HE enabled" : "");
 			}
 #if defined(AIRPORT_WCL)
+            if (ic->ic_event_handler)
+                (*ic->ic_event_handler)(ic, IEEE80211_EVT_STA_ASSOC_DONE, NULL);
             if (!(ic->ic_flags & IEEE80211_F_RSNON)) {
 #elif defined(USE_APPLE_SUPPLICANT)
             {

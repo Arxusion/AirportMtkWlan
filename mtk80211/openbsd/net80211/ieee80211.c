@@ -912,6 +912,16 @@ ieee80211_watchdog(struct _ifnet *ifp)
     struct ieee80211com *ic = (struct ieee80211com *)ifp;
     
     if (ic->ic_mgt_timer && --ic->ic_mgt_timer == 0) {
+        if (ic->ic_auth_comeback_pending) {
+            ic->ic_auth_comeback_pending = false;
+            if (ic->ic_opmode == IEEE80211_M_STA &&
+                ic->ic_state == IEEE80211_S_AUTH && ic->ic_bss != NULL) {
+                ic->ic_auth_comeback_retried = true;
+                if (IEEE80211_SEND_MGMT(ic, ic->ic_bss,
+                    IEEE80211_FC0_SUBTYPE_AUTH, IEEE80211_AUTH_OPEN_REQUEST) == 0)
+                    goto done;
+            }
+        }
         if (ic->ic_opmode == IEEE80211_M_STA &&
             (ic->ic_state == IEEE80211_S_AUTH ||
              ic->ic_state == IEEE80211_S_ASSOC)) {

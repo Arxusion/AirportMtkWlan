@@ -15,9 +15,10 @@ pre=r'''
 struct IOPCIDevice {};
 struct ifnet { int if_flags=0; };
 struct IC { ifnet ic_if; };
-struct Soft { IC sc_ic; bool sc_detaching=false,sc_net_attached=false; void *sc_reset_to=nullptr,*sc_intr_to=nullptr,*sc_amsdu_to=nullptr,*sc_nswq=nullptr,*sc_ih=nullptr; int sc_memh=0,sc_st=0,sc_mems=0; };
+struct Soft { IC sc_ic; bool sc_detaching=false,sc_net_attached=false; void *sc_reset_to=nullptr,*sc_dma_to=nullptr,*sc_intr_to=nullptr,*sc_amsdu_to=nullptr,*sc_nswq=nullptr,*sc_ih=nullptr; int sc_fullreset_task=0,sc_syspm_task=0; int sc_memh=0,sc_st=0,sc_mems=0; };
 struct PCI { int pa_pc=0; };
 std::vector<int> events; void *systq=(void*)1;
+void task_del(void*, int*) {}
 void taskq_destroy(void *q) { if(q) events.push_back(8); }
 void taskq_quiesce(void *q) { if(q) events.push_back(2); }
 void timeout_del(void**) {events.push_back(1);}
@@ -48,7 +49,7 @@ int main(){
   assert(index(2)<index(9));assert(index(4)<index(9));assert(index(8)<index(9));assert(index(10)<index(12));
   assert(index(13)>=0 && index(13)<index(9));
   if(mask&2)assert(index(5)<index(13));
-  assert(std::count(events.begin(),events.end(),4)==3);
+  assert(std::count(events.begin(),events.end(),4)==4);
   if(mask&1){assert(index(6)<index(9));assert(index(10)<index(11));}else assert(index(11)==-1);
   if(mask&2)assert(index(5)<index(9));else assert(index(5)==-1);
   assert((index(7)>=0)==bool(mask&4));assert((index(3)>=0)==bool(mask&8));

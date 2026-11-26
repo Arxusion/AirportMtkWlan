@@ -44,6 +44,17 @@ files.
   `GPL-3.0-or-later`): 256-entry RX BlockAck reorder window and 100 ms gap
   timeout (`ieee80211_node.h`), HE STA firmware TLV builder (`mwx_yy_sta_he_tlv`),
   and RX A-MSDU reassembly (`mwx_amsdu_*`).
+- Community PRs & Clean C++ Root-Cause Integrations:
+  - XiaoweiTSN (PR #25): macOS deployment target & build compatibility updates.
+  - SevenStar77777 (PR #27): lockless 3-state CAS descriptor cleanup, scan-abort
+    event notification, and association-defer state safety.
+  - yuanshuai2017 (PR #28): Tahoe `IO80211AWDLProtocol` / HW OMAC bidirectional
+    AWDL integration (for the separate AWDL Beta track).
+  - Dino-VN (https://github.com/Dino-VN/MtkWireless): root-cause documentation
+    and architecture notes informing clean `GPL-3.0-or-later` / `ISC` C++ fixes for
+    probe refcounting, 802.11d country voting, PMF default + comeback retry,
+    Enterprise EAPOL transport, Instant Hotspot WMM/Apple IEs, SER / deaf-RX
+    recovery, S3 sleep/wake firmware reload, and diagnostic log bounding.
 
 ## Current Project Work
 

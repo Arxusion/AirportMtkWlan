@@ -51,8 +51,11 @@ public:
 
     void clearScanningFlags() override;
     void debugPoll() override;
+    void publishHealthDiagnostics();
     void suspend() override;
     void resume() override;
+    IOReturn systemPower(bool suspend);
+    void systemPowerStats(uint32_t out[9]);
     IOReturn setCountryCode(const char *cc) override;
     IOReturn setMulticastList(IOEthernetAddress *addr, int count) override;
 #ifdef AIRPORT_WCL

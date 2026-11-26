@@ -452,6 +452,67 @@ inline bool probeChannel(bool active, bool passiveOnly, bool dfs) {
     return active && !passiveOnly && !dfs;
 }
 
+struct ScanSsidTargets {
+    static constexpr unsigned kMaxTargets = 10;
+    uint8_t count;
+    uint8_t lengths[kMaxTargets];
+    uint8_t ssids[kMaxTargets][32];
+    bool wildcard;
+};
+
+inline bool appendScanSsid(ScanSsidTargets &out, const uint8_t *ssid, size_t len) {
+    if (len > 32)
+        return false;
+    if (len == 0) {
+        out.wildcard = true;
+        return true;
+    }
+    for (unsigned i = 0; i < out.count; ++i) {
+        if (out.lengths[i] == len && memcmp(out.ssids[i], ssid, len) == 0)
+            return true;
+    }
+    if (out.count >= ScanSsidTargets::kMaxTargets)
+        return false;
+    uint8_t idx = out.count++;
+    out.lengths[idx] = static_cast<uint8_t>(len);
+    memcpy(out.ssids[idx], ssid, len);
+    return true;
+}
+
+inline bool decodeScanSsidList(const uint8_t *p, size_t length, ScanSsidTargets &out) {
+    out = {};
+    if (!p || length < 0x40)
+        return false;
+    uint32_t legacyLen = read32(p + 0x1c);
+    if (legacyLen > 32)
+        return false;
+    if (legacyLen > 0 && !appendScanSsid(out, p + 0x20, legacyLen))
+        return false;
+
+    static constexpr size_t kListCountOffset = 0x1318;
+    static constexpr size_t kEntryBytes = 56;
+    if (length > kListCountOffset) {
+        if (length < kListCountOffset + 4)
+            return false;
+        uint32_t listCount = read32(p + kListCountOffset);
+        if (listCount > ScanSsidTargets::kMaxTargets ||
+            length < kListCountOffset + 4 + size_t(listCount) * kEntryBytes)
+            return false;
+        for (uint32_t i = 0; i < listCount; ++i) {
+            const uint8_t *entry = p + kListCountOffset + 4 + size_t(i) * kEntryBytes;
+            uint32_t ver = read32(entry);
+            uint32_t len = read32(entry + 4);
+            if ((ver != 1 && !(ver == 0 && len == 0)) || len > 32)
+                return false;
+            if (!appendScanSsid(out, entry + 8, len))
+                return false;
+        }
+    }
+    if (out.count == 0)
+        out.wildcard = true;
+    return true;
+}
+
 struct ScanRequest {
     uint32_t identifier;
     uint32_t type;
@@ -460,6 +521,7 @@ struct ScanRequest {
     uint8_t bssid[6];
     uint32_t channelCount;
     uint8_t channels[32];
+    ScanSsidTargets targets;
 };
 
 inline bool scanChannelSelected(const uint8_t *channels, bool restricted, unsigned channel) {
@@ -482,6 +544,8 @@ inline bool decodeScan(const void *buffer, size_t length, ScanRequest &out) {
     out.channelCount = count;
     memcpy(out.ssid, p + 0x20, ssidLength);
     memcpy(out.bssid, p + 0x14, 6);
+    if (!decodeScanSsidList(p, length, out.targets))
+        return false;
     // Native entries are apple80211_channel: version, channel, flags (12 bytes).
     for (uint32_t i = 0; i < count; ++i) {
         const uint8_t *entry = p + 0x58 + size_t(i) * 12;
@@ -509,7 +573,16 @@ struct JoinRequest {
     uint16_t channelSpec;
     uint16_t rsnLength;
     uint8_t rsn[257];
+    uint16_t assocFlags;
 };
+
+inline uint8_t instantHotspotFlag(uint16_t assocFlags) {
+    return uint8_t((assocFlags & 2) | ((assocFlags >> 2) & 1));
+}
+
+inline unsigned chanspecIndex(uint16_t channelSpec) {
+    return channelSpec & 0xffU;
+}
 
 inline bool validCipherKey(uint32_t cipher, uint32_t length, uint16_t flags,
                            uint16_t index, uint32_t rscLength) {
@@ -532,7 +605,8 @@ inline bool validRSNOverride(const uint8_t *ie, size_t length) {
 // A WPA passphrase (8-63 printable characters, at most 32 fit the request)
 // instead of the 32-byte PMK that macOS normally derives itself.
 inline bool isPassphrase(const JoinRequest &j) {
-    if (j.keyLength < 8 || j.keyLength > 32 ||
+    const bool isPwdCipher = (j.keyCipher == 10);
+    if (j.keyLength < (isPwdCipher ? 1u : 8u) || j.keyLength > 63 ||
         (j.keyLength == 32 && (j.keyCipher == 6 || j.keyCipher == 7)))
         return false;
     for (uint32_t i = 0; i < j.keyLength; ++i)
@@ -622,6 +696,7 @@ inline bool decodeJoin(const void *buffer, size_t length, JoinRequest &out) {
     out.channelSpec = read16(p + 0x228);
     out.rsnLength = rsnLength;
     memcpy(out.rsn, p + 0xd6, rsnLength);
+    out.assocFlags = read16(p + 0x1e0);
     return true;
 }
 

@@ -10,9 +10,15 @@ set -euo pipefail
 config="${1:-Release}"
 product="${2:-all}"
 mtk_perf="${MTK_PERF:-0}"
+wifi_only="${WIFI_ONLY:-1}"
+if [[ "${AWDL:-0}" == "1" ]]; then wifi_only=0; fi
 case "$mtk_perf" in
 	0|1) ;;
 	*) echo "MTK_PERF must be 0 or 1" >&2; exit 2 ;;
+esac
+case "$wifi_only" in
+	0|1) ;;
+	*) echo "WIFI_ONLY must be 0 or 1" >&2; exit 2 ;;
 esac
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 version="${MODULE_VERSION:-$(sed -n 's/.*MODULE_VERSION = \([0-9.]*\);.*/\1/p' "$here/SimpleMtkWlan.xcodeproj/project.pbxproj" | head -1)}"
@@ -48,13 +54,17 @@ build() {
 	shift
 	sources=("$@")
 	local obj="$out/obj-$name" bundle="$out/$name.kext"
+	# The Skywalk Airport target needs the modern IOEthernetController ABI.
+	# A 10.12 target imports reserved slots that no longer exist on Tahoe.
+	local min_macos=10.12
+	if [[ "$name" == AirportMtkWlan ]]; then min_macos=11.0; fi
 	rm -rf "$obj" "$bundle"; mkdir -p "$obj" "$bundle/Contents/MacOS"
 	local incs=(-I "$sdkhdr")
 	for d in mtk80211/openbsd mtk80211 include; do incs+=(-isystem "$here/$d"); done
 	while IFS= read -r d; do incs+=(-I "$d"); done < <(find "$here/SimpleMtkWlan" "$here/include" "$here/mtk80211" -type d)
 	[[ -d "$here/AirportMtkWlan" ]] && incs+=(-I "$here/AirportMtkWlan")
 	local flags=(
-		-target x86_64-apple-macos10.12 -x c++ -std=gnu++14
+		-target "x86_64-apple-macos$min_macos" -x c++ -std=gnu++14
 		-mkernel -fapple-kext -fno-rtti -fno-exceptions -fno-builtin -fno-common -nostdlib
 		-fno-use-cxa-atexit -fno-asynchronous-unwind-tables
 		-DKERNEL -DIEEE80211_STA_ONLY -D__PRIVATE_SPI__ ${defines[@]+"${defines[@]}"}
@@ -82,10 +92,10 @@ __attribute__((visibility("default"))) kmod_info_t kmod_info = {
 	0, KMOD_INFO_VERSION, -1U, "$bundleid", "$version", -1, 0, 0, 0, 0, _start, _stop,
 };
 KMOD
-	"$clang" -target x86_64-apple-macos10.12 -mkernel -fno-builtin -fno-common -nostdlib -DKERNEL \
+	"$clang" -target "x86_64-apple-macos$min_macos" -mkernel -fno-builtin -fno-common -nostdlib -DKERNEL \
 		-I "$sdkhdr" -c "$obj/kmod_info.c" -o "$obj/kmod_info.o"
 	objects+=("$obj/kmod_info.o")
-	"$ld64" -arch x86_64 -kext -static -macos_version_min 10.12 -undefined dynamic_lookup \
+	"$ld64" -arch x86_64 -kext -static -macos_version_min "$min_macos" -undefined dynamic_lookup \
 		-exported_symbol _kmod_info -exported_symbol __realmain -exported_symbol __antimain \
 		-o "$bundle/Contents/MacOS/$name" "${objects[@]}" "$libkmod"
 	python3 -I - "$here/$plist" "$bundle/Contents/Info.plist" "$version" "$name" "$bundleid" <<'PY'
@@ -128,8 +138,10 @@ if [[ "$product" == all || "$product" == AirportMtkWlan ]] && [[ -d "$here/Airpo
 	esac
 	out="$here/build/$config/${AIRPORT_OS:-tahoe}"
 	mkdir -p "$out"
+	awdl_def="-DMTK_WIFI_ONLY"
+	if [[ "$wifi_only" == 0 ]]; then awdl_def="-DMTK_NATIVE_AWDL"; fi
 	build AirportMtkWlan com.flxxxxddd.AirportMtkWlan AirportMtkWlan/WCL/Info.plist \
-		-DAIRPORT -DAIRPORT_WCL "-D__IO80211_TARGET=$target" -DIO80211FAMILY_V2 "-DMTK_PERF=$mtk_perf" -- \
+		-DAIRPORT -DAIRPORT_WCL "-D__IO80211_TARGET=$target" -DIO80211FAMILY_V2 "-DMTK_PERF=$mtk_perf" "$awdl_def" -- \
 		"${common_sources[@]}" ${perf_sources[@]+"${perf_sources[@]}"} \
 		$(cd "$here" && ls AirportMtkWlan/*.cpp AirportMtkWlan/WCL/*.cpp 2>/dev/null)
 fi

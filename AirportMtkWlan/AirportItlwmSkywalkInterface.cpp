@@ -7,6 +7,7 @@
 //
 #include "AirportItlwmV2.hpp"
 #include "AirportItlwmSkywalkInterface.hpp"
+#include "CountryLocale.hpp"
 #include <sys/CTimeout.hpp>
 #include <libkern/c++/OSMetaClass.h>
 #include <crypto/sha1.h>
@@ -929,8 +930,12 @@ getLOCALE(struct apple80211_locale_data *ld)
     if (!ld)
         return kIOReturnError;
     ld->version = APPLE80211_VERSION;
-    ld->locale  = APPLE80211_LOCALE_FCC;
-    
+    apple80211_country_code_data country = {};
+    int locale = APPLE80211_LOCALE_FCC;
+    if (instance &&
+        instance->getCOUNTRY_CODE(static_cast<OSObject *>(this), &country) == kIOReturnSuccess)
+        locale = mtkcc::appleLocaleForCountry(reinterpret_cast<const char *>(country.cc));
+    ld->locale = static_cast<decltype(ld->locale)>(locale);
     return kIOReturnSuccess;
 }
 

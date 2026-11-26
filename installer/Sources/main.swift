@@ -13,6 +13,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ aNotification: Notification) {
         let contentView = ContentView()
+        let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "2.3.0"
+        #if MTK_AWDL_BETA
+        let editionSuffix = "AWDL Beta"
+        #else
+        let editionSuffix = "Wi-Fi Only"
+        #endif
 
         window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 960, height: 680),
@@ -22,7 +28,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         )
         window.center()
         window.minSize = NSSize(width: 880, height: 600)
-        window.title = "AirportMtkWlan Deployment Suite v2.2.3"
+        window.title = "AirportMtkWlan Installer (\(editionSuffix)) v\(appVersion)"
         window.titleVisibility = .visible
         window.titlebarAppearsTransparent = false
         window.backgroundColor = NSColor.white

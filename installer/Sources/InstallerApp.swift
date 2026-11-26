@@ -11,7 +11,11 @@ import AppKit
 // MARK: - Navigation Tabs
 enum NavigationTab: String, CaseIterable, Identifiable {
     case overview = "Overview"
-    case deploy = "Deploy to EFI (Unified Suite)"
+    #if MTK_AWDL_BETA
+    case deploy = "Deploy to EFI (AWDL Beta)"
+    #else
+    case deploy = "Deploy Wi-Fi Driver"
+    #endif
     case bootDiagnostics = "Boot Diagnostics"
     case console = "Console Stream"
     case updates = "Updates"
@@ -74,8 +78,14 @@ struct ContentView: View {
     // Deployment State
     @State private var destinations: [EFIDestination] = []
     @State private var selectedDestination: EFIDestination?
+    private let appVersion: String = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "2.3.0"
+    #if MTK_AWDL_BETA
+    private let isAwdlBeta: Bool = true
+    #else
+    private let isAwdlBeta: Bool = false
+    #endif
+
     @State private var selectedFlavor: DriverFlavor = .tahoe
-    @State private var installBluetooth: Bool = true
     @State private var autoConfig: Bool = true
     @State private var backupPlist: Bool = true
 
@@ -165,7 +175,7 @@ struct ContentView: View {
                             .font(.system(size: 16, weight: .bold))
                             .foregroundColor(ThemeColors.textPrimary)
 
-                        Text("v2.2.3")
+                        Text("v\(appVersion)")
                             .font(.system(size: 10, weight: .bold))
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
@@ -174,7 +184,7 @@ struct ContentView: View {
                             .cornerRadius(4)
                     }
 
-                    Text("MediaTek Wi-Fi 6 Suite")
+                    Text(isAwdlBeta ? "Wi-Fi 6 + AWDL Beta" : "Wi-Fi 6 Driver Suite")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundColor(ThemeColors.textSecondary)
                 }
@@ -281,22 +291,49 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 20) {
             headerText(
                 title: "Hardware & Driver Overview",
-                subtitle: "High-throughput Wi-Fi 6 (MT7921/MT7922), Apple Wireless Direct Link (AWDL/AirDrop), and Bluetooth companion patcher."
+                subtitle: isAwdlBeta
+                    ? "Experimental AWDL/AirDrop Beta build on top of MediaTek MT7921/MT7922 Wi-Fi 6 driver. For daily stable Wi-Fi without AWDL, use the Wi-Fi Only release."
+                    : "Stable Wi-Fi 6 driver suite for MediaTek MT7921 / RZ608 / MT7922 / RZ616 PCIe adapters (Wi-Fi Only edition; AWDL disabled for reliability, Bluetooth untouched)."
             )
 
             // System Hardware Architecture Specs
             VStack(spacing: 8) {
-                specRow(label: "HOST SYSTEM", value: "macOS 26 Tahoe / macOS 15 Sequoia (x86_64)")
-                specRow(label: "PROCESSOR", value: "Tiger Lake-H / Intel Core x86_64")
-                specRow(label: "WI-FI CHIPSET", value: "MediaTek MT7921 / MT7922 PCIe 802.11ax")
-                specRow(label: "BLUETOOTH", value: "MediaTek USB Bluetooth (0489:e0e2 / SRS_7922)")
+                specRow(label: "HOST SYSTEM", value: "macOS \(ProcessInfo.processInfo.operatingSystemVersionString) (\(EFIManager.shared.sysctlString("hw.model")))")
+                specRow(label: "PROCESSOR", value: EFIManager.shared.sysctlString("machdep.cpu.brand_string"))
+                specRow(label: "WI-FI CHIPSET", value: "MediaTek MT7921 / MT7921K (RZ608) / MT7922 (RZ616)")
+                specRow(label: "RELEASE MODE", value: isAwdlBeta ? "AWDL Beta Phase (Wi-Fi + Experimental AWDL/AirDrop)" : "Wi-Fi Only Stable (AWDL Disabled · Bluetooth Untouched)")
                 specRow(label: "TARGET OPENCORE", value: selectedDestination?.displayName ?? "Auto-detecting EFI...")
-                specRow(label: "DRIVER SUITE", value: "AirportMtkWlan v2.2.3 + AirportMtkBt Companion")
+                specRow(label: "DRIVER BUNDLE", value: "AirportMtkWlan v\(appVersion) (Tahoe / Sequoia / SimpleMtkWlan)")
                 specRow(
                     label: "KERNEL STATUS",
-                    value: (driverStatus?.isLoaded ?? false) ? "RUNNING (MediaTek MT7921/MT7922 802.11ax, AWDL AirDrop Active)" : "Ready to Install / Not Loaded into Active Kernel",
+                    value: (driverStatus?.isLoaded ?? false)
+                        ? "LOADED (\(driverStatus?.kextIdentifier ?? "MtkWlan") v\(driverStatus?.loadedVersion ?? "?"))"
+                        : "Not Loaded in Active Kernel (Deploy to EFI & Reboot)",
                     isHighlight: (driverStatus?.isLoaded ?? false)
                 )
+            }
+
+            if EFIManager.shared.hasLibraryExtensionsConflict() {
+                HStack(spacing: 12) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(ThemeColors.redText)
+                    Text("Conflicting MediaTek Wi-Fi kext detected in /Library/Extensions (AuxKC). Purge before rebooting.")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(ThemeColors.redText)
+                    Spacer()
+                    Button("Purge /Library/Extensions Conflict") {
+                        DispatchQueue.global(qos: .userInitiated).async {
+                            _ = EFIManager.shared.purgeLibraryExtensionsConflict { line in
+                                DispatchQueue.main.async { self.appendLog(line) }
+                            }
+                        }
+                    }
+                    .buttonStyle(DestructiveOutlineButtonStyle())
+                }
+                .padding(14)
+                .background(ThemeColors.redBg)
+                .cornerRadius(10)
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(ThemeColors.redBorder, lineWidth: 1))
             }
 
             // Quick Deployment & Diagnostics Action Bar
@@ -305,18 +342,20 @@ struct ContentView: View {
                     Image(systemName: "checkmark.circle.fill")
                         .foregroundColor(ThemeColors.greenText)
                         .font(.system(size: 16))
-                    Text("Unified driver bundle v2.2.3 ready for deployment. Supports Wi-Fi 6, AWDL, and Bluetooth.")
+                    Text(isAwdlBeta
+                         ? "AWDL Beta v\(appVersion) ready. Capture logs via Boot Diagnostics if issues occur."
+                         : "Wi-Fi Only v\(appVersion) ready for EFI deployment (Tahoe, Sequoia, SimpleMtkWlan).")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundColor(ThemeColors.textPrimary)
                 }
                 Spacer()
 
-                Button("Export Last 3 Boot Logs") {
-                    exportLast3Boots()
+                Button("Grab Logs (Admin)") {
+                    selectedTab = .bootDiagnostics
                 }
                 .buttonStyle(SecondaryOutlineButtonStyle())
 
-                Button("Deploy Unified Suite to EFI") {
+                Button("Deploy Wi-Fi Kext to EFI") {
                     selectedTab = .deploy
                 }
                 .buttonStyle(PrimaryBlackButtonStyle())
@@ -353,8 +392,10 @@ struct ContentView: View {
     private var deployView: some View {
         VStack(alignment: .leading, spacing: 20) {
             headerText(
-                title: "Deploy Unified Driver Suite",
-                subtitle: "Installs Wi-Fi 802.11ax, Bluetooth companion drivers, and AWDL hardware acceleration to your OpenCore EFI in one run."
+                title: isAwdlBeta ? "Deploy AWDL Beta Wi-Fi Driver" : "Deploy Wi-Fi Driver to EFI",
+                subtitle: isAwdlBeta
+                    ? "Installs AirportMtkWlan (AWDL Beta build) or SimpleMtkWlan to your OpenCore EFI. Bluetooth kexts are left untouched."
+                    : "Installs Wi-Fi-only AirportMtkWlan (Tahoe/Sequoia) or SimpleMtkWlan to your OpenCore EFI. AWDL and Bluetooth kexts are omitted."
             )
 
             // Card 1: Target OpenCore EFI
@@ -408,9 +449,7 @@ struct ContentView: View {
                 .pickerStyle(SegmentedPickerStyle())
 
                 VStack(alignment: .leading, spacing: 10) {
-                    Toggle("Install Bluetooth companion drivers (AirportMtkBtPatcher & AirportMtkBtFw)", isOn: $installBluetooth)
-                        .font(.system(size: 12, weight: .medium))
-                    Toggle("Auto-configure OpenCore config.plist (Inject Kernel entries & DisableIoMapper quirk)", isOn: $autoConfig)
+                    Toggle("Auto-configure OpenCore config.plist (Inject Wi-Fi kext entry & DisableIoMapper quirk)", isOn: $autoConfig)
                         .font(.system(size: 12, weight: .medium))
                     Toggle("Backup existing config.plist before making modifications (saved as config.plist.backup-*)", isOn: $backupPlist)
                         .font(.system(size: 12, weight: .medium))
@@ -433,7 +472,7 @@ struct ContentView: View {
                         Image(systemName: "arrow.down.circle.fill")
                             .font(.system(size: 16, weight: .bold))
                     }
-                    Text(isInstalling ? "Deploying Drivers to OpenCore EFI..." : "Deploy Unified Driver Suite to EFI (Wi-Fi + BT + AWDL)")
+                    Text(isInstalling ? "Deploying Wi-Fi Kext to OpenCore EFI..." : (isAwdlBeta ? "Deploy AWDL Beta Wi-Fi Kext to EFI" : "Deploy Wi-Fi-Only Kext to EFI"))
                         .font(.system(size: 14, weight: .semibold))
                 }
                 .frame(maxWidth: .infinity)
@@ -451,7 +490,7 @@ struct ContentView: View {
                     Image(systemName: "checkmark.circle.fill")
                         .foregroundColor(ThemeColors.greenText)
                         .font(.system(size: 16))
-                    Text("Unified deployment completed successfully! Restart your Mac to apply all kernel drivers.")
+                    Text("Wi-Fi driver deployment completed! Reboot your Mac to load the updated kext.")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundColor(ThemeColors.textPrimary)
                     Spacer()
@@ -481,7 +520,7 @@ struct ContentView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 3) {
                         if logs.isEmpty {
-                            Text("Ready. Click 'Deploy Unified Driver Suite' to stream activity.")
+                            Text("Ready. Select your EFI and click Deploy to stream activity.")
                                 .font(.system(size: 11, design: .monospaced))
                                 .foregroundColor(Color.gray)
                         } else {
@@ -530,7 +569,7 @@ struct ContentView: View {
                 }
 
                 HStack(spacing: 12) {
-                    Button(action: exportLast3Boots) {
+                    Button(action: collectFullAdminLogs) {
                         HStack(spacing: 8) {
                             if isExportingBootLogs {
                                 ProgressView()
@@ -539,7 +578,7 @@ struct ContentView: View {
                             } else {
                                 Image(systemName: "arrow.down.doc.fill")
                             }
-                            Text(isExportingBootLogs ? "Exporting Last 3 Boots Logs..." : "Export Last 3 Boot Logs to Desktop (.tar.gz)")
+                            Text(isExportingBootLogs ? "Grabbing Diagnostic Logs..." : "Grab Full Logs (Admin · Recommended)")
                                 .font(.system(size: 13, weight: .semibold))
                         }
                         .padding(.horizontal, 16)
@@ -550,6 +589,19 @@ struct ContentView: View {
                     }
                     .buttonStyle(PlainButtonStyle())
                     .disabled(isExportingBootLogs)
+
+                    Button("Export Without Admin Prompt") {
+                        exportLast3Boots()
+                    }
+                    .buttonStyle(SecondaryOutlineButtonStyle())
+                    .disabled(isExportingBootLogs)
+
+                    Button("Open GitHub Issues") {
+                        if let url = URL(string: "https://github.com/Arxusion/AirportMtkWlan/issues") {
+                            NSWorkspace.shared.open(url)
+                        }
+                    }
+                    .buttonStyle(SecondaryOutlineButtonStyle())
 
                     if let url = lastExportedURL {
                         Button("Reveal in Finder") {
@@ -661,7 +713,7 @@ struct ContentView: View {
                             .font(.system(size: 10, weight: .bold))
                             .tracking(1.2)
                             .foregroundColor(ThemeColors.sectionHeader)
-                        Text("AirportMtkWlan v2.2.3 (Stability & High-Throughput Release)")
+                        Text("AirportMtkWlan v\(appVersion) (\(isAwdlBeta ? "AWDL Beta Phase" : "Wi-Fi Only Release"))")
                             .font(.system(size: 15, weight: .semibold))
                             .foregroundColor(ThemeColors.textPrimary)
                     }
@@ -747,7 +799,7 @@ struct ContentView: View {
                     .font(.system(size: 10, weight: .bold))
                     .tracking(1.2)
                     .foregroundColor(ThemeColors.redText)
-                Text("Safely removes AirportMtkWlan.kext, SimpleMtkWlan.kext, AirportMtkBtPatcher.kext, and AirportMtkBtFw.kext from your target OpenCore EFI and disables them in config.plist.")
+                Text("Safely removes AirportMtkWlan.kext / SimpleMtkWlan.kext (and any legacy BT kexts) from your target OpenCore EFI and disables them in config.plist.")
                     .font(.system(size: 12, weight: .regular))
                     .foregroundColor(ThemeColors.textSecondary)
 
@@ -873,13 +925,13 @@ struct ContentView: View {
         guard let dst = selectedDestination else { return }
         isInstalling = true
         installSuccess = nil
-        appendLog("Initiating unified driver installation (Wi-Fi + BT + AWDL)...")
+        appendLog("Initiating Wi-Fi driver installation (\(selectedFlavor.kextName), Bluetooth untouched)...")
 
         DispatchQueue.global(qos: .userInitiated).async {
             let success = EFIManager.shared.install(
                 flavor: self.selectedFlavor,
                 destination: dst,
-                installBluetooth: self.installBluetooth,
+                installBluetooth: false,
                 autoConfig: self.autoConfig,
                 backupPlist: self.backupPlist
             ) { logLine in
@@ -925,6 +977,43 @@ struct ContentView: View {
                 appendLog("Added custom EFI destination: \(resolved.displayName)")
             } else {
                 appendLog("ERROR: Selected directory is not a valid OpenCore root (missing config.plist).")
+            }
+        }
+    }
+
+    private func collectFullAdminLogs() {
+        isExportingBootLogs = true
+        bootLogsExportMessage = "Collecting full diagnostic logs with admin privileges (dmesg, wdutil, EFI, last 3 boots)..."
+        appendLog("Starting full diagnostic log grab (admin privileges requested)...")
+
+        let desktop = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first ?? URL(fileURLWithPath: "/tmp")
+        let df = DateFormatter()
+        df.dateFormat = "yyyyMMdd-HHmmss"
+        let outURL = desktop.appendingPathComponent("AirportMtkWlan-Logs-\(df.string(from: Date())).tar.gz")
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let res = EFIManager.shared.collectDiagnosticLogs(
+                privileged: true,
+                sessionLogs: self.logs,
+                outputURL: outURL,
+                last3Boots: true
+            ) { line in
+                DispatchQueue.main.async {
+                    self.appendLog(line)
+                }
+            }
+
+            DispatchQueue.main.async {
+                self.isExportingBootLogs = false
+                if res.success, let url = res.archiveURL {
+                    self.lastExportedURL = url
+                    self.bootLogsExportMessage = "SUCCESS: Saved \(url.lastPathComponent)\n" + res.summaryText.components(separatedBy: .newlines).prefix(18).joined(separator: "\n")
+                    self.appendLog("SUCCESS: Full diagnostic archive archived at \(url.path)")
+                    NSWorkspace.shared.activateFileViewerSelecting([url])
+                } else {
+                    self.bootLogsExportMessage = "ERROR: Full log grab failed: \(res.message)"
+                    self.appendLog("ERROR: Full log grab failed: \(res.message)")
+                }
             }
         }
     }
@@ -1019,7 +1108,7 @@ struct ContentView: View {
 
                     self.latestReleaseURL = releaseURL
                     self.latestTagFound = tagName
-                    let currentTag = "v2.2.3"
+                    let currentTag = "v\(self.appVersion)"
                     if tagName != currentTag && tagName > currentTag {
                         self.updateAvailable = true
                         self.updateStatusMessage = "New update available: \(tagName)! (Installed: \(currentTag))"
@@ -1028,7 +1117,7 @@ struct ContentView: View {
                         self.updateStatusMessage = "You're running the latest version (\(currentTag))!"
                     }
                 } else {
-                    self.updateStatusMessage = "Checked GitHub. Running latest v2.2.3."
+                    self.updateStatusMessage = "Checked GitHub. Current version: v\(self.appVersion)."
                 }
             }
         }.resume()

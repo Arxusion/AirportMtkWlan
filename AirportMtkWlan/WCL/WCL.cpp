@@ -12,6 +12,7 @@
 #include <kern/thread_call.h>
 #include <kern/clock.h>
 #include <net80211/ieee80211_node.h>
+#include <net80211/ieee80211_sae.h>
 #include <net80211/ieee80211_ioctl.h>
 #include <net80211/ieee80211_priv.h>
 #include <crypto/sha1.h>
@@ -87,7 +88,8 @@ bool AirportItlwmSkywalkInterface::initWCL()
 void AirportItlwmSkywalkInterface::stopWCL()
 {
     // Pending country tasks must observe shutdown under the same gate.
-    if (_fCommandGate)
+    const bool wasStopping = wclStopping;
+    if (!wasStopping && _fCommandGate && instance && fHalService)
         _fCommandGate->runAction(stopWCLGated, this);
     wclStopping = true;
     if (joinTimer) {
@@ -101,11 +103,19 @@ void AirportItlwmSkywalkInterface::stopWCL()
     scanPending = joinPending = false;
     joinDeferred = false;
     explicit_bzero(&deferredJoin, sizeof(deferredJoin));
-    if (fHalService) {
+    if (!wasStopping && fHalService) {
         ieee80211com *ic = fHalService->get80211Controller();
         ic->ic_wcl_join_requested = false;
+        ic->ic_wcl_join_chan = 0;
+        ic->ic_wcl_apple_ie = 0;
+        ic->ic_wcl_hotspot_flag = 0;
         ic->ic_wcl_scan_requested = false;
+        ic->ic_wcl_scan_target_count = 0;
         explicit_bzero(ic->ic_psk, sizeof(ic->ic_psk));
+        explicit_bzero(ic->ic_sae_password, sizeof(ic->ic_sae_password));
+        ic->ic_sae_password_len = 0;
+        if (ic->ic_bss)
+            ieee80211_sae_free(ic->ic_bss);
     }
 }
 
@@ -113,6 +123,8 @@ IOReturn AirportItlwmSkywalkInterface::stopWCLGated(
     OSObject *, void *arg, void *, void *, void *)
 {
     auto self = static_cast<AirportItlwmSkywalkInterface *>(arg);
+    if (self->instance)
+        self->instance->setEAPOLTransport(false);
     self->portAuthorized = false;
     self->updateWCLLinkQuality(true);
     self->wclStopping = true;
@@ -264,7 +276,7 @@ void AirportItlwmSkywalkInterface::replayWCLCachedScan(const AirportWCL::ScanReq
     ieee80211com *ic = fHalService->get80211Controller();
     struct ieee80211_node *ni;
     bool restrictChan = scan.channelCount != 0;
-    bool filterSsid = scan.type != 2 && scan.ssidLength != 0;
+    bool filterSsid = scan.type != 2 && scan.targets.count > 0 && !scan.targets.wildcard;
 
     RB_FOREACH(ni, ieee80211_tree, &ic->ic_tree) {
         if (!ni->ni_chan || ni->ni_chan == IEEE80211_CHAN_ANYC ||
@@ -273,9 +285,18 @@ void AirportItlwmSkywalkInterface::replayWCLCachedScan(const AirportWCL::ScanReq
         unsigned ch = ieee80211_chan2ieee(ic, ni->ni_chan);
         if (!ch || !AirportWCL::scanChannelSelected(scan.channels, restrictChan, ch))
             continue;
-        if (filterSsid && (ni->ni_esslen != scan.ssidLength ||
-            memcmp(ni->ni_essid, scan.ssid, scan.ssidLength) != 0))
-            continue;
+        if (filterSsid) {
+            bool matched = false;
+            for (unsigned i = 0; i < scan.targets.count; ++i) {
+                if (ni->ni_esslen == scan.targets.lengths[i] &&
+                    memcmp(ni->ni_essid, scan.targets.ssids[i], scan.targets.lengths[i]) == 0) {
+                    matched = true;
+                    break;
+                }
+            }
+            if (!matched)
+                continue;
+        }
         publishWCLBeacon(ni, ni->ni_rsnie_tlv, ni->ni_rsnie_tlv_len);
     }
 }
@@ -288,6 +309,9 @@ IOReturn AirportItlwmSkywalkInterface::beginWCLScan(apple80211ScanRequest *reque
     ieee80211com *ic = fHalService->get80211Controller();
     if (!(ic->ic_if.if_flags & IFF_RUNNING))
         return kIOReturnNotReady;
+    // Clear stale F_BGSCAN left if the link exited RUN while a background scan ran.
+    if ((ic->ic_flags & IEEE80211_F_BGSCAN) && ic->ic_state != IEEE80211_S_RUN)
+        ic->ic_flags &= ~IEEE80211_F_BGSCAN;
     if (scanPending || joinPending || (ic->ic_flags & IEEE80211_F_BGSCAN))
         return kIOReturnBusy;
     if (ic->ic_state == IEEE80211_S_AUTH || ic->ic_state == IEEE80211_S_ASSOC)
@@ -304,12 +328,24 @@ IOReturn AirportItlwmSkywalkInterface::beginWCLScan(apple80211ScanRequest *reque
     scanPending = true;
     scanCompleted = false;
     scanSkipCompletion = ic->ic_state == IEEE80211_S_SCAN &&
-        ((scan.type != 2 && scan.ssidLength != 0) ||
-         ic->ic_wcl_scan_ssid_length != 0 || ic->ic_des_esslen != 0);
+        ((scan.type != 2 && (scan.ssidLength != 0 || scan.targets.count != 0)) ||
+         ic->ic_wcl_scan_ssid_length != 0 || ic->ic_wcl_scan_target_count != 0 ||
+         ic->ic_des_esslen != 0);
     ic->ic_wcl_scan_requested = true;
     ic->ic_wcl_scan_active = scan.type != 2;
     ic->ic_wcl_scan_ssid_length = scan.type == 2 ? 0 : scan.ssidLength;
     memcpy(ic->ic_wcl_scan_ssid, scan.ssid, sizeof(scan.ssid));
+    if (scan.type == 2) {
+        ic->ic_wcl_scan_target_count = 0;
+        ic->ic_wcl_scan_wildcard = true;
+    } else {
+        ic->ic_wcl_scan_target_count = scan.targets.count;
+        memcpy(ic->ic_wcl_scan_target_lengths, scan.targets.lengths,
+               sizeof(ic->ic_wcl_scan_target_lengths));
+        memcpy(ic->ic_wcl_scan_targets, scan.targets.ssids,
+               sizeof(ic->ic_wcl_scan_targets));
+        ic->ic_wcl_scan_wildcard = scan.targets.wildcard;
+    }
     ic->ic_wcl_scan_restricted = scan.channelCount != 0;
     memcpy(ic->ic_wcl_scan_channels, scan.channels, sizeof(scan.channels));
     scanSource->setTimeoutMS(20000);
@@ -633,6 +669,16 @@ IOReturn AirportItlwmSkywalkInterface::startWCLJoin(AirportWCL::JoinRequest &joi
     ic->ic_flags |= IEEE80211_F_DESBSSID;
     ic->ic_wcl_join_requested = true;
     ic->ic_wcl_scan_requested = false;
+    {
+        unsigned joinCh = AirportWCL::chanspecIndex(join.channelSpec);
+        ic->ic_wcl_join_chan = (joinCh > 0 && joinCh <= IEEE80211_CHAN_MAX &&
+            ic->ic_channels[joinCh].ic_flags) ? uint16_t(joinCh) : 0;
+    }
+    {
+        uint8_t hsFlag = AirportWCL::instantHotspotFlag(join.assocFlags);
+        ic->ic_wcl_hotspot_flag = hsFlag;
+        ic->ic_wcl_apple_ie = uint8_t(hsFlag ? 3 : 1);
+    }
     current_authtype_lower = join.lowerAuth;
     current_authtype_upper = join.upperAuth;
     explicit_bzero(&join, sizeof(join));
@@ -644,7 +690,7 @@ IOReturn AirportItlwmSkywalkInterface::startWCLJoin(AirportWCL::JoinRequest &joi
     wclLqmReportedBeacons = 0;
     bzero(wclBeaconInfo, sizeof(wclBeaconInfo));
     disassocIsVoluntary = false;
-    joinTimer->setTimeoutMS(15000);
+    joinTimer->setTimeoutMS(25000);
     if (ic->ic_state == IEEE80211_S_SCAN && ic->ic_wcl_scan_idle) {
         // The stack waits for us between scans (ieee80211_end_scan).
         ic->ic_wcl_scan_idle = false;
@@ -654,9 +700,16 @@ IOReturn AirportItlwmSkywalkInterface::startWCLJoin(AirportWCL::JoinRequest &joi
         joinPending = false;
         joinTimer->cancelTimeout();
         ic->ic_wcl_join_requested = false;
+        ic->ic_wcl_join_chan = 0;
+        ic->ic_wcl_apple_ie = 0;
+        ic->ic_wcl_hotspot_flag = 0;
         clearWCLPMKSA();
         ic->ic_wcl_enterprise = false;
         explicit_bzero(ic->ic_psk, sizeof(ic->ic_psk));
+        explicit_bzero(ic->ic_sae_password, sizeof(ic->ic_sae_password));
+        ic->ic_sae_password_len = 0;
+        if (ic->ic_bss)
+            ieee80211_sae_free(ic->ic_bss);
         return kIOReturnError;
     }
     return kIOReturnSuccess;
@@ -718,6 +771,13 @@ void AirportItlwmSkywalkInterface::wclJoinTimeout(OSObject *owner, IOTimerEventS
 IOReturn AirportItlwmSkywalkInterface::leaveWCLNetwork()
 {
     ieee80211com *ic = fHalService->get80211Controller();
+    /* Explicitly deauthenticate PMF/Hotspot APs before dropping to SCAN. */
+    if (ic->ic_opmode == IEEE80211_M_STA && ic->ic_bss &&
+        (ic->ic_state == IEEE80211_S_ASSOC || ic->ic_state == IEEE80211_S_RUN)) {
+        IEEE80211_SEND_MGMT(ic, ic->ic_bss, IEEE80211_FC0_SUBTYPE_DEAUTH,
+                            IEEE80211_REASON_AUTH_LEAVE);
+    }
+    instance->setEAPOLTransport(false);
     portAuthorized = false;
     updateWCLLinkQuality(true);
     joinPending = false;
@@ -725,6 +785,9 @@ IOReturn AirportItlwmSkywalkInterface::leaveWCLNetwork()
     explicit_bzero(&deferredJoin, sizeof(deferredJoin));
     joinTimer->cancelTimeout();
     ic->ic_wcl_join_requested = false;
+    ic->ic_wcl_join_chan = 0;
+    ic->ic_wcl_apple_ie = 0;
+    ic->ic_wcl_hotspot_flag = 0;
     wclAssociatedBeacons = 0;
     wclLqmBeacons = 0;
     wclLqmReportedBeacons = 0;
@@ -736,6 +799,10 @@ IOReturn AirportItlwmSkywalkInterface::leaveWCLNetwork()
     ieee80211_disable_rsn(ic);
     ieee80211_disable_wep(ic);
     explicit_bzero(ic->ic_psk, sizeof(ic->ic_psk));
+    explicit_bzero(ic->ic_sae_password, sizeof(ic->ic_sae_password));
+    ic->ic_sae_password_len = 0;
+    if (ic->ic_bss)
+        ieee80211_sae_free(ic->ic_bss);
     clearWCLPMKSA();
     ic->ic_wcl_enterprise = false;
     ic->ic_flags &= ~(IEEE80211_F_PSK | IEEE80211_F_DESBSSID);
@@ -776,13 +843,26 @@ void AirportItlwmSkywalkInterface::handleWCLEvent(int code, void *data)
     // Firmware initialization runs on systq, outside the native PostOffice gate.
     // Serialize only lifecycle notifications; never run synchronous WCL ioctls here.
     if ((code == IEEE80211_EVT_DRIVER_RESET_BEGIN || code == IEEE80211_EVT_DRIVER_READY ||
-         code == IEEE80211_EVT_DRIVER_STOPPED) && !instance->getWorkQueue()->inGate()) {
+         code == IEEE80211_EVT_DRIVER_STOPPED || code == IEEE80211_EVT_SCAN_ABORTED) &&
+        !instance->getWorkQueue()->inGate()) {
         _fCommandGate->runAction(wclCommand, this, reinterpret_cast<void *>(12),
                                 reinterpret_cast<void *>(uintptr_t(code)));
         return;
     }
     ieee80211com *ic = fHalService->get80211Controller();
     switch (code) {
+        case IEEE80211_EVT_STATE_CHANGED:
+            instance->setEAPOLTransport(!wclStopping && ic->ic_wcl_enterprise &&
+                                      ic->ic_state == IEEE80211_S_RUN);
+            if (ic->ic_state == IEEE80211_S_RUN && ic->ic_bss) {
+                ic->ic_11d_bss_cc[0] = ic->ic_bss->ni_11d_cc[0];
+                ic->ic_11d_bss_cc[1] = ic->ic_bss->ni_11d_cc[1];
+            } else if (ic->ic_state != IEEE80211_S_RUN) {
+                ic->ic_11d_bss_cc[0] = ic->ic_11d_bss_cc[1] = 0;
+            }
+            if (instance->countryCodeAnnounceNeeded())
+                deferWCLCountryUpdate();
+            break;
         case IEEE80211_EVT_COUNTRY_CODE_UPDATE:
             deferWCLCountryUpdate();
             break;
@@ -800,6 +880,7 @@ void AirportItlwmSkywalkInterface::handleWCLEvent(int code, void *data)
         case IEEE80211_EVT_DRIVER_STOPPED: {
             bool ready = code == IEEE80211_EVT_DRIVER_READY;
             if (!ready) {
+                instance->setEAPOLTransport(false);
                 finishWCLScan(ic->ic_wcl_mac_reconfig ? kIOReturnAborted : kIOReturnOffline);
                 finishWCLJoin(1, 0, kIOReturnOffline);
                 portAuthorized = false;
@@ -909,6 +990,9 @@ void AirportItlwmSkywalkInterface::handleWCLEvent(int code, void *data)
                     scanSource->setTimeoutMS(0);
                 }
             }
+            break;
+        case IEEE80211_EVT_SCAN_ABORTED:
+            finishWCLScan(kIOReturnAborted);
             break;
         case IEEE80211_EVT_STA_ASSOC_DONE:
             if (joinPending && !assocNotified) {

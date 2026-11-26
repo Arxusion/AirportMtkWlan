@@ -35,6 +35,7 @@ pre = r"""
 #define IFF_UP 0x1
 #define IFF_RUNNING 0x40
 #define MWX_FLAG_SCANNING 0x01
+#define MWX_FLAG_BGSCAN 0x02
 #define IEEE80211_F_BGSCAN 0x1
 #define IEEE80211_F_ASCAN 0x2
 #define IEEE80211_M_STA 1
@@ -50,6 +51,9 @@ pre = r"""
 #define M_DEVBUF 0
 #define MT_DMA_DCR0(x) 0
 #define MT_DMA_DCR0_RXD_G5_EN 1
+#define MT_WFDMA0_GLO_CFG 0xd4208
+#define MT_WFDMA0_GLO_CFG_TX_DMA_EN 1
+#define MT_WFDMA0_GLO_CFG_RX_DMA_EN 4
 #define MT_WF_RFCR_DROP_OTHER_UC 1
 #define MT_WF_RFCR(x) 1
 #define MCU_EXT_CMD_SET_RX_PATH 1
@@ -85,8 +89,8 @@ struct mwx_vif { mwx_node vif_mn; };
 struct mwx_softc {
     ieee80211com sc_ic;
     mwx_vif sc_vif;
-    void *sc_nswq, *sc_reset_to, *sc_intr_to;
-    int sc_newstate_task, sc_bgscan_done_task, sc_setkey_task, sc_reset_task, sc_scan_task, sc_edca_task;
+    void *sc_nswq, *sc_reset_to, *sc_dma_to, *sc_intr_to;
+    int sc_newstate_task, sc_bgscan_done_task, sc_setkey_task, sc_reset_task, sc_fullreset_task, sc_syspm_task, sc_scan_task, sc_edca_task;
     int sc_intr_pending;
     void *sc_bgscan_arg;
     size_t sc_bgscan_arg_size;
@@ -95,6 +99,7 @@ struct mwx_softc {
     int sc_fw_loaded;
     int sc_hard_reset;
     int sc_resetting;
+    int sc_dma_stall_logged;
     int sc_coredump_cnt;
     uint64_t sc_last_bgscan_ns;
     ieee80211_state sc_ns_state;
@@ -117,6 +122,9 @@ static inline void delay(int) {}
 static inline void free(void *, int, size_t) {}
 static inline void task_del(void *, void *) {}
 static inline void timeout_del(void *) {}
+static inline void timeout_add_sec(void **, int) {}
+static inline void mwx_scan_reset_rx_deaf(mwx_softc *) {}
+static inline uint32_t mwx_read(mwx_softc *, int) { return 5; /* TX+RX DMA EN */ }
 static inline void mwx_amsdu_purge(mwx_softc *sc) {
     assert(!(sc->sc_ic.ic_if.if_flags & IFF_RUNNING));
     calls.push_back("amsdu_purge");
