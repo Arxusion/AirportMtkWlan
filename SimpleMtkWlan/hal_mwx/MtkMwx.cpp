@@ -4824,8 +4824,10 @@ mwx_dma_rx_dequeue(struct mwx_softc *sc, struct mwx_queue *q,
 		md = &q->mq_data[idx];
 		desc = &q->mq_desc[idx];
 
+		/* Unloading clears dm_mapsize before the descriptor is checked. */
+		const auto mapped_size = md->md_map->dm_mapsize;
 		bus_dmamap_sync(sc->sc_dmat, md->md_map, 0,
-		    md->md_map->dm_mapsize, BUS_DMASYNC_POSTREAD);
+		    mapped_size, BUS_DMASYNC_POSTREAD);
 		bus_dmamap_unload(sc->sc_dmat, md->md_map);
 
 		/* dequeue mbuf */
@@ -4845,11 +4847,11 @@ mwx_dma_rx_dequeue(struct mwx_softc *sc, struct mwx_queue *q,
 		/* only buf0 is used on RX rings */
 		ctrl = le32toh(desc->ctrl);
 		uint32_t seglen = MT_DNA_CTL_SD_GET_LEN0(ctrl);
-		if (seglen == 0 || seglen > md->md_map->dm_mapsize) {
+		if (seglen == 0 || seglen > mapped_size) {
 			static uint32_t rx_badlen_log;
 			if (rx_badlen_log++ < 8)
 				MWX_DEV_LOG(sc, "rx slot %d invalid len=%u max=%u\n",
-				    idx, seglen, (uint32_t)md->md_map->dm_mapsize);
+				    idx, seglen, (uint32_t)mapped_size);
 			m_freem(m);
 			if (m0 != NULL) {
 				m_freem(m0);

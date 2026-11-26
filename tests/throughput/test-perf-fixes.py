@@ -372,7 +372,9 @@ static void mwx_write(mwx_softc *sc, uint32_t reg, uint32_t val) {
         g_txq_doorbells.push_back(val);
 }
 static void bus_dmamap_sync(void*, dmamap_t*, int, size_t, int) {}
-static void bus_dmamap_unload(void*, dmamap_t*) {}
+static void bus_dmamap_unload(void*, dmamap_t *map) {
+    if (map) map->dm_mapsize = 0;
+}
 static void mwx_reset(mwx_softc*) { assert(false && "unexpected reset"); }
 static bool mwx_request_fullreset(mwx_softc*, const char*, uint32_t) { return false; }
 static int mwx_queue_fill(mwx_softc*, mwx_queue*) { g_fill_calls++; return 0; }
@@ -451,7 +453,7 @@ static void test_stream_caps() {
 }
 
 static void setup_rx_ring(mwx_queue &q, int count, int dma_idx) {
-    static dmamap_t qmap{64}, dmap{2048};
+    static dmamap_t qmap{64};
     q.mq_count = count;
     q.mq_cons = 0;
     q.mq_regbase = 0x100;
@@ -460,7 +462,7 @@ static void setup_rx_ring(mwx_queue &q, int count, int dma_idx) {
     q.mq_desc = new mwx_desc[count]();
     for (int i = 0; i < dma_idx; i++) {
         q.mq_data[i].md_mbuf = new mbuf();
-        q.mq_data[i].md_map = &dmap;
+        q.mq_data[i].md_map = new dmamap_t{2048};
         // Every 2 descriptors form one packet to test LAST_SEC0 boundary preservation
         q.mq_desc[i].ctrl = 512U | ((i & 1) ? MT_DMA_CTL_LAST_SEC0 : 0);
     }
@@ -469,9 +471,34 @@ static void setup_rx_ring(mwx_queue &q, int count, int dma_idx) {
 static void free_rx_ring(mwx_queue &q) {
     for (int i = 0; i < q.mq_count; i++) {
         if (q.mq_data[i].md_mbuf) m_freem(q.mq_data[i].md_mbuf);
+        delete q.mq_data[i].md_map;
     }
     delete[] q.mq_data;
     delete[] q.mq_desc;
+}
+
+static void test_rx_dma_length_after_unload() {
+    const uint32_t lengths[] = {36, 2048, 0, 2049};
+    const bool accepted[] = {true, true, false, false};
+    for (size_t i = 0; i < sizeof(lengths) / sizeof(lengths[0]); i++) {
+        mwx_softc sc{};
+        auto &q = sc.sc_rxq;
+        setup_rx_ring(q, 2, 1);
+        g_rxq_dma_idx = 1;
+        q.mq_desc[0].ctrl = lengths[i] | MT_DMA_CTL_LAST_SEC0;
+
+        mbuf_list received;
+        mwx_dma_rx_dequeue(&sc, &q, &received, 1, nullptr);
+
+        assert(q.mq_data[0].md_map->dm_mapsize == 0);
+        assert(q.mq_cons == 1);
+        assert(received.items.size() == (accepted[i] ? 1U : 0U));
+        if (accepted[i]) {
+            assert(mbuf_len(received.items.front()) == lengths[i]);
+            m_freem(received.items.front());
+        }
+        free_rx_ring(q);
+    }
 }
 
 static void test_intr_and_rx_budget() {
@@ -813,6 +840,7 @@ static void test_awdl_action_observation() {
 
 int main() {
     test_stream_caps();
+    test_rx_dma_length_after_unload();
     test_intr_and_rx_budget();
     test_ba_rearm_throttle();
     test_edca_and_bgscan();
