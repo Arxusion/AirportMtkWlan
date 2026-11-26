@@ -51,6 +51,12 @@ public:
 
     void clearScanningFlags() override;
     void debugPoll() override;
+#if defined(MTK_NATIVE_AWDL) && defined(AIRPORT_WCL) && __IO80211_TARGET == __MAC_26_0
+    IOReturn transmitAwdlAnnouncement(const uint8_t *, size_t, MtkAwdl::TxKind, uint8_t) override;
+    uint8_t getAwdlChannel(bool &allowed) override;
+    bool readAwdlAnnouncementCompletions(MtkAwdl::AnnouncementCompletions &) override;
+    IOReturn setAwdlMacAddress(const uint8_t *, bool) override;
+#endif
     void publishHealthDiagnostics();
     void suspend() override;
     void resume() override;

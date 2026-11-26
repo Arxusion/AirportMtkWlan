@@ -50,6 +50,9 @@ files.
     event notification, and association-defer state safety.
   - yuanshuai2017 (PR #28): Tahoe `IO80211AWDLProtocol` / HW OMAC bidirectional
     AWDL integration (for the separate AWDL Beta track).
+  - Arxusion (`AppleSunriseWLAN`) & `morluto/rea`: reverse-engineering validation
+    of native macOS Sequoia/Tahoe Apple80211/IO80211AWDLProtocol vtables,
+    standalone channel 6 AWDL TX, and live AWDL getters across MT7921 and MT7922.
   - Dino-VN (https://github.com/Dino-VN/MtkWireless): root-cause documentation
     and architecture notes informing clean `GPL-3.0-or-later` / `ISC` C++ fixes for
     probe refcounting, 802.11d country voting, PMF default + comeback retry,

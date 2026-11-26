@@ -7,7 +7,7 @@ set -u
 set -o pipefail
 umask 077
 
-TOOL_VERSION="2.3.0"
+TOOL_VERSION="2.3.1"
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
 

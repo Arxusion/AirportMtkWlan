@@ -31,7 +31,7 @@ The repository builds two front-ends:
 | **Network Roaming** | ✅ | Band steering preferring 5 GHz when within 15 dBm RSSI of 2.4 GHz |
 | **802.11ax (HE)** | ✅ | Wi-Fi 6 HE association, 256 BlockAck window, and A-MSDU reassembly enabled |
 | **Apple Instant Hotspot** | ✅ | Native Apple Device (`0x0A`) & Hotspot (`0x0B`) Vendor IEs in 802.11 Association Requests |
-| **Apple Continuity / AWDL** | ✅ | Native virtual `awdl0` interface with router power-save (`PM=1`/`PM=0`) coexistence |
+| **Apple Continuity / AWDL** | 🧪 Beta (`v2.3.1-awdl-beta1`) | Native virtual `awdl0` (`IO80211AWDLProtocol` + HW OMAC `HW_BSSID_1`), scoped `fe80::%awdl0/64` & peer NDP neighbor routing, Connac2 OFDM/HT rate ladder (disabled in `v2.3.0` Wi-Fi Only) |
 | **Bluetooth Companion** | ✅ | Supported via companion `SimpleMtkBtFw.kext` and `SimpleMtkBtPatcher.kext` |
 
 ---
@@ -54,23 +54,22 @@ The repository builds two front-ends:
 ## Installation Guide (OpenCore)
 
 ### Option A: Graphical OpenCore Installer (Recommended)
-Download **`AirportMtkWlan-WiFi-Installer-v2.3.0.zip`** from [Releases](https://github.com/Arxusion/AirportMtkWlan/releases).
+Download **`AirportMtkWlan-WiFi-Installer-v2.3.0.zip`** (for daily Wi-Fi) or **`AirportMtkWlan-AWDL-Beta-Installer-v2.3.1.zip`** (for AWDL testing) from [Releases](https://github.com/Arxusion/AirportMtkWlan/releases).
 > [!TIP]
 > **Two Release Tracks**:
-> * Use the **Wi-Fi Only Stable Release (`v2.3.0`)** for daily Wi-Fi (AWDL is disabled and Bluetooth kexts are left untouched).
-> * Use the separate **AWDL Beta Release** only if you want to test experimental AirDrop / AWDL, and attach logs from **Grab Full Logs (Admin)** / `tools/mtk-grab-logs.sh` if any issue occurs.
+> * Use the **Wi-Fi Only Stable Release (`v2.3.0`)** if you need working daily Wi-Fi and do not want to test AWDL right now (AWDL is disabled and Bluetooth kexts are left untouched).
+> * Use the separate **AWDL Beta Phase Release (`v2.3.1-awdl-beta1`)** only if you want to test experimental AirDrop / Continuity / AWDL (requires OpenCore `DisableIoMapper`, macOS 15.2+ Sequoia or macOS 26 Tahoe; Bluetooth remains untouched), and attach a redacted archive from **Grab Full Logs (Admin · Recommended)** / `sudo ./tools/mtk-grab-logs.sh` if any issue occurs.
 
 - Launch `AirportMtkWlan Installer.app`
 - Select your target OpenCore EFI partition (or click **Browse...** to locate your `EFI/OC` folder)
 - Choose your OS flavor (`macOS 26 Tahoe` or `macOS 15 Sequoia`, or `SimpleMtkWlan`)
-- Click **Deploy Wi-Fi-Only Kext to EFI** — the app installs the matching Wi-Fi kext, enables `DisableIoMapper`, backs up `config.plist`, and configures OpenCore automatically (leaving Bluetooth untouched).
+- Click **Deploy Wi-Fi-Only Kext to EFI** (or **Deploy AWDL Beta Wi-Fi Kext to EFI** in the AWDL Beta app) — the app installs the matching Wi-Fi kext, enables `DisableIoMapper`, backs up `config.plist`, and configures OpenCore automatically (leaving Bluetooth untouched).
 
 ### Option B: Manual Installation
 
-1. Download the latest release package matching your macOS version from [Releases](https://github.com/Arxusion/AirportMtkWlan/releases):
-   * `AirportMtkWlan-Tahoe-WiFi-v2.3.0.zip` for **macOS 26 Tahoe**
-   * `AirportMtkWlan-Sequoia-WiFi-v2.3.0.zip` for **macOS 15 Sequoia (15.2+)**
-   * *For macOS 14 Sonoma, 13 Ventura, or earlier*: Native AirPort Skywalk is not compatible; download `SimpleMtkWlan-v2.3.0.zip` and use [SimpleMTK](https://github.com/laobamac/SimpleMTKClient) (HeliPort).
+1. Download the release package matching your macOS version and track from [Releases](https://github.com/Arxusion/AirportMtkWlan/releases):
+   * **Daily Wi-Fi (Recommended)**: `AirportMtkWlan-Tahoe-WiFi-v2.3.0.zip` (**macOS 26 Tahoe**), `AirportMtkWlan-Sequoia-WiFi-v2.3.0.zip` (**macOS 15 Sequoia 15.2+**), or `SimpleMtkWlan-v2.3.0.zip` (**macOS 14 Sonoma / 13 Ventura or earlier** with [SimpleMTK](https://github.com/laobamac/SimpleMTKClient))
+   * **AWDL Beta Phase (`v2.3.1-awdl-beta1`)**: `AirportMtkWlan-Tahoe-AWDL-Beta-v2.3.1.zip` (**macOS 26 Tahoe**) or `AirportMtkWlan-Sequoia-AWDL-Beta-v2.3.1.zip` (**macOS 15 Sequoia 15.2+**)
 2. Extract and place `AirportMtkWlan.kext` into your EFI directory: `EFI/OC/Kexts/`.
 3. Add the kernel extension entry to your `config.plist` under `Kernel -> Add`:
 
@@ -150,6 +149,11 @@ Optional boot arguments can be added to `boot-args` in OpenCore:
 * `-novht` — Disables 802.11ac VHT capabilities (limits connection to 802.11n).
 * `-noht40` — Restricts 802.11n to 20 MHz channel width.
 * `-mtknoamsdu` — Disables hardware TX A-MSDU inside A-MPDU aggregation.
+* `-mtknoawdl` — Disables virtual `awdl0` interface initialization even in the AWDL Beta build.
+* `amtk_awdl_ndp=0` — *(AWDL Beta)* Disables kernel `PF_ROUTE` `fe80::%awdl0/64` & permanent peer NDP neighbor injection.
+* `amtk_awdl_rate=0` — *(AWDL Beta)* Disables adaptive AWDL unicast TX rate scaling (pins to 6 Mbps OFDM).
+* `amtk_awdl_ht=0` — *(AWDL Beta)* Caps adaptive AWDL unicast TX rates at 54 Mbps OFDM (disables 5 GHz HT MCS7).
+* `amtk_awdl_standalone=0` — *(AWDL Beta)* Disables unassociated / standalone AWDL TX & action RX on channel `6`.
 * `-mtkwlanoff` — Emergency safe-boot flag: parks the driver and halts initialization without panicking.
 
 ---

@@ -60,7 +60,12 @@ public:
     virtual void _RESERVEDIOSkywalkEthernetInterface9();
     virtual void _RESERVEDIOSkywalkEthernetInterface10();
     bool initRegistrationInfo(RegistrationInfo *, unsigned int, unsigned long);
+#if defined(MTK_NATIVE_AWDL) && defined(AIRPORT_WCL) && __IO80211_TARGET == __MAC_26_0
+    IOReturn registerEthernetInterface(const RegistrationInfo *, IOSkywalkPacketQueue **, unsigned int, IOSkywalkPacketBufferPool *, IOSkywalkPacketBufferPool *, unsigned int);
+    IOReturn deregisterEthernetInterface(unsigned int);
+#else
     bool registerEthernetInterface(const RegistrationInfo *, IOSkywalkPacketQueue **, unsigned int, IOSkywalkPacketBufferPool *, IOSkywalkPacketBufferPool *, unsigned int);
+#endif
     struct ExpansionData { RegistrationInfo *fRegistrationInfo; ifnet_t fBSDInterface; };
     uint8_t _layout0[0x38];
     ExpansionData *mExpansionData2;

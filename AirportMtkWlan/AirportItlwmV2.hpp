@@ -28,6 +28,10 @@
 #include <IOKit/IOFilterInterruptEventSource.h>
 
 #include "MtkMwx.hpp"
+#if defined(MTK_NATIVE_AWDL) && defined(AIRPORT_WCL) && __IO80211_TARGET == __MAC_26_0
+#include <HAL/MtkAwdlAnnouncement.hpp>
+#include <HAL/MtkAwdlPeerIdentity.hpp>
+#endif
 
 /* Intel's RSSI floor; the MediaTek HAL keeps ni_rssi the same way (dBm + 100). */
 #ifndef IWM_MIN_DBM
@@ -88,6 +92,7 @@ public:
     virtual IOService* probe(IOService* provider, SInt32* score) override;
     virtual bool start(IOService *provider) override;
     virtual void stop(IOService *provider) override;
+    virtual IOReturn setProperties(OSObject *properties) override;
     virtual IOReturn enable(IO80211SkywalkInterface *netif) AIRPORT_LEGACY_OVERRIDE;
     virtual IOReturn disable(IO80211SkywalkInterface *netif) AIRPORT_LEGACY_OVERRIDE;
     virtual IOReturn setHardwareAddress(const void *addr, UInt32 addrBytes) override;
@@ -218,6 +223,18 @@ public:
     virtual SInt32 disableVirtualInterface(IO80211VirtualInterface *vif) override;
     bool isMT7922();
     IO80211VirtualInterface *getAwdlInterface() const { return fAwdlIf; }
+#if defined(MTK_NATIVE_AWDL) && defined(AIRPORT_WCL) && __IO80211_TARGET == __MAC_26_0
+    void observeAwdlAction(mbuf_t, uint32_t channel, int32_t rssi);
+    void observeAwdlData(mbuf_t, uint32_t channel);
+    IOReturn transmitAwdlAnnouncement(const uint8_t *, size_t, MtkAwdl::TxKind, uint8_t);
+    IOReturn setAwdlMacAddress(const uint8_t *, bool);
+    uint8_t getAwdlChannel(bool &allowed);
+    bool readAwdlAnnouncementCompletions(MtkAwdl::AnnouncementCompletions &);
+    IOReturn registerAwdlInterface(const ether_addr &);
+    MtkAwdl::PeerIdentity awdlTestPeer;
+    IOLock *awdlRegistrationLock = nullptr;
+    bool awdlStopping = false;
+#endif
 
     virtual IOReturn getCOUNTRY_CODE(IO80211SkywalkInterface *interface,apple80211_country_code_data *data) override {
 //        XYLog("%s\n", __FUNCTION__);

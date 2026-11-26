@@ -45,11 +45,16 @@ harness = r'''
 #define __packed __attribute__((packed))
 #define DEVNAME(sc) "mwx0"
 #define MWX_DEV_LOG(...) ((void)0)
+static bool awdl_diag_armed;
+static bool mtk_awdl_diagnostics_enabled() { return awdl_diag_armed; }
 #define KASSERT(x) assert(x)
 #define htole16(x) (x)
 #define htole32(x) (x)
 #define le32toh(x) (x)
 #define AIRPORT_WCL 1
+#define MTK_NATIVE_AWDL 1
+#define __IO80211_TARGET 260000
+#define __MAC_26_0 260000
 
 #define IEEE80211_TX_MCS_SET_DEFINED 0x01
 #define IEEE80211_VHTCAP_SUPP_CHAN_WIDTH_160MHZ 0x00000004
@@ -65,6 +70,7 @@ harness = r'''
 #define IEEE80211_FC0_TYPE_DATA 0x08
 #define IEEE80211_FC0_SUBTYPE_MASK 0xf0
 #define IEEE80211_FC0_SUBTYPE_BAR 0x80
+#define IEEE80211_FC0_SUBTYPE_ACTION 0xd0
 #define IEEE80211_FC1_PROTECTED 0x40
 #define IEEE80211_RXI_HWDEC 0x01
 #define MWX_RXI_AMSDU_MASK 0x06
@@ -186,6 +192,12 @@ static inline void mbuf_setlen(mbuf *m, int l) { m->len = l; }
 static inline uint32_t mbuf_len(mbuf *m) { return m->len; }
 static inline void mbuf_pkthdr_setlen(mbuf *m, int l) { m->pktlen = l; }
 static inline uint32_t mbuf_pkthdr_len(mbuf *m) { return m->pktlen; }
+static inline int mbuf_copydata(mbuf *m, size_t offset, size_t len, void *out) {
+    if (offset > m->len || len > m->len - offset)
+        return EINVAL;
+    memcpy(out, m->data + offset, len);
+    return 0;
+}
 static inline void *mbuf_pkthdr_rcvif(mbuf *) { return nullptr; }
 static inline mbuf *m_pullup(mbuf *m, int) { return m; }
 static inline bool ml_empty(const mbuf_list *ml) { return ml->items.empty(); }
@@ -212,6 +224,9 @@ struct mwx_queue {
 struct ether_header { uint8_t d[6], s[6]; uint16_t t; };
 struct ieee80211_frame { uint8_t i_fc[2]; uint8_t i_dur[2]; uint8_t i_addr1[6]; uint8_t i_addr2[6]; uint8_t i_addr3[6]; uint8_t i_seq[2]; };
 struct ieee80211_node {};
+class IOEthernetController;
+static void mtkAwdlObserveAction(IOEthernetController *, mbuf *, uint32_t, int32_t) {}
+static void mtkAwdlObserveData(void *, mbuf *, unsigned int) {}
 struct ieee80211_rxinfo { uint32_t rxi_flags = 0; uint16_t rxi_chan = 0; int8_t rxi_rssi = 0; };
 struct ifqueue {
     std::deque<mbuf*> q;
@@ -286,6 +301,8 @@ struct mwx_softc {
     uint32_t sc_tx_full_cnt = 0;
     uint32_t sc_rx_fill_fail = 0;
     uint32_t sc_rx_delivered = 0;
+    IOEthernetController *sc_awdl_controller = nullptr;
+    uint32_t sc_awdl_diag_frames = 0;
     uint32_t sc_mcu_cmd_irqs = 0;
     uint32_t sc_last_mcu_cmd = 0;
     uint32_t sc_ser_events = 0;
@@ -768,6 +785,32 @@ static void test_rx_amsdu_non_data_preserve() {
     assert(sc.sc_amsdu_n == 0 && g_amsdu_flush_calls == 1 && g_rx_deliver_calls == 3);
 }
 
+static void test_awdl_action_observation() {
+    mwx_softc sc{};
+    mbuf_list ml{};
+    const uint8_t awdl[] = {127, 0x00, 0x17, 0xf2, 8, 0x10, 3};
+    g_next_rx_flags = 0;
+    auto receive = [&](size_t len, bool matching) {
+        auto *m = new mbuf();
+        m->len = m->pktlen = sizeof(ieee80211_frame) + len;
+        mtod(m, ieee80211_frame *)->i_fc[0] = IEEE80211_FC0_SUBTYPE_ACTION;
+        auto *body = m->data + sizeof(ieee80211_frame);
+        memcpy(body, awdl, len);
+        if (!matching)
+            body[4] = 0;
+        mwx_rx(&sc, m, &ml);
+    };
+    receive(sizeof(awdl), true);
+    assert(sc.sc_awdl_diag_frames == 0);
+    awdl_diag_armed = true;
+    receive(sizeof(awdl) - 1, true);
+    receive(sizeof(awdl), false);
+    assert(sc.sc_awdl_diag_frames == 0);
+    receive(sizeof(awdl), true);
+    assert(sc.sc_awdl_diag_frames == 1);
+    awdl_diag_armed = false;
+}
+
 int main() {
     test_stream_caps();
     test_intr_and_rx_budget();
@@ -776,6 +819,7 @@ int main() {
     test_aspm_disable();
     test_tx_doorbell_and_oactive_kick();
     test_rx_amsdu_non_data_preserve();
+    test_awdl_action_observation();
     puts("PASS throughput/latency fixes: 2SS MCS maps, lost-MSI race recheck, bounded RX batching, BA timeout throttling, EDCA QOS, bgscan deferral, ASPM/L1SS disable, batched TX doorbells & A-MSDU flush");
     return 0;
 }

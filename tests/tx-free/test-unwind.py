@@ -9,6 +9,7 @@ pre=r'''
 #include <cstdio>
 #include <cerrno>
 #define MWX_DEV_LOG(...) ((void)0)
+enum class MwxAwdlTx : uint8_t { None, Sync, Service, VerifiedService, Data, GroupData };
 struct mbuf {bool freed=false;};struct ieee80211_node {};struct mwx_node:ieee80211_node{unsigned wcid;};
 struct mt76_txwi {char desc[64];};
 struct mwx_txwi{mt76_txwi*mt_desc;mbuf*mt_mbuf;bool busy;};
@@ -25,7 +26,7 @@ void mwx_txwi_put(mwx_softc*,mwx_txwi*t){assert(t->busy);if(t->mt_mbuf){m_freem(
 main=r'''
 int main(){mwx_softc sc{};mwx_node ni{};
  for(int trial=0;trial<100;trial++)for(fail_at=0;fail_at<=3;fail_at++){
-  mbuf m;freed=returned=mapped=0;int rv=mwx_tx(&sc,&m,&ni,true);
+  mbuf m;freed=returned=mapped=0;int rv=mwx_tx(&sc,&m,&ni,true,MwxAwdlTx::None);
   if(fail_at==0){assert(rv==0&&mt.busy&&mapped==1&&!m.freed);mwx_txwi_put(&sc,&mt);}
   else assert(rv!=0);
   assert(m.freed&&freed==1&&!mt.busy&&mapped==0);assert(returned==(fail_at==1?0:1));

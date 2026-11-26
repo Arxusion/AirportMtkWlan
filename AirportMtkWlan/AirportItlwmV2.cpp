@@ -17,6 +17,14 @@
 #include "CountryLocale.hpp"
 #include "IOPCIEDeviceWrapper.hpp"
 #include <HAL/MtkNvramHelper.hpp>
+#if defined(MTK_NATIVE_AWDL) && defined(AIRPORT_WCL) && __IO80211_TARGET == __MAC_26_0
+#include <HAL/MtkAwdlDiagnostics.hpp>
+#include <IOKit/IOUserClient.h>
+#include <libkern/c++/OSDictionary.h>
+#include <libkern/c++/OSBoolean.h>
+#include <kern/task.h>
+#include "MtkAwdlInterface.hpp"
+#endif
 
 #define super IO80211Controller
 OSDefineMetaClassAndStructors(AirportItlwm, IO80211Controller);
@@ -24,6 +32,93 @@ OSDefineMetaClassAndStructors(CTimeout, OSObject)
 
 IO80211WorkQueue *_fWorkloop;
 IOCommandGate *_fCommandGate;
+
+#if defined(MTK_NATIVE_AWDL) && defined(AIRPORT_WCL) && __IO80211_TARGET == __MAC_26_0
+unsigned int mtk_awdl_diagnostics_armed;
+#endif
+
+IOReturn AirportItlwm::setProperties(OSObject *properties)
+{
+#if defined(MTK_NATIVE_AWDL) && defined(AIRPORT_WCL) && __IO80211_TARGET == __MAC_26_0
+    auto *dict = OSDynamicCast(OSDictionary, properties);
+    const bool data = dict && dict->getObject("MtkArmAwdlIPv6");
+    auto *hostname = dict ? dict->getObject("MtkArmAwdlHostname") : nullptr;
+    if (!dict || (!data && !hostname && !dict->getObject("MtkArmAwdlDiagnostics")))
+        return super::setProperties(properties);
+    MtkAwdl::PeerIdentity peer;
+    if (dict->getCount() != 1)
+        return kIOReturnBadArgument;
+    if (data) {
+        if (dict->getObject("MtkArmAwdlIPv6") != kOSBooleanTrue)
+            return kIOReturnBadArgument;
+    } else if (hostname) {
+        const auto *name = OSDynamicCast(OSString, hostname);
+        if (!name || !name->getLength() || name->getLength() >= sizeof(peer.hostname))
+            return kIOReturnBadArgument;
+        const auto *label = name->getCStringNoCopy();
+        for (size_t i = 0; i < name->getLength(); ++i) {
+            const unsigned c = MtkAwdl::lowerASCII(static_cast<uint8_t>(label[i]));
+            if ((c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-')
+                return kIOReturnBadArgument;
+            peer.hostname[i] = char(c);
+        }
+    } else {
+        const auto *requested = OSDynamicCast(OSData, dict->getObject("MtkArmAwdlDiagnostics"));
+        if (!requested || requested->getLength() != sizeof(peer.address))
+            return kIOReturnBadArgument;
+        memcpy(peer.address, requested->getBytesNoCopy(), sizeof(peer.address));
+        constexpr uint8_t zero[6] = {};
+        if ((peer.address[0] & 1) || !memcmp(peer.address, zero, sizeof(peer.address)))
+            return kIOReturnBadArgument;
+    }
+    if (IOUserClient::clientHasPrivilege(current_task(),
+        kIOClientPrivilegeAdministrator) != kIOReturnSuccess)
+        return kIOReturnNotPrivileged;
+    if (!_fCommandGate || !awdlRegistrationLock)
+        return kIOReturnNotReady;
+    if (!mtkAwdlTahoeAbiMatches()) {
+        setProperty("MtkAwdlStage", "unsupported-build-or-abi");
+        return kIOReturnUnsupported;
+    }
+
+    return _fCommandGate->runAction([](OSObject *owner, void *requestedPeer, void *, void *, void *) -> IOReturn {
+        auto *self = static_cast<AirportItlwm *>(owner);
+        auto *ic = self->fHalService ? self->fHalService->get80211Controller() : nullptr;
+        if (!self->fNetIf || !ic || ic->ic_state != IEEE80211_S_RUN ||
+            ic->ic_ac.ac_if.if_link_state != LINK_STATE_UP) {
+            IOLog("MTK AWDL: arm rejected, infrastructure Wi-Fi is not up\n");
+            return kIOReturnNotReady;
+        }
+        if (!IOLockTryLock(self->awdlRegistrationLock))
+            return kIOReturnBusy;
+        const bool stopping = self->awdlStopping;
+        if (!requestedPeer) {
+            const auto result = !stopping && self->fAwdlIf
+                ? static_cast<MtkAWDLInterface *>(self->fAwdlIf)->enableIPv6(self) : kIOReturnNotReady;
+            IOLockUnlock(self->awdlRegistrationLock);
+            return result;
+        }
+        if (!stopping) {
+            const auto &peer = *static_cast<const MtkAwdl::PeerIdentity *>(requestedPeer);
+            if (mtk_awdl_diagnostics_enabled() &&
+                (memcmp(self->awdlTestPeer.address, peer.address, sizeof(peer.address)) ||
+                 strcmp(self->awdlTestPeer.hostname, peer.hostname))) {
+                IOLockUnlock(self->awdlRegistrationLock);
+                return kIOReturnBusy;
+            }
+            self->awdlTestPeer = peer;
+            if (!__atomic_exchange_n(&mtk_awdl_diagnostics_armed, 1, __ATOMIC_ACQ_REL)) {
+                self->setProperty("MtkAwdlProbeArmed", true);
+                IOLog("MTK AWDL: capability probe armed for the selected peer\n");
+            }
+        }
+        IOLockUnlock(self->awdlRegistrationLock);
+        return stopping ? kIOReturnNotReady : kIOReturnSuccess;
+    }, data ? nullptr : &peer);
+#else
+    return super::setProperties(properties);
+#endif
+}
 
 void AirportItlwm::checkInterfaceRole(const char *when, bool restore)
 {
@@ -214,6 +309,11 @@ bool AirportItlwm::init(OSDictionary *properties)
     XYLog("%s\n", __PRETTY_FUNCTION__);
     bool ret = super::init(properties);
     awdlSyncEnable = true;
+#if defined(MTK_NATIVE_AWDL) && defined(AIRPORT_WCL) && __IO80211_TARGET == __MAC_26_0
+    awdlRegistrationLock = ret ? IOLockAlloc() : nullptr;
+    if (ret && !awdlRegistrationLock)
+        ret = false;
+#endif
     power_state = 0;
     memset(geo_location_cc, 0, sizeof(geo_location_cc));
     return ret;
@@ -555,6 +655,28 @@ bool AirportItlwm::start(IOService *provider)
     setLinkStatus(kIONetworkLinkValid);
     if (TAILQ_EMPTY(&fHalService->get80211Controller()->ic_ess))
         fHalService->get80211Controller()->ic_flags |= IEEE80211_F_AUTO_JOIN;
+#if defined(MTK_NATIVE_AWDL) && defined(AIRPORT_WCL) && __IO80211_TARGET == __MAC_26_0
+    {
+        int no_awdl = 0;
+        if (PE_parse_boot_argn("-mtknoawdl", &no_awdl, sizeof(no_awdl))) {
+            setProperty("MtkAwdlAutoArmed", false);
+            setProperty("MtkAwdlDisableReason", "boot-arg");
+        } else if (!mtkAwdlTahoeAbiMatches()) {
+            setProperty("MtkAwdlAutoArmed", false);
+            setProperty("MtkAwdlDisableReason", "abi-mismatch");
+        } else if (awdlRegistrationLock) {
+            IOLockLock(awdlRegistrationLock);
+            if (!awdlStopping) {
+                __atomic_store_n(&mtk_awdl_diagnostics_armed, 1, __ATOMIC_RELEASE);
+                setProperty("MtkAwdlProbeArmed", true);
+                setProperty("MtkAwdlAutoArmed", true);
+                setProperty("MtkAwdlChipMode", isMT7922() ? "mt7922" : "mt7921");
+                IOLog("MTK AWDL: auto-armed AWDL for %s on Tahoe\n", isMT7922() ? "MT7922" : "MT7921");
+            }
+            IOLockUnlock(awdlRegistrationLock);
+        }
+    }
+#endif
 #ifdef AIRPORT_WCL
     bsdInterface->registerService();
 #endif
@@ -583,6 +705,20 @@ void AirportItlwm::stop(IOService *provider)
     if (fNetIf)
         static_cast<AirportItlwmSkywalkInterface *>(fNetIf)->stopWCL();
 #endif
+#if defined(MTK_NATIVE_AWDL) && defined(AIRPORT_WCL) && __IO80211_TARGET == __MAC_26_0
+    if (awdlRegistrationLock) {
+        IOLockLock(awdlRegistrationLock);
+        awdlStopping = true;
+        __atomic_store_n(&mtk_awdl_diagnostics_armed, 0, __ATOMIC_RELEASE);
+        IO80211VirtualInterface *interface = fAwdlIf;
+        fAwdlIf = nullptr;
+        IOLockUnlock(awdlRegistrationLock);
+        if (interface) {
+            detachVirtualInterface(interface, true);
+            interface->release();
+        }
+    }
+#endif
     super::stop(provider);
     disableAdapter(bsdInterface);
     setLinkStatus(kIONetworkLinkValid);
@@ -597,6 +733,12 @@ void AirportItlwm::stop(IOService *provider)
 
 void AirportItlwm::free()
 {
+#if defined(MTK_NATIVE_AWDL) && defined(AIRPORT_WCL) && __IO80211_TARGET == __MAC_26_0
+    if (awdlRegistrationLock) {
+        IOLockFree(awdlRegistrationLock);
+        awdlRegistrationLock = nullptr;
+    }
+#endif
     XYLog("%s\n", __PRETTY_FUNCTION__);
     if (fHalService != NULL) {
         fHalService->release();
@@ -1099,6 +1241,10 @@ IOReturn AirportItlwm::getPacketFilters(const OSSymbol *group, UInt32 *filters) 
 SInt32 AirportItlwm::
 enableFeature(IO80211FeatureCode code, void *data)
 {
+#if defined(MTK_NATIVE_AWDL) && defined(AIRPORT_WCL) && __IO80211_TARGET == __MAC_26_0
+    if (mtk_awdl_diagnostics_enabled())
+        XYLog("AWDL diag: controller feature request code=%u\n", (unsigned)code);
+#endif
     if (code == kIO80211Feature80211n) {
         return 0;
     }
@@ -1179,9 +1325,34 @@ getCARD_CAPABILITIES(OSObject *object,
     PE_parse_boot_argn("-mtkawdl", &allow_awdl, sizeof(allow_awdl));
     PE_parse_boot_argn("-mtkrsdb", &allow_rsdb, sizeof(allow_rsdb));
 
-#ifndef MTK_WIFI_ONLY
-    if (!no_awdl && (allow_awdl || allow_rsdb)) {
-        // Role 6 (AWDL) and role 9 (NAN / infra AWDL) authorization bits.
+#if defined(MTK_NATIVE_AWDL) && defined(AIRPORT_WCL) && __IO80211_TARGET == __MAC_26_0
+    const bool awdlProbe = mtk_awdl_diagnostics_enabled();
+    bool dualBand = false;
+    if (awdlProbe) {
+        cd->capabilities[4] |= (1 << 0);
+        cd->capabilities[9] |= (1 << 0);
+        bool has2GHz = false;
+        bool has5GHz = false;
+        const auto *ic = fHalService->get80211Controller();
+        for (unsigned i = 0; i <= IEEE80211_CHAN_MAX; ++i) {
+            const auto &channel = ic->ic_channels[i];
+            if (!channel.ic_freq)
+                continue;
+            has2GHz |= (channel.ic_flags & IEEE80211_CHAN_2GHZ) != 0;
+            has5GHz |= (channel.ic_flags & IEEE80211_CHAN_5GHZ) != 0;
+        }
+        dualBand = has2GHz && has5GHz;
+    }
+    static unsigned int observedReplies;
+    const unsigned int reply = awdlProbe ? 2 : 1;
+    if (!(__atomic_fetch_or(&observedReplies, reply, __ATOMIC_RELAXED) & reply)) {
+        setProperty(awdlProbe ? "MtkAwdlProbeArmedCapsRead" : "MtkAwdlProbeBootCapsRead", true);
+        if (awdlProbe)
+            setProperty("MtkAwdlDualBandAdvertised", dualBand);
+        IOLog("MTK AWDL: CARD_CAPABILITIES replied, AWDL=%u dualBand=%u\n", awdlProbe, dualBand);
+    }
+#elif !defined(MTK_WIFI_ONLY)
+    if (!no_awdl) {
         cd->capabilities[4] |= (1 << 0);
         cd->capabilities[9] |= (1 << 0);
     }
@@ -1769,6 +1940,7 @@ void AirportItlwm::setPowerStateOn()
         pmPolicyMaker->acknowledgeSetPowerState();
 }
 
+#if !defined(MTK_NATIVE_AWDL) || !defined(AIRPORT_WCL) || __IO80211_TARGET != __MAC_26_0
 __asm__(".globl __ZN23IO80211VirtualInterfaceC1EPK11OSMetaClass\n"
         ".set __ZN23IO80211VirtualInterfaceC1EPK11OSMetaClass, __ZN23IO80211VirtualInterfaceC2EPK11OSMetaClass\n");
 
@@ -1781,12 +1953,10 @@ IO80211VirtualInterface* AirportItlwm::createVirtualInterface(ether_addr *ea, UI
         return NULL;
     }
 #endif
-    int no_awdl = 0, allow_awdl = 0, allow_rsdb = 0;
+    int no_awdl = 0;
     PE_parse_boot_argn("-mtknoawdl", &no_awdl, sizeof(no_awdl));
-    PE_parse_boot_argn("-mtkawdl", &allow_awdl, sizeof(allow_awdl));
-    PE_parse_boot_argn("-mtkrsdb", &allow_rsdb, sizeof(allow_rsdb));
-    if (no_awdl || (!allow_awdl && !allow_rsdb)) {
-        XYLog("%s: virtual interface creation disabled (enable with -mtkawdl)\n", __FUNCTION__);
+    if (no_awdl) {
+        XYLog("%s: virtual interface creation disabled (-mtknoawdl)\n", __FUNCTION__);
         return NULL;
     }
 
@@ -1804,7 +1974,7 @@ IO80211VirtualInterface* AirportItlwm::createVirtualInterface(ether_addr *ea, UI
             IOEthernetAddress primary_ea;
             getHardwareAddress(&primary_ea);
             memcpy(&awdl_ea, &primary_ea, sizeof(awdl_ea));
-            awdl_ea.octet[0] ^= 0x02; // locally administered unicast
+            awdl_ea.octet[0] ^= 0x02;
         }
 
         if (!vif->init(this, &awdl_ea, role, "awdl")) {
@@ -1831,6 +2001,115 @@ IO80211VirtualInterface* AirportItlwm::createVirtualInterface(ether_addr *ea, UI
 
     return super::createVirtualInterface(ea, role);
 }
+#else
+IO80211VirtualInterface* AirportItlwm::createVirtualInterface(ether_addr *address, UInt role)
+{
+    if (mtk_awdl_diagnostics_enabled() && role == APPLE80211_VIF_AWDL && address) {
+        setProperty("MtkAwdlProbeFactoryRequested", true);
+        setProperty("MtkAwdlStage", "allocating-interface");
+        auto *interface = new MtkAWDLInterface;
+        if (!interface)
+            return nullptr;
+        setProperty("MtkAwdlStage", "initializing-interface");
+        const auto *ic = fHalService ? fHalService->get80211Controller() : nullptr;
+        if (ic && interface->prepareConfiguration(*ic, awdlTestPeer) &&
+            interface->init(this, address, role, "awdl"))
+            return interface;
+        interface->release();
+    }
+    return nullptr;
+}
+
+void mtkAwdlObserveAction(IOEthernetController *owner, mbuf_t packet, uint32_t channel, int32_t rssi)
+{
+    if (auto *controller = OSDynamicCast(AirportItlwm, owner))
+        controller->observeAwdlAction(packet, channel, rssi);
+}
+
+IOReturn AirportItlwm::transmitAwdlAnnouncement(const uint8_t *bytes, size_t length, MtkAwdl::TxKind kind, uint8_t channel)
+{
+    if (!mtk_awdl_diagnostics_enabled() || !fHalService)
+        return kIOReturnNotReady;
+    return fHalService->transmitAwdlAnnouncement(bytes, length, kind, channel);
+}
+
+IOReturn AirportItlwm::setAwdlMacAddress(const uint8_t *mac, bool enable)
+{
+    if (!fHalService)
+        return kIOReturnNotReady;
+    return fHalService->setAwdlMacAddress(mac, enable);
+}
+
+uint8_t AirportItlwm::getAwdlChannel(bool &allowed)
+{
+    allowed = false;
+    return fHalService ? fHalService->getAwdlChannel(allowed) : 0;
+}
+
+bool AirportItlwm::readAwdlAnnouncementCompletions(MtkAwdl::AnnouncementCompletions &counts)
+{
+    return fHalService && fHalService->readAwdlAnnouncementCompletions(counts);
+}
+
+void AirportItlwm::observeAwdlAction(mbuf_t packet, uint32_t channel, int32_t rssi)
+{
+    if (!_fWorkloop || !_fWorkloop->inGate() || !awdlRegistrationLock ||
+        !IOLockTryLock(awdlRegistrationLock))
+        return;
+    if (mtk_awdl_diagnostics_enabled() && fAwdlIf && !fAwdlIf->isInactive())
+        static_cast<MtkAWDLInterface *>(fAwdlIf)->observeAction(this, packet, channel, rssi);
+    IOLockUnlock(awdlRegistrationLock);
+}
+
+void mtkAwdlObserveData(IOEthernetController *owner, mbuf_t packet, uint32_t channel)
+{
+    if (auto *controller = OSDynamicCast(AirportItlwm, owner))
+        controller->observeAwdlData(packet, channel);
+}
+
+void AirportItlwm::observeAwdlData(mbuf_t packet, uint32_t channel)
+{
+    if (!_fWorkloop || !_fWorkloop->inGate() || !awdlRegistrationLock ||
+        !IOLockTryLock(awdlRegistrationLock))
+        return;
+    if (mtk_awdl_diagnostics_enabled() && fAwdlIf && !fAwdlIf->isInactive())
+        static_cast<MtkAWDLInterface *>(fAwdlIf)->observeData(packet, channel);
+    IOLockUnlock(awdlRegistrationLock);
+}
+
+IOReturn AirportItlwm::registerAwdlInterface(const ether_addr &requestedAddress)
+{
+    if (!mtk_awdl_diagnostics_enabled() || !_fWorkloop)
+        return kIOReturnNotReady;
+    if (!IOLockTryLock(awdlRegistrationLock))
+        return kIOReturnBusy;
+
+    IOReturn result = kIOReturnNotReady;
+    if (mtk_awdl_diagnostics_enabled()) {
+        if (fAwdlIf) {
+            result = kIOReturnSuccess;
+        } else {
+            ether_addr address = requestedAddress;
+            setProperty("MtkAwdlStage", "attaching-interface");
+            IO80211VirtualInterface *interface = nullptr;
+            result = kIOReturnError;
+            if (attachVirtualInterface(&interface, &address, APPLE80211_VIF_AWDL, false) && interface) {
+                result = static_cast<MtkAWDLInterface *>(interface)->initializeNetwork(this, _fWorkloop, address);
+                if (result == kIOReturnSuccess)
+                    fAwdlIf = interface;
+                else {
+                    interface->detach(this);
+                    interface->release();
+                }
+            }
+        }
+    }
+    setProperty("MtkAwdlCreateResult", static_cast<UInt32>(result), 32);
+    IOLog("MTK AWDL: create result 0x%x\n", static_cast<UInt32>(result));
+    IOLockUnlock(awdlRegistrationLock);
+    return result;
+}
+#endif
 
 SInt32 AirportItlwm::enableVirtualInterface(IO80211VirtualInterface *vif)
 {

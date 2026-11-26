@@ -7,6 +7,9 @@
 //
 #include "AirportItlwmV2.hpp"
 #include "AirportItlwmSkywalkInterface.hpp"
+#if defined(MTK_NATIVE_AWDL) && defined(AIRPORT_WCL) && __IO80211_TARGET == __MAC_26_0
+#include <HAL/MtkAwdlDiagnostics.hpp>
+#endif
 #include "CountryLocale.hpp"
 #include <sys/CTimeout.hpp>
 #include <libkern/c++/OSMetaClass.h>
@@ -1163,6 +1166,20 @@ IOReturn AirportItlwmSkywalkInterface::getAWDL_RSDB_CAPS(apple80211_rsdb_capabil
 
     memset(cap, 0, sizeof(*cap));
     cap->version = 1;
+#ifdef MTK_WIFI_ONLY
+    cap->cores = 1;
+    cap->rsdb = 0;
+    cap->flags = 0;
+    return kIOReturnSuccess;
+#elif defined(AIRPORT_WCL) && __IO80211_TARGET == __MAC_26_0
+    const bool probe = mtk_awdl_diagnostics_enabled();
+    cap->cores = probe ? 1 : 2;
+    if (probe) {
+        setProperty("MtkAwdlProbeRsdbRead", true);
+        IOLog("MTK AWDL: AWDL_RSDB_CAPS replied, RSDB=0 cores=1\n");
+    }
+    return kIOReturnSuccess;
+#else
     cap->cores = 2;
     int allow_rsdb = 0;
     PE_parse_boot_argn("-mtkrsdb", &allow_rsdb, sizeof(allow_rsdb));
@@ -1175,6 +1192,7 @@ IOReturn AirportItlwmSkywalkInterface::getAWDL_RSDB_CAPS(apple80211_rsdb_capabil
     }
     XYLog("%s: RSDB=%u, cores=%u, flags=0x%04x\n", __FUNCTION__, cap->rsdb, cap->cores, cap->flags);
     return kIOReturnSuccess;
+#endif
 }
 
 IOReturn AirportItlwmSkywalkInterface::setVIRTUAL_IF_CREATE(apple80211_virt_if_create_data *data)
@@ -1182,12 +1200,26 @@ IOReturn AirportItlwmSkywalkInterface::setVIRTUAL_IF_CREATE(apple80211_virt_if_c
     if (!data)
         return kIOReturnBadArgument;
 
-    int no_awdl = 0, allow_awdl = 0, allow_rsdb = 0;
+#ifdef MTK_WIFI_ONLY
+    XYLog("%s: Wi-Fi-only build, rejecting virtual interface role %u\n", __FUNCTION__, data->role);
+    return kIOReturnUnsupported;
+#elif defined(AIRPORT_WCL) && __IO80211_TARGET == __MAC_26_0
+    if (mtk_awdl_diagnostics_enabled()) {
+        setProperty("MtkAwdlProbeCreateRequested", true);
+        setProperty("MtkAwdlRequestedRole", data->role, 32);
+        IOLog("MTK AWDL: VIRTUAL_IF_CREATE version=%u role=%u\n", data->version, data->role);
+        if (instance && data->role == APPLE80211_VIF_AWDL) {
+            ether_addr address = {};
+            memcpy(address.octet, data->mac, sizeof(address.octet));
+            return instance->registerAwdlInterface(address);
+        }
+    }
+    return kIOReturnUnsupported;
+#else
+    int no_awdl = 0;
     PE_parse_boot_argn("-mtknoawdl", &no_awdl, sizeof(no_awdl));
-    PE_parse_boot_argn("-mtkawdl", &allow_awdl, sizeof(allow_awdl));
-    PE_parse_boot_argn("-mtkrsdb", &allow_rsdb, sizeof(allow_rsdb));
-    if (no_awdl || (!allow_awdl && !allow_rsdb)) {
-        XYLog("%s: virtual interface creation disabled (enable with -mtkawdl)\n", __FUNCTION__);
+    if (no_awdl) {
+        XYLog("%s: virtual interface creation disabled (-mtknoawdl)\n", __FUNCTION__);
         return kIOReturnUnsupported;
     }
 
@@ -1215,6 +1247,7 @@ IOReturn AirportItlwmSkywalkInterface::setVIRTUAL_IF_CREATE(apple80211_virt_if_c
     strlcpy((char *)data->bsd_name, "awdl0", sizeof(data->bsd_name));
     XYLog("%s: Successfully created virtual interface '%s' for role %u\n", __FUNCTION__, data->bsd_name, role);
     return kIOReturnSuccess;
+#endif
 }
 
 
