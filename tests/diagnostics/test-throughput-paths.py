@@ -124,7 +124,7 @@ def main():
          "assert(mp_values[mp_tx_wtbl_ba_submit_fail]==1 && mp_values[mp_tx_sta_ba_submit_fail]==0);"),
     ):
         ba.MAIN = add_after(ba.MAIN, marker, "    " + check)
-    marker = '    puts("PASS: TX WTBL/STA'
+    marker = '    puts("PASS: TX/RX WTBL'
     assert marker in ba.MAIN
     ba.MAIN = ba.MAIN.replace(marker, "    assert(mp_values[mp_tx_sta_ba_submit_fail]==1);\n" + marker)
     ba.main()
