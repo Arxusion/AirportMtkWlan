@@ -154,6 +154,7 @@ private:
     bool subsystemReset(u32 devId);
     bool resetDone();
     bool enableBluetoothProtocol(bool enable);
+    bool verifyHciController();
 
     OSData *firmwareConvertion(OSData *originalFirmware);
     OSData *requestFirmwareData(const char *fwName, bool noWarn = false);

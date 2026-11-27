@@ -177,6 +177,8 @@ typedef struct __attribute__((packed))
 #define HCI_OP_SNIFF_SUBRATE                0x0811
 #define HCI_OP_SET_EVENT_MASK               0x0c01
 #define HCI_OP_RESET                        0x0c03
+#define HCI_OP_READ_LOCAL_VERSION           0x1001
+#define HCI_OP_READ_BD_ADDR                  0x1009
 #define HCI_OP_SET_EVENT_FLT                0x0c05
 
 /* Command opcode pack/unpack */
