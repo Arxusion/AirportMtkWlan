@@ -24,7 +24,8 @@ constexpr unsigned PAGE_SIZE = 4096;
 constexpr IOOptionBits kIOMemoryPhysicallyContiguous = 0x10, kIOMapInhibitCache = 0x100;
 constexpr unsigned kIODirectionInOut=3, kIODirectionOutIn=3;
 constexpr int kIOReturnSuccess=0, MBUF_DONTWAIT=0;
-constexpr int BUS_DMASYNC_PREWRITE=2, BUS_DMASYNC_POSTREAD=4;
+constexpr int BUS_DMASYNC_PREREAD=1, BUS_DMASYNC_PREWRITE=2,
+    BUS_DMASYNC_POSTREAD=4, BUS_DMASYNC_POSTWRITE=8;
 int kernel_task;
 std::vector<IOOptionBits> options;
 uint64_t last_mask, next_address=0x100000, next_span=UINT64_MAX;
@@ -77,7 +78,7 @@ void mbuf_inbound_modified(mbuf_t) {}
 struct IOMbufNaturalMemoryCursor {
     static IOMbufNaturalMemoryCursor *withSpecification(uint32_t,int) {return new IOMbufNaturalMemoryCursor;}
     unsigned getPhysicalSegmentsWithCoalesce(mbuf_t m,IOPhysicalSegment *out,unsigned limit) {
-        assert(m->segments.size()<=limit);
+        assert(limit==0 || m->segments.size()<=limit);
         for(unsigned i=0;i<m->segments.size();++i)out[i]=m->segments[i];
         return m->segments.size();
     }

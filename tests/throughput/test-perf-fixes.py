@@ -73,6 +73,7 @@ static bool mtk_awdl_diagnostics_enabled() { return awdl_diag_armed; }
 #define IEEE80211_FC0_SUBTYPE_ACTION 0xd0
 #define IEEE80211_FC1_PROTECTED 0x40
 #define IEEE80211_RXI_HWDEC 0x01
+#define MWX_TXWI_RESERVED 8
 #define MWX_RXI_AMSDU_MASK 0x06
 #define MWX_FLAG_SCANNING 0x01
 #define MWX_FLAG_BGSCAN 0x02
@@ -93,6 +94,7 @@ static bool mtk_awdl_diagnostics_enabled() { return awdl_diag_armed; }
 #define MT_INT_RX_DONE_WM2 0x00100000U
 #define MT_INT_MCU_CMD 0x20000000U
 #define MT_INT_TX_DONE_ALL 0x00000004U
+#define MT_DMA_CTL_DMA_DONE 0x80000000U
 #define MT_DMA_CTL_LAST_SEC0 0x40000000U
 #define MT_DMA_CTL_SD_LEN0(l) ((uint32_t)(l) << 16)
 #define MT_DNA_CTL_SD_GET_LEN0(c) ((c) & 0x3fffU)
@@ -464,7 +466,7 @@ static void setup_rx_ring(mwx_queue &q, int count, int dma_idx) {
         q.mq_data[i].md_mbuf = new mbuf();
         q.mq_data[i].md_map = new dmamap_t{2048};
         // Every 2 descriptors form one packet to test LAST_SEC0 boundary preservation
-        q.mq_desc[i].ctrl = 512U | ((i & 1) ? MT_DMA_CTL_LAST_SEC0 : 0);
+        q.mq_desc[i].ctrl = MT_DMA_CTL_DMA_DONE | 512U | ((i & 1) ? MT_DMA_CTL_LAST_SEC0 : 0);
     }
 }
 
@@ -485,7 +487,7 @@ static void test_rx_dma_length_after_unload() {
         auto &q = sc.sc_rxq;
         setup_rx_ring(q, 2, 1);
         g_rxq_dma_idx = 1;
-        q.mq_desc[0].ctrl = lengths[i] | MT_DMA_CTL_LAST_SEC0;
+        q.mq_desc[0].ctrl = lengths[i] | MT_DMA_CTL_LAST_SEC0 | MT_DMA_CTL_DMA_DONE;
 
         mbuf_list received;
         mwx_dma_rx_dequeue(&sc, &q, &received, 1, nullptr);

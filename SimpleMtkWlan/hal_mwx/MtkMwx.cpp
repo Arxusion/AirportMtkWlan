@@ -1422,6 +1422,12 @@ mwx_watchdog(struct ifnet *ifp)
 
 static inline int mwx_dma_free_slots(struct mwx_queue *);
 
+/*
+ * TXWIs held back from the data path so ic_mgtq frames (BA, keepalive,
+ * EAPOL) can always allocate one while the uplink is saturated.
+ */
+#define MWX_TXWI_RESERVED	8
+
 /* Free TXWIs and TX ring slots for at least `need` frames. */
 static inline int
 mwx_tx_has_room(struct mwx_softc *sc, u_int need)
@@ -1522,6 +1528,20 @@ mwx_start(struct ifnet *ifp)
 		if (ic->ic_state != IEEE80211_S_RUN ||
 		    (ic->ic_xflags & IEEE80211_F_TX_MGMT_ONLY))
 			break;
+
+		/*
+		 * Data frames stop above the reserve so a management frame
+		 * that arrives while the uplink is saturated still finds a
+		 * TXWI. mwx_tx_kick() restarts output once the pool refills.
+		 */
+		if (!mwx_tx_has_room(sc, MWX_TXWI_RESERVED + 1)) {
+			ifq_set_oactive(&ifp->if_snd);
+			sc->sc_tx_full_cnt++;
+#if MTK_PERF
+			mwx_tx_pause_begin(sc);
+#endif
+			break;
+		}
 
 		m = ifq_dequeue(&ifp->if_snd);
 		if (!m)
@@ -3924,8 +3944,12 @@ mwx_txwi_alloc(struct mwx_softc *sc, int count)
 		goto fail;
 	}
 
-	error = bus_dmamem_alloc(sc->sc_dmat, size, PAGE_SIZE, 0, &q->mt_seg,
-	    1, &nsegs, BUS_DMA_NOWAIT | BUS_DMA_ZERO);
+	/*
+	 * Descriptor memory is written by the CPU on every frame: keep it
+	 * cacheable. The allocation is not zero-filled, so clear it below.
+	 */
+	error = bus_dmamem_alloc_cached(sc->sc_dmat, size, PAGE_SIZE,
+	    &q->mt_seg, &nsegs);
 	if (error != 0) {
 		printf("%s: could not allocate TWXI memory\n", DEVNAME(sc));
 		goto fail;
@@ -3937,6 +3961,7 @@ mwx_txwi_alloc(struct mwx_softc *sc, int count)
 		printf("%s: can't map desc DMA memory\n", DEVNAME(sc));
 		goto fail;
 	}
+	memset(q->mt_desc, 0, size);
 
 	error = bus_dmamap_load(sc->sc_dmat, q->mt_map, &q->mt_seg,
 	    BUS_DMA_NOWAIT);
@@ -4166,8 +4191,12 @@ mwx_queue_alloc(struct mwx_softc *sc, struct mwx_queue *q, int count,
 		goto fail;
 	}
 
-	error = bus_dmamem_alloc(sc->sc_dmat, size, PAGE_SIZE, 0, &q->mq_seg,
-	    1, &nsegs, BUS_DMA_NOWAIT | BUS_DMA_ZERO);
+	/*
+	 * Ring descriptors are touched by the CPU for every frame; keep them
+	 * cacheable. The allocation is not zero-filled, so clear it below.
+	 */
+	error = bus_dmamem_alloc_cached(sc->sc_dmat, size, PAGE_SIZE,
+	    &q->mq_seg, &nsegs);
 	if (error != 0) {
 		printf("%s: could not allocate DMA memory\n", DEVNAME(sc));
 		goto fail;
@@ -4179,6 +4208,7 @@ mwx_queue_alloc(struct mwx_softc *sc, struct mwx_queue *q, int count,
 		printf("%s: can't map desc DMA memory\n", DEVNAME(sc));
 		goto fail;
 	}
+	memset(q->mq_desc, 0, size);
 
 	error = bus_dmamap_load(sc->sc_dmat, q->mq_map, &q->mq_seg,
 	    BUS_DMA_NOWAIT);
@@ -4821,6 +4851,15 @@ mwx_dma_rx_dequeue(struct mwx_softc *sc, struct mwx_queue *q,
 
 		md = &q->mq_data[idx];
 		desc = &q->mq_desc[idx];
+
+		/*
+		 * Only take descriptors the DMA engine marked done. Trusting
+		 * DMA_IDX alone can consume a slot before the writeback lands
+		 * and leave cons ahead of the hardware, after which the ring
+		 * never refills.
+		 */
+		if ((le32toh(desc->ctrl) & MT_DMA_CTL_DMA_DONE) == 0)
+			break;
 
 		/* Unloading clears dm_mapsize before the descriptor is checked. */
 		const auto mapped_size = md->md_map->dm_mapsize;

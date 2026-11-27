@@ -274,6 +274,33 @@ int bus_dmamem_alloc(bus_dma_tag_t tag, bus_size_t size, bus_size_t alignment, b
 	return 0;
 }
 
+/*
+ * Cacheable variant of bus_dmamem_alloc(), for memory the CPU writes and
+ * reads on the hot path: ring descriptors and TXWI. Reuses alloc_dma_memory()
+ * so the 32-bit range, alignment and single-segment checks stay in one place.
+ * Only x86_64 is switched over: on Apple silicon the descriptor writes are
+ * already ordered and cached by the mapping the firmware expects.
+ */
+int bus_dmamem_alloc_cached(bus_dma_tag_t tag, bus_size_t size,
+    bus_size_t alignment, bus_dma_segment_t *segs, int *rsegs) {
+	if (segs == 0)
+		return 1;
+	memset(segs, 0, sizeof(*segs));
+#if defined(__x86_64__)
+	/* kIOMemoryPhysicallyContiguous without kIOMapInhibitCache: CPU-cached. */
+	segs->buf = alloc_dma_memory(size, alignment, kIOMemoryPhysicallyContiguous);
+#else
+	segs->buf = alloc_dma_memory(size, alignment);
+#endif
+	if (segs->buf == 0)
+		return 1;
+	segs->ds_addr = segs->buf->getPhysicalAddress();
+	segs->ds_len = size;
+	if (rsegs)
+		*rsegs = 1;
+	return 0;
+}
+
 int bus_dmamem_map(bus_dma_tag_t tag, bus_dma_segment_t *segs, int nsegs, size_t size, void **kvap, int flags) {
 	// ignore flags, the memory is already mapped as one segment by the call to bus_dmamem_alloc so just return the virtual address
 	if (segs == 0 || segs->buf == 0 || kvap == 0)
@@ -290,8 +317,19 @@ bus_addr_t bus_dmamap_get_paddr(bus_dma_segment_t seg) {
 }
 
 void bus_dmamap_sync(bus_dma_tag_t tag, bus_dmamap_t dmam, bus_addr_t offset, bus_size_t len, int ops) {
-	if ((ops & (BUS_DMASYNC_PREWRITE | BUS_DMASYNC_POSTREAD)) == 0)
+	/*
+	 * Rings and TXWI are CPU-cacheable now, so ownership transitions need an
+	 * explicit ordering point even for direct maps (no bounce copy): complete
+	 * host writes before the doorbell, and let the CPU see device writes
+	 * before reading them.
+	 */
+	if (ops & (BUS_DMASYNC_PREREAD | BUS_DMASYNC_POSTREAD))
+		__sync_synchronize();
+	if ((ops & (BUS_DMASYNC_PREWRITE | BUS_DMASYNC_POSTREAD)) == 0) {
+		if (ops & BUS_DMASYNC_POSTWRITE)
+			__sync_synchronize();
 		return;
+	}
 	if (dmam == 0 || !dmam->dm_bounce || dmam->dm_bounce_mem == 0 ||
 	    dmam->dm_mbuf == 0)
 		return;
@@ -315,6 +353,8 @@ void bus_dmamap_sync(bus_dma_tag_t tag, bus_dmamap_t dmam, bus_addr_t offset, bu
 #endif
 		mbuf_copydata(dmam->dm_mbuf, offset, copy_len,
 		    (uint8_t *)bounce + offset);
+		/* Publish the copied frame before the caller rings the doorbell. */
+		__sync_synchronize();
 	}
 	if (ops & BUS_DMASYNC_POSTREAD) {
 #if MTK_PERF
@@ -379,7 +419,7 @@ int bus_dmamap_load(bus_dmamap_t map, mbuf_t mb) {
 	}
 	map->dm_mbuf = mb;
 	map->dm_bounce = false;
-	map->dm_nsegs = map->cursor->getPhysicalSegmentsWithCoalesce(mb, segs, 23);
+	map->dm_nsegs = map->cursor->getPhysicalSegmentsWithCoalesce(mb, segs, 0);
 	if (map->dm_nsegs == 0)
 		return 1;
 	size_t pktlen = mbuf_pkthdr_len(mb);

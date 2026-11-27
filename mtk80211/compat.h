@@ -302,6 +302,7 @@ void		bus_space_unmap(bus_space_tag_t space, bus_space_handle_t handle, bus_size
 
 int		bus_dmamap_create(bus_dma_tag_t tag, bus_size_t size, int nsegments, bus_size_t maxsegsz, bus_size_t boundary, int flags, bus_dmamap_t *dmamp);
 int		bus_dmamem_alloc(bus_dma_tag_t tag, bus_size_t size, bus_size_t alignment, bus_size_t boundary, bus_dma_segment_t *segs, int nsegs, int *rsegs, int flags);
+int		bus_dmamem_alloc_cached(bus_dma_tag_t tag, bus_size_t size, bus_size_t alignment, bus_dma_segment_t *segs, int *rsegs);
 int		bus_dmamem_map(bus_dma_tag_t tag, bus_dma_segment_t *segs, int nsegs, size_t size, void **kvap, int flags);
 bus_addr_t	bus_dmamap_get_paddr(bus_dma_segment_t seg); // XXX new
 void		bus_dmamap_sync(bus_dma_tag_t tag, bus_dmamap_t dmam, bus_addr_t offset, bus_size_t len, int ops);
