@@ -9617,16 +9617,17 @@ int mt7921_mcu_set_associated_peer(struct mwx_softc *sc)
 }
 
 /*
- * TX WTBL_BA configuration adapted from YYavicWiFi@7cf5b938841505e1e7c8e92888784927ff79e862
+ * WTBL_BA configuration adapted from YYavicWiFi@7cf5b938841505e1e7c8e92888784927ff79e862
  * Source/YYavicMtkWlan/YYavicMtkWlan/hal_mwx/MtkMwx.cpp::mwx_mcu_sta_ba
- * (GPL-3.0-or-later). Submission order also checked against
- * mt76@0936617dc529ff9da0385221d3fa6de732231177.
- * Build both messages before submitting them to the same MCU queue,
- * preserving asynchronous submission from RX callbacks.
+ * (GPL-3.0-or-later). Submission order and the per-direction fields are
+ * checked against mt76_connac_mcu_sta_ba() / mt76_connac_mcu_wtbl_ba_tlv(),
+ * which program the entry for both directions: ORIGINATOR when we are the
+ * transmitter, RECIPIENT when we are the receiver of the block ack session.
+ * Build the message and submit it asynchronously, as before.
  */
 static struct mbuf *
-mwx_alloc_wtbl_tx_ba(struct mwx_softc *sc, struct ieee80211_node *ni,
-    uint8_t tid, uint16_t ssn, uint16_t winsize, int enable)
+mwx_alloc_wtbl_ba(struct mwx_softc *sc, struct ieee80211_node *ni,
+    uint8_t tid, uint16_t ssn, uint16_t winsize, int enable, int tx)
 {
 	struct mwx_node *mn = (struct mwx_node *)ni;
 	struct mbuf *m = mwx_alloc_sta_req_tlv(sizeof(struct sta_req_hdr));
@@ -9641,10 +9642,20 @@ mwx_alloc_wtbl_tx_ba(struct mwx_softc *sc, struct ieee80211_node *ni,
 	struct wtbl_ba *ba = (struct wtbl_ba *)mwx_append_tlv(m,
 		&inner, WTBL_BA, sizeof(*ba));
 	ba->tid = tid;
-	ba->ba_type = MT_BA_TYPE_ORIGINATOR;
-	ba->sn = enable ? htole16(ssn) : 0;
-	ba->ba_en = enable ? 1 : 0;
-	ba->ba_winsize = enable ? htole16(winsize) : 0;
+	if (tx) {
+		ba->ba_type = MT_BA_TYPE_ORIGINATOR;
+		ba->sn = enable ? htole16(ssn) : 0;
+		ba->ba_en = enable ? 1 : 0;
+		ba->ba_winsize = enable ? htole16(winsize) : 0;
+	} else {
+		/* Recipient: identify the peer and reset its scoreboard. */
+		ba->ba_type = MT_BA_TYPE_RECIPIENT;
+		memcpy(ba->peer_addr, ni->ni_macaddr, IEEE80211_ADDR_LEN);
+		ba->rst_ba_tid = tid;
+		ba->rst_ba_sel = 0;	/* RST_BA_MAC_TID_MATCH */
+		ba->rst_ba_sb = 1;
+		ba->ba_winsize = enable ? htole16(winsize) : 0;
+	}
 	wtbl->tlv_num = htole16(inner);
 	wtbl->len = htole16(le16toh(wtbl->len) + sizeof(*ba));
 	return mwx_fill_sta_req_hdr(m, &sc->sc_vif, sc->sc_vif.omac_idx,
@@ -9652,9 +9663,11 @@ mwx_alloc_wtbl_tx_ba(struct mwx_softc *sc, struct ieee80211_node *ni,
 }
 
 /*
- * RX Block Ack session (we are the recipient). The firmware must know about
- * it to answer the AP's A-MPDUs with BlockAck; net80211 reorders in software.
- * Called from RX processing, so do not wait for the MCU response here.
+ * Block Ack session setup for both directions. The firmware must know about
+ * an RX agreement to answer the AP's A-MPDUs with BlockAck (net80211
+ * reorders in software), and about a TX agreement to aggregate at all.
+ * Called from RX processing for the RX direction, so do not wait for the
+ * MCU response here.
  */
 static int
 mwx_mcu_sta_ba(struct mwx_softc *sc, struct ieee80211_node *ni, uint8_t tid,
@@ -9680,19 +9693,35 @@ mwx_mcu_sta_ba(struct mwx_softc *sc, struct ieee80211_node *ni, uint8_t tid,
 	    mn->wcid, tlvnum);
 	if (m == NULL)
 		return ENOBUFS;
-	if (tx) {
-		struct mbuf *wtbl = mwx_alloc_wtbl_tx_ba(sc, ni, tid, ssn, winsize, enable);
+	/*
+	 * Program the hardware WTBL entry for both directions, as mt76 does,
+	 * then submit the STA_REC_BA update. The WTBL message has to land
+	 * first: without it the hardware never aggregated and the RX reorder
+	 * window had no agreement on the hardware side.
+	 * Keep the submission asynchronous (no response wait): this path also
+	 * runs from RX processing.
+	 */
+	{
+		struct mbuf *wtbl = mwx_alloc_wtbl_ba(sc, ni, tid, ssn, winsize,
+		    enable, tx);
 		int rv = wtbl == NULL ? ENOBUFS :
 			mwx_mcu_send_mbuf(sc, MCU_UNI_CMD_STA_REC_UPDATE, wtbl, NULL);
 		if (rv != 0) {
 #if MTK_PERF
-			mp_add(mp_tx_wtbl_ba_submit_fail);
+			if (tx)
+				mp_add(mp_tx_wtbl_ba_submit_fail);
 #endif
 			m_freem(m);
 			return rv;
 		}
 #if MTK_PERF
-		mp_add(enable ? mp_tx_wtbl_ba_enable_submit : mp_tx_wtbl_ba_disable_submit);
+		/*
+		 * These counters stay TX-only: they are read as the TX aggregation
+		 * submission rate, and RX sessions would inflate them.
+		 */
+		if (tx)
+			mp_add(enable ? mp_tx_wtbl_ba_enable_submit :
+			    mp_tx_wtbl_ba_disable_submit);
 #endif
 	}
 #if MTK_PERF

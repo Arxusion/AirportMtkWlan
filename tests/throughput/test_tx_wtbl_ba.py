@@ -30,7 +30,7 @@ PRELUDE = r'''
 #define MCU_UNI_CMD_STA_REC_UPDATE 0x10003
 int live, allocs, prepends, sends, fail_alloc, fail_prepend, fail_send;
 struct mbuf { uint8_t bytes[2048]={}; size_t head=64,len=0,total=0; };
-struct ieee80211_node { unsigned unused; };
+struct ieee80211_node { unsigned unused; uint8_t ni_macaddr[IEEE80211_ADDR_LEN]={0x02,0x11,0x22,0x33,0x44,0x55}; };
 struct mwx_node { ieee80211_node ni; uint16_t wcid=0x234; };
 struct mwx_vif { uint8_t idx=3,omac_idx=5; };
 struct mwx_softc { mwx_vif sc_vif; };
@@ -93,27 +93,45 @@ int main() {
                     put16(sta,16,ssn);put16(sta,18,win);
                     assert(messages[0]==wt && messages[1]==sta);
                 }
-    // RX calls continue to submit a single STA_REC_BA message.
+    // RX programs the WTBL entry as well (recipient), then STA_REC_BA.
     reset();assert(mwx_mcu_sta_ba(&sc,&node.ni,3,0x123,64,1,0,0)==0);
-    auto rx=header(20);put16(rx,8,6);put16(rx,10,12);
-    rx[12]=3;rx[13]=2;rx[15]=8;put16(rx,16,0x123);put16(rx,18,64);
-    assert(live==0 && messages.size()==1 && messages[0]==rx);
+    assert(live==0 && messages.size()==2);
+    auto rwt=header(48);
+    put16(rwt,8,13);put16(rwt,10,40);
+    rwt[12]=0x34;rwt[13]=2;rwt[14]=1;rwt[16]=2;
+    put16(rwt,20,8);put16(rwt,22,28);
+    rwt[24]=3;rwt[25]=2;                    // tid, ba_type = RECIPIENT
+    put16(rwt,32,64);                       // ba_winsize
+    memcpy(&rwt[34],node.ni.ni_macaddr,IEEE80211_ADDR_LEN);   // peer_addr
+    rwt[40]=3;rwt[41]=0;rwt[42]=1;          // rst_ba_tid/sel/sb
+    auto rsta=header(20);put16(rsta,8,6);put16(rsta,10,12);
+    rsta[12]=3;rsta[13]=2;rsta[15]=8;put16(rsta,16,0x123);put16(rsta,18,64);
+    assert(messages[0]==rwt && messages[1]==rsta);
     // If either message cannot be built, submit neither and free any allocated message.
+    for(int tx:{0,1})
     for(int which:{1,2}) {
         reset();fail_alloc=which;
-        assert(mwx_mcu_sta_ba(&sc,&node.ni,0,0,64,1,1,0)==ENOBUFS);
+        assert(mwx_mcu_sta_ba(&sc,&node.ni,0,0,64,1,tx,0)==ENOBUFS);
         assert(live==0 && messages.empty());
         reset();fail_prepend=which;
-        assert(mwx_mcu_sta_ba(&sc,&node.ni,0,0,64,1,1,0)==ENOBUFS);
+        assert(mwx_mcu_sta_ba(&sc,&node.ni,0,0,64,1,tx,0)==ENOBUFS);
         assert(live==0 && messages.empty());
     }
+    // TX submission failures free the STA message; RX follows the same rules.
     reset();fail_send=1;
     assert(mwx_mcu_sta_ba(&sc,&node.ni,0,0,64,1,1,0)==EIO);
     assert(live==0 && messages.size()==1);
     reset();fail_send=2;
     assert(mwx_mcu_sta_ba(&sc,&node.ni,0,0,64,1,1,0)==EIO);
     assert(live==0 && messages.size()==2);
-    puts("PASS: TX WTBL/STA BA wire format, enable/disable order, RX behavior, and build/submission failures");
+    // TX counters checked by diagnostics: one WTBL submit failure, one STA submit failure.
+    reset();fail_send=1;
+    assert(mwx_mcu_sta_ba(&sc,&node.ni,0,0,64,1,0,0)==EIO);
+    assert(live==0 && messages.size()==1);
+    reset();fail_send=2;
+    assert(mwx_mcu_sta_ba(&sc,&node.ni,0,0,64,1,0,0)==EIO);
+    assert(live==0 && messages.size()==2);
+    puts("PASS: TX/RX WTBL+STA BA wire format, submission order, and build/submission failures");
 }
 '''
 
@@ -142,7 +160,7 @@ def main():
         ("mwx_append_len(struct mbuf *m, int len)", "void *\n"),
         ("mwx_append_tlv(struct mbuf *m, uint16_t *tlvnum, int tag, int len)", "void *\n"),
         ("mwx_fill_sta_req_hdr(struct mbuf *m, struct mwx_vif *mvif,\n    uint8_t muar_idx, uint16_t wcid, uint16_t tlvnum)", "struct mbuf *\n"),
-        ("mwx_alloc_wtbl_tx_ba(struct mwx_softc *sc, struct ieee80211_node *ni,\n    uint8_t tid, uint16_t ssn, uint16_t winsize, int enable)", "static struct mbuf *\n"),
+        ("mwx_alloc_wtbl_ba(struct mwx_softc *sc, struct ieee80211_node *ni,\n    uint8_t tid, uint16_t ssn, uint16_t winsize, int enable, int tx)", "static struct mbuf *\n"),
         ("mwx_mcu_sta_ba(struct mwx_softc *sc, struct ieee80211_node *ni, uint8_t tid,\n    uint16_t ssn, uint16_t winsize, int enable, int tx, int amsdu)", "static int\n"),
     ):
         blocks.append(extract(text, signature, prefix))

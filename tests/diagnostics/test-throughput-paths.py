@@ -122,11 +122,18 @@ def main():
          "assert(mp_values[mp_tx_wtbl_ba_disable_submit]==unsigned(!enable));"),
         ("assert(live==0 && messages.size()==1);",
          "assert(mp_values[mp_tx_wtbl_ba_submit_fail]==1 && mp_values[mp_tx_sta_ba_submit_fail]==0);"),
+        ("// TX counters checked by diagnostics: one WTBL submit failure, one STA submit failure.",
+         "assert(mp_values[mp_tx_wtbl_ba_submit_fail]==0 && "
+         "mp_values[mp_tx_sta_ba_submit_fail]==1);"),
+        ("assert(messages[0]==rwt && messages[1]==rsta);",
+         "assert(mp_values[mp_tx_wtbl_ba_enable_submit]==0 &&\n"
+         "    mp_values[mp_tx_wtbl_ba_disable_submit]==0 &&\n"
+         "    mp_values[mp_tx_wtbl_ba_submit_fail]==0 && mp_values[mp_tx_sta_ba_submit_fail]==0);\n"
+         "    reset();assert(mwx_mcu_sta_ba(&sc,&node.ni,3,0x123,64,0,0,0)==0);\n"
+         "    assert(mp_values[mp_tx_wtbl_ba_enable_submit]==0 &&\n"
+         "    mp_values[mp_tx_wtbl_ba_disable_submit]==0 && messages.size()==2);"),
     ):
         ba.MAIN = add_after(ba.MAIN, marker, "    " + check)
-    marker = '    puts("PASS: TX WTBL/STA'
-    assert marker in ba.MAIN
-    ba.MAIN = ba.MAIN.replace(marker, "    assert(mp_values[mp_tx_sta_ba_submit_fail]==1);\n" + marker)
     ba.main()
 
     source = (ROOT / "SimpleMtkWlan/hal_mwx/MtkMwx.cpp").read_text()
