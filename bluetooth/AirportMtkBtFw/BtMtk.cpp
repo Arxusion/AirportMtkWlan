@@ -9,6 +9,7 @@
 #include "BtMtk.h"
 #include "Log.h"
 #include "FwData.h"
+#include <kern/clock.h>
 
 #define super OSObject
 OSDefineMetaClassAndStructors(BtMtk, OSObject)
@@ -115,6 +116,10 @@ bool BtMtk::setupUsb()
                 XYLog("Failed to enable Bluetooth protocol\n");
                 return false;
             }
+            if (!verifyHciController()) {
+                XYLog("Firmware activated but HCI handoff verification failed\n");
+                return false;
+            }
             strncpy(m_loadedFirmwareName, fwname, sizeof(m_loadedFirmwareName) - 1);
             m_loadedFirmwareName[sizeof(m_loadedFirmwareName) - 1] = '\0';
             XYLog("MediaTek device setup complete\n");
@@ -182,7 +187,7 @@ bool BtMtk::setupFirmware79xx(const char *fwname, u32 devId)
         u32 sectionOffset = get_unaligned_le32(&sectionMap->secoffset);
         u32 dlSize = get_unaligned_le32(&sectionMap->bin_info_spec.dlsize);
 
-        if (sectionMapOffset + MTK_SEC_MAP_COMMON_SIZE + MTK_SEC_MAP_NEED_SEND_SIZE + 1 > fwSize) {
+        if (sectionMapOffset + MTK_SEC_MAP_COMMON_SIZE + MTK_SEC_MAP_NEED_SEND_SIZE > fwSize) {
             XYLog("Invalid section map payload offset: %zu\n", sectionMapOffset);
             ret = false;
             break;
@@ -207,7 +212,7 @@ bool BtMtk::setupFirmware79xx(const char *fwname, u32 devId)
             memcpy(cmd + 1,
                    fwBase + MTK_FW_ROM_PATCH_HEADER_SIZE + MTK_FW_ROM_PATCH_GD_SIZE +
                    MTK_FW_ROM_PATCH_SEC_MAP_SIZE * i + MTK_SEC_MAP_COMMON_SIZE,
-                   MTK_SEC_MAP_NEED_SEND_SIZE + 1);
+                   MTK_SEC_MAP_NEED_SEND_SIZE);
 
             btmtk_hci_wmt_params params {};
             params.op = BTMTK_WMT_PATCH_DWNLD;
@@ -339,6 +344,12 @@ bool BtMtk::hciWmtSync(btmtk_hci_wmt_params *params)
     }
 
     btmtk_hci_wmt_evt *evt = (btmtk_hci_wmt_evt *)evtBuf;
+    if (evtLen != sizeof(HciEventHdr) + evt->hhdr.len ||
+        evt->whdr.dir != 2 ||
+        OSSwapLittleToHostInt16(evt->whdr.dlen) + 6 != evtLen) {
+        XYLog("Invalid WMT event framing\n");
+        return false;
+    }
     if (evt->hhdr.evt != HCI_EV_WMT) {
         XYLog("Unexpected WMT event id: 0x%02x\n", evt->hhdr.evt);
         return false;
@@ -357,8 +368,14 @@ bool BtMtk::hciWmtSync(btmtk_hci_wmt_params *params)
             }
             break;
         case BTMTK_WMT_FUNC_CTRL:
-            if (evtLen < sizeof(btmtk_hci_wmt_evt_funcc)) {
-                status = BTMTK_WMT_ON_UNDONE;
+            if (evtLen != sizeof(btmtk_hci_wmt_evt) &&
+                evtLen != sizeof(btmtk_hci_wmt_evt_funcc))
+                return false;
+            if (evtLen == sizeof(btmtk_hci_wmt_evt)) {
+                // Plain enable/disable replies carry the result in flag.
+                // Linux drivers/bluetooth/btmtk.c, btmtk_usb_hci_wmt_sync,
+                // d135ab453a7400a34930bdda1ef4bdc8acfac80e.
+                status = evt->whdr.flag == 0 ? BTMTK_WMT_ON_DONE : BTMTK_WMT_ON_UNDONE;
                 break;
             } else {
                 btmtk_hci_wmt_evt_funcc *funcc = (btmtk_hci_wmt_evt_funcc *)evtBuf;
@@ -395,14 +412,82 @@ bool BtMtk::hciWmtSync(btmtk_hci_wmt_params *params)
 bool BtMtk::enableBluetoothProtocol(bool enable)
 {
     u8 param = enable ? 1 : 0;
+    u32 status = BTMTK_WMT_INVALID;
     btmtk_hci_wmt_params wmtParams {};
     wmtParams.op = BTMTK_WMT_FUNC_CTRL;
     wmtParams.flag = 0;
     wmtParams.dlen = sizeof(param);
     wmtParams.data = &param;
-    wmtParams.status = nullptr;
+    wmtParams.status = &status;
 
-    return hciWmtSync(&wmtParams);
+    if (!hciWmtSync(&wmtParams))
+        return false;
+    if (status != BTMTK_WMT_ON_DONE) {
+        XYLog("WMT function control rejected: status=%u\n", status);
+        return false;
+    }
+    return true;
+}
+
+bool BtMtk::verifyHciController()
+{
+    // WMT uses vendor control-IN events; macOS needs ordinary interrupt-IN
+    // Command Complete events. Consume our replies before releasing the USB
+    // interface so that bluetoothd starts with an empty command queue.
+    const u16 opcodes[] = {HCI_OP_RESET, HCI_OP_READ_LOCAL_VERSION, HCI_OP_READ_BD_ADDR};
+    const u8 replySizes[] = {1, 9, 7}; // Includes the HCI status byte.
+    for (unsigned i = 0; i < sizeof(opcodes) / sizeof(opcodes[0]); ++i) {
+        HciCommandHdr command {};
+        command.opcode = OSSwapHostToLittleInt16(opcodes[i]);
+        IOReturn result = m_pUSBDeviceController->sendHCIRequest(&command, HCI_CMD_TIMEOUT);
+        if (result != kIOReturnSuccess) {
+            XYLog("HCI handoff command 0x%04x failed: 0x%x\n", opcodes[i], result);
+            return false;
+        }
+        uint64_t deadline = 0;
+        clock_interval_to_deadline(HCI_CMD_TIMEOUT, kMillisecondScale, &deadline);
+        for (;;) {
+            uint64_t now = 0, remaining = 0;
+            clock_get_uptime(&now);
+            if (now >= deadline) {
+                XYLog("HCI handoff command 0x%04x timed out\n", opcodes[i]);
+                return false;
+            }
+            absolutetime_to_nanoseconds(deadline - now, &remaining);
+            u8 event[260] {};
+            u32 length = 0;
+            result = m_pUSBDeviceController->interruptPipeRead(
+                event, sizeof(event), &length, (u32)(remaining / 1000000 + 1));
+            if (result != kIOReturnSuccess) {
+                XYLog("HCI handoff event 0x%04x failed: 0x%x\n", opcodes[i], result);
+                return false;
+            }
+            if (length < sizeof(HciEventHdr) || length != event[1] + sizeof(HciEventHdr))
+                return false;
+            if (event[0] != HCI_EV_CMD_COMPLETE)
+                continue;
+            HciResponse *reply = (HciResponse *)event;
+            if (length != sizeof(HciResponse) + replySizes[i] ||
+                OSSwapLittleToHostInt16(reply->opcode) != opcodes[i] || reply->data[0] != 0) {
+                XYLog("Invalid HCI handoff completion for 0x%04x\n", opcodes[i]);
+                return false;
+            }
+            if (opcodes[i] == HCI_OP_READ_BD_ADDR) {
+                u8 any = 0, all = 0xff;
+                for (unsigned n = 1; n <= 6; ++n) {
+                    any |= reply->data[n];
+                    all &= reply->data[n];
+                }
+                if (!any || all == 0xff) {
+                    XYLog("Controller returned an invalid Bluetooth address\n");
+                    return false;
+                }
+            }
+            break;
+        }
+    }
+    XYLog("HCI handoff verified: Reset, Read Local Version, Read BD_ADDR\n");
+    return true;
 }
 
 bool BtMtk::readDeviceId(u32 reg, u32 *value)

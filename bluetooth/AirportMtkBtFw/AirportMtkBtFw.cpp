@@ -69,6 +69,7 @@ bool AirportMtkBtFw::start(IOService *provider)
         return false;
     }
 
+    m_pDevice->setProperty("FirmwareLoaded", false);
     m_pBTMtk = new BtMtk();
     if (!m_pBTMtk || !m_pBTMtk->initWithDevice(this, m_pDevice)) {
         XYLog("start fail, can not init device\n");
@@ -86,8 +87,11 @@ bool AirportMtkBtFw::start(IOService *provider)
         return false;
     }
     m_pBTMtk->getFirmwareName(fwName, sizeof(fwName));
+    // Release firmware-loader ownership before publishing HCI readiness.
+    OSSafeReleaseNULL(m_pBTMtk);
+    m_pDevice->close(this);
     publishReg(true, fwName);
-    cleanUp();
+    m_pDevice = nullptr;
     return true;
 }
 

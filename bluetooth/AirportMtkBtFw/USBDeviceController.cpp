@@ -259,20 +259,13 @@ interruptHandler(void *owner, void *parameter, IOReturn status, uint32_t bytesTr
     if (!controller || !parameter) {
         return;
     }
-    switch (status) {
-        case kIOReturnSuccess:
-            break;
-        case kIOReturnNotResponding:
-            controller->m_pInterruptReadPipe->clearStall(false);
-        default:
-            XYLog("%s status: %s (%d) len: %d\n", __FUNCTION__, controller->stringFromReturn(status), status, bytesTransferred);
-            break;
-    }
-    
     InterruptResp *resp = (InterruptResp *)parameter;
+    IOLockLock(controller->_hciLock);
     resp->status = status;
     resp->dataLen = bytesTransferred;
-    IOLockWakeup(controller->_hciLock, controller, true);
+    resp->completed = true;
+    IOLockWakeup(controller->_hciLock, resp, true);
+    IOLockUnlock(controller->_hciLock);
 }
 
 IOReturn USBDeviceController::
@@ -296,25 +289,27 @@ interruptPipeRead(void *buf, uint32_t buf_size, uint32_t *size, uint32_t timeout
     
     if (ret == kIOReturnSuccess) {
         IOLockLock(_hciLock);
-        if (IOLockSleepDeadline(_hciLock, this, deadline, THREAD_INTERRUPTIBLE) != THREAD_AWAKENED) {
-            IOLockUnlock(_hciLock);
-            m_pInterruptReadPipe->abort();
-            XYLog("%s Timeout\n", __FUNCTION__);
-            return kIOReturnTimeout;
+        while (!interrupResp.completed) {
+            int wake = IOLockSleepDeadline(_hciLock, &interrupResp, deadline, THREAD_UNINT);
+            if (wake == THREAD_TIMED_OUT && !interrupResp.completed) {
+                IOLockUnlock(_hciLock);
+                // The callback refers to this stack response and mReadBuffer.
+                // Drain it before returning or handing the interface to macOS.
+                m_pInterruptReadPipe->abort(IOUSBHostIOSource::kAbortSynchronous);
+                XYLog("%s Timeout\n", __FUNCTION__);
+                return kIOReturnTimeout;
+            }
         }
-        if (interrupResp.dataLen <= 0) {
-            IOLockUnlock(_hciLock);
-            XYLog("%s invalid response size: %d\n", __FUNCTION__, interrupResp.dataLen);
-            return kIOReturnError;
-        }
-        if (buf && interrupResp.dataLen > buf_size) {
-            XYLog("%s buf size too small. buflen: %d act: %d\n", __FUNCTION__, buf_size, interrupResp.dataLen);
-        }
-        if (buf) {
-            memcpy(buf, mReadBuffer->getBytesNoCopy(), min(interrupResp.dataLen, buf_size));
-        }
-        if (size) {
-            *size = min(interrupResp.dataLen, buf_size);
+        ret = interrupResp.status;
+        if (ret == kIOReturnSuccess) {
+            if (interrupResp.dataLen == 0 || interrupResp.dataLen > buf_size) {
+                ret = kIOReturnOverrun;
+            } else {
+                if (buf)
+                    memcpy(buf, mReadBuffer->getBytesNoCopy(), interrupResp.dataLen);
+                if (size)
+                    *size = interrupResp.dataLen;
+            }
         }
         IOLockUnlock(_hciLock);
     } else {
@@ -326,7 +321,7 @@ interruptPipeRead(void *buf, uint32_t buf_size, uint32_t *size, uint32_t timeout
 IOReturn USBDeviceController::
 sendHCIRequest(HciCommandHdr *cmd, uint32_t timeout)
 {
-    uint32_t actualLength;
+    uint32_t actualLength = 0;
     StandardUSB::DeviceRequest request =
     {
         .bmRequestType = makeDeviceRequestbmRequestType(kRequestDirectionOut, kRequestTypeClass, kRequestRecipientDevice),
@@ -336,7 +331,10 @@ sendHCIRequest(HciCommandHdr *cmd, uint32_t timeout)
         .wLength = (uint16_t)(HCI_COMMAND_HDR_SIZE + cmd->len)
     };
     
-    return m_pInterface->deviceRequest(request, cmd, actualLength, timeout);
+    IOReturn result = m_pInterface->deviceRequest(request, cmd, actualLength, timeout);
+    if (result == kIOReturnSuccess && actualLength != request.wLength)
+        return kIOReturnUnderrun;
+    return result;
 }
 
 IOReturn USBDeviceController::
