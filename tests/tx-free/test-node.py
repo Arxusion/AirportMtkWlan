@@ -9,6 +9,7 @@ pre=r'''
 #include <cstddef>
 #include <cstdint>
 #define NBPFILTER 0
+#define MWX_TXWI_RESERVED 8
 #define MT_DMA_CPU_IDX 0x08
 const int IFF_RUNNING=1,IFF_UP=2,IEEE80211_S_RUN=4,IEEE80211_F_TX_MGMT_ONLY=8;
 struct ieee80211_node{int refs=0;};
@@ -19,8 +20,8 @@ struct ieee80211com {int ic_state=4,ic_xflags=0;queue ic_mgtq;};
 struct mwx_queue {int mq_regbase=0,mq_prod=0;};
 struct mwx_softc{ieee80211com sc_ic;mwx_queue sc_txq;unsigned sc_tx_full_cnt=0;};
 inline void mwx_write(mwx_softc*,int,int){}
-int room=1;
-int mwx_tx_has_room(mwx_softc*,unsigned){return room;}
+unsigned txwi_free=64, ring_free=64;
+int mwx_tx_has_room(mwx_softc*,unsigned need){return txwi_free>=need && ring_free>=need;}
 int paused;
 void ifq_set_oactive(queue*){paused++;}struct ether_header{char bytes[14];};
 bool ifq_is_oactive(queue*){return false;}
@@ -41,9 +42,16 @@ int main(){
   if(mgmt){ni.refs++;sc.sc_ic.ic_mgtq.m=&m;}else ifp.if_snd.m=&m;
   mwx_start(&ifp);assert(ni.refs==0);assert(ifp.if_oerrors==error);
  }
- {mwx_softc sc; ifnet ifp; ifp.if_softc=&sc;ieee80211_node ni;mbuf m{&ni};room=0;paused=0;ifp.if_snd.m=&m;
-  mwx_start(&ifp);assert(ifp.if_snd.m==&m&&paused==1&&sc.sc_tx_full_cnt==1&&ni.refs==0);room=1;}
- puts("PASS: extracted mwx_start balances enqueue node references for data/management, success/failure; pauses without dropping when TX is full.");
+ {mwx_softc sc; ifnet ifp; ifp.if_softc=&sc;ieee80211_node ni;mbuf m{&ni};txwi_free=0;paused=0;ifp.if_snd.m=&m;
+  mwx_start(&ifp);assert(ifp.if_snd.m==&m&&paused==1&&sc.sc_tx_full_cnt==1&&ni.refs==0);txwi_free=64;}
+ // A saturated uplink must not starve management frames: data stops at the reserve.
+ {mwx_softc sc; ifnet ifp; ifp.if_softc=&sc;ieee80211_node ni;mbuf m{&ni};
+  txwi_free=MWX_TXWI_RESERVED;paused=0;ifp.if_snd.m=&m;
+  mwx_start(&ifp);assert(ifp.if_snd.m==&m&&paused==1&&ni.refs==0);}
+ {mwx_softc sc; ifnet ifp; ifp.if_softc=&sc;ieee80211_node ni;mbuf m{&ni};
+  txwi_free=MWX_TXWI_RESERVED;paused=0;result=0;ni.refs++;sc.sc_ic.ic_mgtq.m=&m;
+  mwx_start(&ifp);assert(sc.sc_ic.ic_mgtq.m==nullptr&&ni.refs==0);txwi_free=64;}
+ puts("PASS: extracted mwx_start balances enqueue node references for data/management, success/failure; pauses without dropping when TX is full; reserves TXWIs for management frames.");
 }
 '''
 tmp=tempfile.TemporaryDirectory(prefix='mtk-tx-test-');art=Path(tmp.name)

@@ -185,7 +185,7 @@ int main() {
         mwx_queue_data qdata[8] = {};
         for (int i = 0; i < 8; i++) qdata[i].md_map = &dmap;
         qdata[0].md_mbuf = new mbuf;
-        desc[0].ctrl = 4096U | MT_DMA_CTL_LAST_SEC0; // exceeds 2048 dm_mapsize
+        desc[0].ctrl = 4096U | MT_DMA_CTL_LAST_SEC0 | MT_DMA_CTL_DMA_DONE; // exceeds 2048 dm_mapsize
         mwx_queue q{0x200, 8, 1, 0, desc, qdata, &qmap, 0, 0};
         sc.sc_rxq.mq_regbase = 0x200;
         g_dma_idx = 1;
