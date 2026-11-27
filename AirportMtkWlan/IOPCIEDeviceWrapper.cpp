@@ -95,7 +95,8 @@ bool IOPCIEDeviceWrapper::
 start(IOService *provider)
 {
     XYLog("%s\n", __PRETTY_FUNCTION__);
-    _fWorkloop = IO80211WorkQueue::workQueue();
+    if (!_fWorkloop)
+        _fWorkloop = IO80211WorkQueue::workQueue();
     if (!super::start(provider)) {
         return false;
     }
@@ -106,7 +107,7 @@ start(IOService *provider)
     registerPowerDriver(this, powerStateArray, 2);
     provider->joinPMtree(this);
     logTimer = IOTimerEventSource::timerEventSource(this, &IOPCIEDeviceWrapper::logTimerFired);
-    if (logTimer && _fWorkloop->addEventSource(logTimer) == kIOReturnSuccess)
+    if (logTimer && _fWorkloop && _fWorkloop->addEventSource(logTimer) == kIOReturnSuccess)
         logTimer->setTimeoutMS(500);
     else
         OSSafeReleaseNULL(logTimer);
@@ -136,10 +137,15 @@ stop(IOService *provider)
     XYLog("%s\n", __PRETTY_FUNCTION__);
     if (logTimer) {
         logTimer->cancelTimeout();
-        _fWorkloop->removeEventSource(logTimer);
+        if (_fWorkloop)
+            _fWorkloop->removeEventSource(logTimer);
         OSSafeReleaseNULL(logTimer);
     }
     PMstop();
+    if (_fWorkloop) {
+        _fWorkloop->release();
+        _fWorkloop = NULL;
+    }
     super::stop(provider);
 }
 

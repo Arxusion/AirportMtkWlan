@@ -41,9 +41,6 @@ struct IONetworkInterface {
 struct _ifnet {
     IONetworkInterface* iface;
     Stats* netStat;
-    IONetworkInterface* if_awdl_iface = nullptr;
-    uint8_t if_awdl_mac[6] = {0};
-    bool if_awdl_enabled = false;
 };
 '''
 main=r'''

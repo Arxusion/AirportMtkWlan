@@ -227,54 +227,34 @@ int bus_dmamap_create(bus_dma_tag_t tag, bus_size_t size, int nsegments, bus_siz
 		return 0;
 }
 
-IOBufferMemoryDescriptor* alloc_dma_memory(size_t size, mach_vm_address_t alignment,/* void** vaddr, mach_vm_address_t* paddr, */IOOptionBits opts);
-IOBufferMemoryDescriptor* alloc_dma_memory(size_t size, mach_vm_address_t alignment,/* void** vaddr, mach_vm_address_t* paddr, */IOOptionBits opts = kIOMemoryPhysicallyContiguous | kIOMapInhibitCache)
+static bool dma_range_fits32(uint64_t address, uint64_t length)
 {
-	size_t		reqsize;
-	uint64_t	phymask;
-	int		i;
-	/*
-	if (alignment <= PAGE_SIZE) {
-		reqsize = size;
-		phymask = 0x00000000ffffffffull & (~(alignment - 1));
-	} else {
-		reqsize = size + alignment;
-		phymask = 0x00000000fffff000ull; /* page-aligned 
-	}*/
-	
-	phymask = 0x00000000ffffffffull & (~(alignment - 1));
-	reqsize = size;
-	
-	IOBufferMemoryDescriptor* mem = 0;
-	mem = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task, opts, reqsize, phymask);
+	return length != 0 && address <= UINT32_MAX &&
+	    length - 1 <= UINT32_MAX - address;
+}
+
+IOBufferMemoryDescriptor* alloc_dma_memory(size_t size, mach_vm_address_t alignment, IOOptionBits opts = kIOMemoryPhysicallyContiguous | kIOMapInhibitCache)
+{
+	uint64_t phymask = 0x00000000ffffffffull & (~(alignment - 1));
+	IOBufferMemoryDescriptor *mem = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
+	    kernel_task, opts | kIODirectionInOut, size, phymask);
 	if (!mem)
 		return 0;
 
-	mem->prepare();
-	/*
-	if (paddr)
-		*paddr = mem->getPhysicalAddress();
-	if (vaddr)
-		*vaddr = mem->getBytesNoCopy();
-	
-	/*
-	 * Check the alignment and increment by 4096 until we get the
-	 * requested alignment. Fail if can't obtain the alignment
-	 * we requested.
-	 
-	if ((*paddr & (alignment - 1)) != 0) {
-		for (i = 0; i < alignment / 4096; i++) {
-			if ((*paddr & (alignment - 1 )) == 0)
-				break;
-			*paddr += 4096;
-			*vaddr = ((uint8_t*) *vaddr) + 4096;
-		}
-		if (i == alignment / 4096) {
-			mem->complete();
-			mem->release();
-			return 0;
-		}
-	}*/
+	if (mem->prepare() != kIOReturnSuccess) {
+		mem->release();
+		return 0;
+	}
+	// getPhysicalSegment uses the system mapper's IOVM address when enabled.
+	// Rings and bounce buffers require one aligned, entirely 32-bit DMA range.
+	IOByteCount length = 0;
+	bus_addr_t address = mem->getPhysicalSegment(0, &length);
+	if (!address || length < size || !dma_range_fits32(address, size) ||
+	    (address & (alignment - 1))) {
+		mem->complete();
+		mem->release();
+		return 0;
+	}
 	return mem;
 }
 
@@ -364,6 +344,7 @@ void bus_dmamem_free(bus_dma_tag_t tag, bus_dma_segment_t *segs, int nsegs) {
 		return;
 	if (segs->buf == 0)
 		return;
+	segs->buf->complete();
 	segs->buf->release();
 	memset(segs, 0, sizeof(*segs));
 }
@@ -407,7 +388,7 @@ int bus_dmamap_load(bus_dmamap_t map, mbuf_t mb) {
 	map->dm_mapsize = (bus_size_t)pktlen;
 	bool needs_bounce = false;
 	for (int i = 0; i < map->dm_nsegs; i++) {
-		if (segs[i].location > UINT32_MAX || segs[i].length > UINT32_MAX) {
+		if (!dma_range_fits32(segs[i].location, segs[i].length)) {
 			needs_bounce = true;
 			break;
 		}
@@ -436,7 +417,7 @@ int bus_dmamap_load(bus_dmamap_t map, mbuf_t mb) {
 			map->dm_bounce_size = bounce_size;
 		}
 		bus_addr_t addr = map->dm_bounce_mem->getPhysicalAddress();
-		if (addr > UINT32_MAX) {
+		if (!dma_range_fits32(addr, pktlen)) {
 			return 1;
 		}
 		map->dm_bounce = true;
@@ -459,54 +440,22 @@ int bus_dmamap_load(bus_dmamap_t map, mbuf_t mb) {
 	return 0;
 }
 
-int bus_dmamap_load(bus_dma_tag_t tag, bus_dmamap_t map, void *buf, bus_size_t buflen, void *p, int flags) {
-	if (map == 0 || buf == 0)
+int bus_dmamap_load(bus_dma_tag_t tag, bus_dmamap_t map, bus_dma_segment_t *seg, int flags) {
+	if (map == 0 || seg == 0 || seg->buf == 0)
 		return 1;
-	if (map->mem) {
-		map->mem->complete();
-		map->mem->release();
-		map->mem = 0;
-	}
-	IOMemoryDescriptor *mem = IOMemoryDescriptor::withAddress(buf, buflen,
-	    kIODirectionOutIn);
-	if (mem == 0)
+	bus_dmamap_unload(tag, map);
+	// Preserve the allocation's contiguous 32-bit mapping. Rewrapping its virtual
+	// address with withAddress() creates an independent mapping without that limit.
+	IOMemoryDescriptor *mem = seg->buf;
+	if (mem->prepare() != kIOReturnSuccess)
 		return 1;
-	if (mem->prepare(kIODirectionOutIn) != kIOReturnSuccess) {
-		mem->release();
-		return 1;
-	}
-
-	IOByteCount offset = 0;
-	bus_size_t remaining = buflen;
-	int nsegs = 0;
-
-	while (remaining > 0 && nsegs < 23) {
-		IOByteCount seglen = 0;
-		addr64_t addr = mem->getPhysicalSegment(offset, &seglen);
-
-		if (addr == 0 || seglen == 0)
-			break;
-		if (seglen > remaining)
-			seglen = remaining;
-		map->dm_segs[nsegs].buf = NULL;
-		map->dm_segs[nsegs].ds_addr = (bus_addr_t)addr;
-		map->dm_segs[nsegs].ds_len = (bus_size_t)seglen;
-		offset += seglen;
-		remaining -= seglen;
-		nsegs++;
-	}
-	if (remaining != 0) {
-		mem->complete();
-		mem->release();
-		map->dm_nsegs = 0;
-		map->dm_mapsize = 0;
-		return 1;
-	}
+	mem->retain();
 	map->mem = mem;
-	map->dm_mbuf = 0;
-	map->dm_bounce = false;
-	map->dm_nsegs = nsegs;
-	map->dm_mapsize = buflen;
+	map->dm_segs[0].buf = NULL;
+	map->dm_segs[0].ds_addr = seg->ds_addr;
+	map->dm_segs[0].ds_len = seg->ds_len;
+	map->dm_nsegs = 1;
+	map->dm_mapsize = seg->ds_len;
 	return 0;
 }
 

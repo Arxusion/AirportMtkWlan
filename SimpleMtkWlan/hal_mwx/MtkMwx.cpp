@@ -31,6 +31,7 @@
 #include <HAL/MtkPerf.hpp>
 #include "MtkMwx.hpp"
 #include <IOKit/IODeviceTreeSupport.h>
+#include <IOKit/IOMapper.h>
 #include <HAL/MtkNvramHelper.hpp>
 
 char nmx_wifi_band;	/* NVRAM nullmoth-wifi-band, read at preinit: '5', '2' or 0 (prefer 5 GHz) */
@@ -1789,7 +1790,9 @@ mwx_newstate_task(void *ptr)
 			if (sc->sc_flags & MWX_FLAG_BGSCAN) {
 				mt7921_mcu_hw_scan_cancel(sc);
 				sc->sc_flags &= ~(MWX_FLAG_SCANNING | MWX_FLAG_BGSCAN);
-				ic->ic_flags &= ~IEEE80211_F_BGSCAN;
+				ic->ic_flags &= ~(IEEE80211_F_BGSCAN |
+				    IEEE80211_F_DISABLE_BG_AUTO_CONNECT);
+				timeout_del(&ic->ic_bgscan_timeout);
 #ifdef AIRPORT_WCL
 				ic->ic_wcl_scan_requested = false;
 				if (ic->ic_event_handler)
@@ -3297,10 +3300,14 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 	MWX_DEV_LOG(sc, "attach interrupt mapped source=%s\n",
 	    pci_intr_string(pa->pa_pc, ih));
 
+	/*
+	 * Disable PCIe ASPM/L1SS before the first MMIO/LPCTL handshake so
+	 * endpoint L1/L1.2 transitions do not block driver-own or WFSYS reset.
+	 */
+	mwx_pci_disable_aspm(sc, pa->pa_tag);
 	if (mwx_ensure_drv_own(sc, "attach") != 0)
 		goto fail;
 	MWX_DEV_LOG(sc, "attach MCU power control ok\n");
-	mwx_pci_disable_aspm(sc, pa->pa_tag);
 
 	hwid = mwx_read(sc, MT_HW_CHIPID) & 0xffff;
 	hwrev = mwx_read(sc, MT_HW_REV) & 0xff;
@@ -3931,8 +3938,8 @@ mwx_txwi_alloc(struct mwx_softc *sc, int count)
 		goto fail;
 	}
 
-	error = bus_dmamap_load(sc->sc_dmat, q->mt_map, q->mt_desc,
-	    size, NULL, BUS_DMA_NOWAIT);
+	error = bus_dmamap_load(sc->sc_dmat, q->mt_map, &q->mt_seg,
+	    BUS_DMA_NOWAIT);
 	if (error != 0) {
 		printf("%s: could not load desc DMA map\n", DEVNAME(sc));
 		goto fail;
@@ -4173,8 +4180,8 @@ mwx_queue_alloc(struct mwx_softc *sc, struct mwx_queue *q, int count,
 		goto fail;
 	}
 
-	error = bus_dmamap_load(sc->sc_dmat, q->mq_map, q->mq_desc,
-	    size, NULL, BUS_DMA_NOWAIT);
+	error = bus_dmamap_load(sc->sc_dmat, q->mq_map, &q->mq_seg,
+	    BUS_DMA_NOWAIT);
 	if (error != 0) {
 		printf("%s: could not load desc DMA map\n", DEVNAME(sc));
 		goto fail;
@@ -4605,15 +4612,11 @@ mwx_dma_tx_cleanup(struct mwx_softc *sc, struct mwx_queue *q)
 	struct mwx_queue_data *md;
 	struct mwx_desc *desc;
 	int idx, last;
-	unsigned int prev = MQ_CLEANUP_IDLE;
+	unsigned int prev;
 
-	if (!__atomic_compare_exchange_n(&q->mq_cleanup_state, &prev,
-	    MQ_CLEANUP_RUNNING, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
-		if (prev == MQ_CLEANUP_RUNNING)
-			__atomic_compare_exchange_n(&q->mq_cleanup_state, &prev,
-			    MQ_CLEANUP_PENDING, false, __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+	if (__atomic_exchange_n(&q->mq_cleanup_state, MQ_CLEANUP_PENDING,
+	    __ATOMIC_ACQ_REL) != MQ_CLEANUP_IDLE)
 		return;
-	}
 
 	do {
 		__atomic_store_n(&q->mq_cleanup_state, MQ_CLEANUP_RUNNING, __ATOMIC_RELEASE);
@@ -4621,10 +4624,7 @@ mwx_dma_tx_cleanup(struct mwx_softc *sc, struct mwx_queue *q)
 		idx = q->mq_cons;
 		last = mwx_read(sc, q->mq_regbase + MT_DMA_DMA_IDX);
 
-		if (last < 0 || last >= (int)q->mq_count)
-			break;
-
-		if (idx != last) {
+		if (last >= 0 && last < (int)q->mq_count && idx != last) {
 			bus_dmamap_sync(sc->sc_dmat, q->mq_map, 0, q->mq_map->dm_mapsize,
 			    BUS_DMASYNC_PREWRITE);
 
@@ -4682,8 +4682,6 @@ mwx_dma_tx_cleanup(struct mwx_softc *sc, struct mwx_queue *q)
 		prev = MQ_CLEANUP_RUNNING;
 	} while (!__atomic_compare_exchange_n(&q->mq_cleanup_state, &prev,
 	    MQ_CLEANUP_IDLE, false, __ATOMIC_RELEASE, __ATOMIC_RELAXED));
-	if (last < 0 || last >= (int)q->mq_count)
-		__atomic_store_n(&q->mq_cleanup_state, MQ_CLEANUP_IDLE, __ATOMIC_RELEASE);
 }
 
 void
@@ -4824,8 +4822,10 @@ mwx_dma_rx_dequeue(struct mwx_softc *sc, struct mwx_queue *q,
 		md = &q->mq_data[idx];
 		desc = &q->mq_desc[idx];
 
+		/* Unloading clears dm_mapsize before the descriptor is checked. */
+		const auto mapped_size = md->md_map->dm_mapsize;
 		bus_dmamap_sync(sc->sc_dmat, md->md_map, 0,
-		    md->md_map->dm_mapsize, BUS_DMASYNC_POSTREAD);
+		    mapped_size, BUS_DMASYNC_POSTREAD);
 		bus_dmamap_unload(sc->sc_dmat, md->md_map);
 
 		/* dequeue mbuf */
@@ -4845,11 +4845,11 @@ mwx_dma_rx_dequeue(struct mwx_softc *sc, struct mwx_queue *q,
 		/* only buf0 is used on RX rings */
 		ctrl = le32toh(desc->ctrl);
 		uint32_t seglen = MT_DNA_CTL_SD_GET_LEN0(ctrl);
-		if (seglen == 0 || seglen > md->md_map->dm_mapsize) {
+		if (seglen == 0 || seglen > mapped_size) {
 			static uint32_t rx_badlen_log;
 			if (rx_badlen_log++ < 8)
 				MWX_DEV_LOG(sc, "rx slot %d invalid len=%u max=%u\n",
-				    idx, seglen, (uint32_t)md->md_map->dm_mapsize);
+				    idx, seglen, (uint32_t)mapped_size);
 			m_freem(m);
 			if (m0 != NULL) {
 				m_freem(m0);
@@ -5512,6 +5512,22 @@ mwx_pci_disable_aspm(struct mwx_softc *sc, IOPCIDevice *dev)
 	mwx_pci_clear_aspm_dev(sc, dev, "ep", true);
 }
 
+static void
+mwx_pci_ensure_d0(IOPCIDevice *dev)
+{
+	UInt8 pm_cap = 0;
+	if (dev == NULL ||
+	    !dev->findPCICapability(kIOPCIPowerManagementCapability, &pm_cap) ||
+	    pm_cap == 0)
+		return;
+	UInt16 pmcsr = dev->configRead16((UInt8)(pm_cap + 0x04));
+	if ((pmcsr & 0x0003U) != 0 || (pmcsr & 0x8000U) != 0) {
+		dev->configWrite16((UInt8)(pm_cap + 0x04),
+		    (UInt16)((pmcsr & ~0x0003U) | 0x8000U));
+		IOSleep(10);
+	}
+}
+
 int
 mwx_pci_flr(struct mwx_softc *sc, IOPCIDevice *dev)
 {
@@ -5530,11 +5546,20 @@ mwx_pci_flr(struct mwx_softc *sc, IOPCIDevice *dev)
 		MWX_DEV_LOG(sc, "FLR: not supported devcap=0x%08x\n", devcap);
 		return ENODEV;
 	}
+	mwx_pci_ensure_d0(dev);
+	mwx_pci_disable_aspm(sc, dev);
 	dev->saveDeviceState();
 	devctl = dev->configRead16(cap + 0x08);
 	dev->configWrite16(cap + 0x08, devctl | (1U << 15));
 	IOSleep(150);
+	for (int i = 0; i < 10; i++) {
+		UInt16 devsts = dev->configRead16(cap + 0x0a);
+		if (devsts != 0xffffU && (devsts & (1U << 5)) == 0)
+			break;
+		IOSleep(10);
+	}
 	dev->restoreDeviceState();
+	mwx_pci_ensure_d0(dev);
 	dev->setMemoryEnable(true);
 	dev->setBusMasterEnable(true);
 	mwx_pci_disable_aspm(sc, dev);
@@ -5633,11 +5658,22 @@ mwx_ensure_drv_own(struct mwx_softc *sc, const char *ctx)
 	if (sc->sc_tag != NULL) {
 		MWX_DEV_LOG(sc, "%s still failing lpctl=0x%08x, trying PCIe FLR\n",
 		    ctx, mwx_read(sc, MT_CONN_ON_LPCTL));
-		if (mwx_pci_flr(sc, sc->sc_tag) == 0 &&
-		    mwx_mcu_drv_pmctrl(sc) == 0) {
-			MWX_DEV_LOG(sc, "%s MCU power control recovered via FLR\n",
-			    ctx);
-			return 0;
+		if (mwx_pci_flr(sc, sc->sc_tag) == 0) {
+			if (mwx_mcu_drv_pmctrl(sc) == 0) {
+				MWX_DEV_LOG(sc, "%s MCU power control recovered via FLR\n",
+				    ctx);
+				return 0;
+			}
+			MWX_DEV_LOG(sc,
+			    "%s post-FLR driver own failed lpctl=0x%08x, trying WFSYS reset\n",
+			    ctx, mwx_read(sc, MT_CONN_ON_LPCTL));
+			(void)mwx_wfsys_reset(sc);
+			if (mwx_mcu_drv_pmctrl(sc) == 0) {
+				MWX_DEV_LOG(sc,
+				    "%s MCU power control recovered via FLR+WFSYS\n",
+				    ctx);
+				return 0;
+			}
 		}
 	}
 
@@ -6725,7 +6761,7 @@ mt7921_mcu_scan_event(struct mwx_softc *sc, struct mbuf *m)
 	}
 	if (mbuf_len(m) >= sizeof(*event)) {
 		event = mtod(m, struct mt76_connac_hw_scan_done *);
-		if (event->seq_num != sc->sc_scan_seq_num) {
+		if ((event->seq_num & 0x7f) != sc->sc_scan_seq_num) {
 			MWX_DEV_LOG(sc,
 			    "scan done ignored: stale seq=%u expected=%u\n",
 			    event->seq_num, sc->sc_scan_seq_num);
@@ -9034,6 +9070,9 @@ bool
 MtkMwx::attach(IOPCIDevice *device)
 {
 	MWX_LOG("HAL attach begin device=%p\n", (void *)device);
+	IOMapper::checkForSystemMapper();
+	device->setProperty("MtkDMAMapper", IOMapper::gSystem ? "system" : "none");
+	device->setProperty("MtkDMARevision", "ring-map-1");
 	if (com == NULL)
 		com = (struct mwx_softc *)malloc(sizeof(*com), M_DEVBUF, M_WAITOK | M_ZERO);
 	if (pci == NULL)

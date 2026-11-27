@@ -78,7 +78,7 @@ struct ContentView: View {
     // Deployment State
     @State private var destinations: [EFIDestination] = []
     @State private var selectedDestination: EFIDestination?
-    private let appVersion: String = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "2.3.0"
+    private let appVersion: String = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "2.3.2"
     #if MTK_AWDL_BETA
     private let isAwdlBeta: Bool = true
     #else

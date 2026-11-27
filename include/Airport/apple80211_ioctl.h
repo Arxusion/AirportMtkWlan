@@ -1003,8 +1003,14 @@ struct apple80211_awdl_election_rssi_thresholds {
 } __attribute__((packed));
 
 struct apple80211_channel_sequence {
+#if __IO80211_TARGET == __MAC_26_0
+    uint32_t    channel;
+    uint32_t    flags;
+    uint32_t    reserved;
+#else
     uint16_t    flags;
     uint8_t     pad;
+#endif
 } __attribute__((packed));
 
 struct apple80211_awdl_sync_channel_sequence {
@@ -1016,7 +1022,11 @@ struct apple80211_awdl_sync_channel_sequence {
     uint8_t     duplicate_count;    // 8
     uint8_t     fill_channel;       // 9
     uint8_t     pad2[6];
+#if __IO80211_TARGET == __MAC_26_0
+    struct apple80211_channel_sequence seqs[32];
+#else
     struct apple80211_channel_sequence seqs[APPLE80211_MAX_CHANNELS];
+#endif
 } __attribute__((packed));
 
 static_assert(__offsetof(apple80211_awdl_sync_channel_sequence, seqs) == 16, "seqs offset error");
@@ -1039,6 +1049,15 @@ struct apple80211_awdl_extension_state_machine_parameter {
 struct apple80211_awdl_sync_state {
     uint32_t    version;
     uint32_t    state;
+#if __IO80211_TARGET == __MAC_26_0
+    // ForbiddenItlwm d2a791840, include/Airport/apple80211_ioctl.h.
+    // Both 25G332 ioctl wrappers require 24 bytes.
+    uint8_t     address[APPLE80211_ADDR_LEN];
+    uint8_t     reserved[2];
+    uint32_t    flags;
+    uint8_t     driver_flags;
+    uint8_t     reserved_tail[3];
+#endif
 } __attribute__((packed));
 
 struct apple80211_awdl_sync_params {
@@ -1065,13 +1084,29 @@ struct apple80211_awdl_cap {
 } __attribute__((packed));
 
 struct apple80211_awdl_af_tx_mode {
+#if __IO80211_TARGET == __MAC_26_0
+    uint32_t    version;
+    uint32_t    mode;
+#else
     uint32_t    version;
     uint64_t    mode;
+#endif
 } __attribute__((packed));
 
 #define AWDL_OOB_AF_PARAMS_SIZE 38
 
 struct apple80211_awdl_oob_request {
+#if __IO80211_TARGET == __MAC_26_0
+    uint32_t version;
+    uint8_t peer[6];
+    uint16_t reserved;
+    uint32_t time_offset_us;
+    uint32_t bitmap;
+    uint8_t reserved2[20];
+    uint16_t data_len;
+    uint8_t reserved3[6];
+    const void *payload;
+#else
     uint32_t    version;
     uint32_t    unk1;               // 4
     uint32_t    unk2;               // 8
@@ -1087,7 +1122,21 @@ struct apple80211_awdl_oob_request {
     uint32_t    pad4;
     uint16_t    unk9;               // 44
     uint8_t     data[1782];         // 48
+#endif
 } __attribute__((packed));
+
+// Tahoe layouts: ForbiddenItlwm d2a791840, include/Airport/apple80211_ioctl.h;
+// OOB offsets also match the native MtkAwdlInterface automatic-MI consumer.
+#if __IO80211_TARGET == __MAC_26_0
+static_assert(sizeof(apple80211_channel_sequence) == 12, "Tahoe channel entry size");
+static_assert(sizeof(apple80211_awdl_sync_state) == 24, "Tahoe sync state size");
+static_assert(__offsetof(apple80211_awdl_sync_state, flags) == 16, "Tahoe sync flags");
+static_assert(__offsetof(apple80211_awdl_sync_state, driver_flags) == 20, "Tahoe driver flags");
+static_assert(sizeof(apple80211_awdl_af_tx_mode) == 8, "Tahoe AF TX mode size");
+static_assert(__offsetof(apple80211_awdl_oob_request, data_len) == 0x28, "Tahoe OOB length");
+static_assert(__offsetof(apple80211_awdl_oob_request, payload) == 0x30, "Tahoe OOB payload");
+static_assert(sizeof(apple80211_awdl_oob_request) == 0x38, "Tahoe OOB request size");
+#endif
 
 //Roam: <airport[565]> DISABLED, 2.4GHz on awdl0 => {
 //    "ROAM_PROF" =     (

@@ -45,11 +45,11 @@ files.
   timeout (`ieee80211_node.h`), HE STA firmware TLV builder (`mwx_yy_sta_he_tlv`),
   and RX A-MSDU reassembly (`mwx_amsdu_*`).
 - Community PRs & Clean C++ Root-Cause Integrations:
-  - XiaoweiTSN (PR #25): macOS deployment target & build compatibility updates.
-  - SevenStar77777 (PR #27): lockless 3-state CAS descriptor cleanup, scan-abort
-    event notification, and association-defer state safety.
-  - yuanshuai2017 (PR #28): Tahoe `IO80211AWDLProtocol` / HW OMAC bidirectional
-    AWDL integration (for the separate AWDL Beta track).
+  - XiaoweiTSN (PR #25 / `chore/core-foundation-baseline`): macOS deployment target & build compatibility updates, 32-bit IOMMU DMA mapping safety, `_if_input` hot-path cleanup, and Tahoe AWDL ABI struct fixes.
+  - SevenStar77777 / yuanshuai2017 (PR #27): lockless 3-state CAS descriptor cleanup, bgscan cancellation & scan-abort event notification, scan sequence masking, and association-defer state safety.
+  - yuanshuai2017 (PR #28): Tahoe `IO80211AWDLProtocol` / HW OMAC bidirectional AWDL integration (for the separate AWDL Beta track).
+  - netsflex (PR #29): `mwx_dma_rx_dequeue` cached `dm_mapsize` fix before `bus_dmamap_unload` (`v2.3.2` critical RX fix).
+  - yunssahn (Issue #22): AMD Ryzen / MT7922 diagnostic logs pinpointing attach ASPM ordering, PCIe FLR D0 + WFSYS reset recovery, `IOPCIEDeviceWrapper` workloop lifetime, and `mtk-grab-logs.sh` budget scheduling.
   - Arxusion (`AppleSunriseWLAN`) & `morluto/rea`: reverse-engineering validation
     of native macOS Sequoia/Tahoe Apple80211/IO80211AWDLProtocol vtables,
     standalone channel 6 AWDL TX, and live AWDL getters across MT7921 and MT7922.

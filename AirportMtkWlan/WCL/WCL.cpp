@@ -258,10 +258,6 @@ IOReturn AirportItlwmSkywalkInterface::beginWCLReassoc(void *)
     ieee80211com *ic = fHalService->get80211Controller();
     if (!ic || !(ic->ic_if.if_flags & IFF_RUNNING))
         return kIOReturnNotReady;
-    if (ic->ic_if.if_awdl_enabled) {
-        XYLog("WCL roam postponed: AWDL session active\n");
-        return kIOReturnBusy;
-    }
     if (ic->ic_state == IEEE80211_S_RUN && ic->ic_bss != nullptr) {
         XYLog("WCL executing same-SSID fast re-association to BSSID %s\n",
               ether_sprintf(ic->ic_bss->ni_bssid));

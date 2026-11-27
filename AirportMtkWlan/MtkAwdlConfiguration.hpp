@@ -85,8 +85,11 @@ public:
     {
         if (!reply)
             return kIOReturnBadArgument;
-        if (syncState.read(reply) == kIOReturnNotReady)
-            *reply = {APPLE80211_VERSION, 1};
+        if (syncState.read(reply) == kIOReturnNotReady) {
+            *reply = {};
+            reply->version = APPLE80211_VERSION;
+            reply->state = 1;
+        }
         return kIOReturnSuccess;
     }
 

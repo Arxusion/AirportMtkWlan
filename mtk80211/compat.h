@@ -310,7 +310,7 @@ void		bus_dmamem_unmap(bus_dma_tag_t tag, void *kva, size_t size);
 void		bus_dmamem_free(bus_dma_tag_t tag, bus_dma_segment_t *segs, int nsegs);
 void		bus_dmamap_destroy(bus_dma_tag_t tag, bus_dmamap_t dmam);
 int		bus_dmamap_load(bus_dmamap_t map, mbuf_t m);
-int		bus_dmamap_load(bus_dma_tag_t tag, bus_dmamap_t map, void *buf, bus_size_t buflen, void *p, int flags);
+int		bus_dmamap_load(bus_dma_tag_t tag, bus_dmamap_t map, bus_dma_segment_t *seg, int flags);
 int		bus_dmamap_load_mbuf(bus_dma_tag_t tag, bus_dmamap_t map, mbuf_t m, int flags);
 void		bus_dmamap_unload(bus_dma_tag_t tag, bus_dmamap_t map);
 

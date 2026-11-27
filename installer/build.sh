@@ -10,7 +10,7 @@ DIST_DIR="$REPO_ROOT/dist"
 echo "=== Building AirportMtkWlan Installer ==="
 mkdir -p "$BUILD_DIR" "$DIST_DIR"
 
-VERSION="${1:-2.3.1}"
+VERSION="${1:-2.3.2}"
 WIFI_ONLY="${WIFI_ONLY:-1}"
 if [ "${AWDL:-0}" = "1" ]; then
     WIFI_ONLY=0

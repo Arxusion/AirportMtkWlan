@@ -14,7 +14,7 @@ structs = (
     "apple80211_awdl_election_id",
     "apple80211_awdl_master_channel", "apple80211_awdl_secondary_master_channel",
     "apple80211_awdl_sync_state", "apple80211_awdl_election_rssi_thresholds",
-    "apple80211_awdl_min_rate",
+    "apple80211_awdl_min_rate", "apple80211_awdl_oob_request", "apple80211_awdl_af_tx_mode",
 )
 definitions = "\n".join(
     re.search(r"struct " + name + r"\s*\{.*?\} __attribute__\(\(packed\)\);",
@@ -32,9 +32,28 @@ test = r"""
 #include <cstring>
 #include <initializer_list>
 #define _APPLE80211_IOCTL_H_
+#define __MAC_26_0 260000
+#define __MAC_15_2 150200
 """ + defines + "\n" + definitions + r"""
 #include "MtkAwdlConfiguration.hpp"
 
+#if __IO80211_TARGET == __MAC_26_0
+static_assert(sizeof(apple80211_channel_sequence) == 12, "Tahoe sequence entry");
+static_assert(sizeof(apple80211_awdl_sync_state) == 24, "Tahoe sync state");
+static_assert(offsetof(apple80211_awdl_sync_state, flags) == 16, "Tahoe sync flags");
+static_assert(offsetof(apple80211_awdl_sync_state, driver_flags) == 20, "Tahoe driver flags");
+static_assert(sizeof(apple80211_awdl_af_tx_mode) == 8, "Tahoe AF TX mode");
+static_assert(sizeof(apple80211_awdl_oob_request) == 0x38, "Tahoe OOB size");
+static_assert(offsetof(apple80211_awdl_oob_request, data_len) == 0x28, "Tahoe OOB length");
+static_assert(offsetof(apple80211_awdl_oob_request, payload) == 0x30, "Tahoe OOB pointer");
+#else
+static_assert(sizeof(apple80211_channel_sequence) == 3, "Sequoia sequence entry");
+static_assert(sizeof(apple80211_awdl_sync_state) == 8, "Sequoia sync state");
+static_assert(sizeof(apple80211_awdl_af_tx_mode) == 12, "Sequoia AF TX mode");
+static_assert(sizeof(apple80211_awdl_oob_request) == 1830, "Sequoia OOB size");
+static_assert(offsetof(apple80211_awdl_oob_request, data) == 48, "Sequoia inline data");
+#endif
+static_assert(sizeof(apple80211_awdl_sync_channel_sequence) == 0x190, "Sequence envelope");
 int main()
 {
     MtkAwdlConfiguration config;
@@ -161,11 +180,29 @@ int main()
     apple80211_awdl_sync_state state = {}, stateReply = {};
     assert(config.readSyncState(&stateReply) == kIOReturnSuccess);
     assert(stateReply.version == 1 && stateReply.state == 1);
+#if __IO80211_TARGET == __MAC_26_0
+    state.address[5] = 0x7a;
+    state.flags = 0x12345678;
+    state.driver_flags = 3;
+    assert(stateReply.flags == 0 && stateReply.driver_flags == 0);
+    // Exercise the same marshalled offsets used by the native MI consumer.
+    uint8_t payload[3] = {1, 2, 3};
+    apple80211_awdl_oob_request oob = {};
+    const void *pointer = payload;
+    const uint16_t payloadLength = sizeof(payload);
+    std::memcpy(reinterpret_cast<uint8_t *>(&oob) + 0x28, &payloadLength, sizeof(payloadLength));
+    std::memcpy(reinterpret_cast<uint8_t *>(&oob) + 0x30, &pointer, sizeof(pointer));
+    assert(oob.data_len == sizeof(payload) && oob.payload == payload);
+#endif
     state.state = 3;
     assert(config.setSyncState(&state) == kIOReturnSuccess);
     state.state = 4;
     assert(config.setSyncState(&state) == kIOReturnBadArgument);
     assert(config.readSyncState(&stateReply) == kIOReturnSuccess && stateReply.state == 3);
+
+#if __IO80211_TARGET == __MAC_26_0
+    assert(stateReply.address[5] == 0x7a && stateReply.flags == 0x12345678 && stateReply.driver_flags == 3);
+#endif
 
     apple80211_awdl_election_rssi_thresholds thresholds = {0, 1, 2, 3}, thresholdsReply = {};
     assert(config.electionRssiThresholds.set(&thresholds) == kIOReturnSuccess);
@@ -189,8 +226,10 @@ with tempfile.TemporaryDirectory(prefix="mtk-awdl-config-") as temporary:
     source = directory / "test.cpp"
     source.write_text(test)
     binary = directory / "test"
-    subprocess.run(["clang++", "-std=c++14", "-Wall", "-Wextra", "-Werror",
-                    "-fsanitize=address,undefined", "-I", str(directory),
-                    "-I", str(root / "AirportMtkWlan"), str(source), "-o", str(binary)],
-                   check=True)
-    subprocess.run([str(binary)], check=True)
+    for target in ("__MAC_26_0", "__MAC_15_2"):
+        subprocess.run(["clang++", "-std=c++14", "-Wall", "-Wextra", "-Werror",
+                        "-fsanitize=address,undefined", "-D__IO80211_TARGET=" + target,
+                        "-I", str(directory), "-I", str(root / "AirportMtkWlan"),
+                        str(source), "-o", str(binary)], check=True)
+        subprocess.run([str(binary)], check=True)
+        print("PASS: AWDL configuration and ABI for " + target)

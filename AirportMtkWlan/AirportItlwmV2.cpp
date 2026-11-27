@@ -198,8 +198,6 @@ void AirportItlwm::releaseAll()
             fWatchdogWorkLoop->release();
             fWatchdogWorkLoop = NULL;
         }
-        _fWorkloop->release();
-        _fWorkloop = NULL;
     }
     unregistPM();
 }
@@ -480,19 +478,19 @@ bool AirportItlwm::start(IOService *provider)
         return false;
     }
     if (initPCIPowerManagment(pciNub) == false) {
-        super::stop(pciNub);
+        super::stop(provider);
         return false;
     }
     if (_fWorkloop == NULL) {
         XYLog("No _fWorkloop!!\n");
-        super::stop(pciNub);
+        super::stop(provider);
         releaseAll();
         return false;
     }
     _fCommandGate = IOCommandGate::commandGate(this, (IOCommandGate::Action)AirportItlwm::tsleepHandler);
     if (_fCommandGate == 0) {
         XYLog("No command gate!!\n");
-        super::stop(pciNub);
+        super::stop(provider);
         releaseAll();
         return false;
     }
@@ -501,6 +499,7 @@ bool AirportItlwm::start(IOService *provider)
     if (!createMediumTables(&primaryMedium) ||
         !setCurrentMedium(primaryMedium) || !setSelectedMedium(primaryMedium)) {
         XYLog("setup medium fail\n");
+        super::stop(provider);
         releaseAll();
         return false;
     }
@@ -514,7 +513,7 @@ bool AirportItlwm::start(IOService *provider)
 
     if (!fHalService->attach(pciNub)) {
         XYLog("attach fail\n");
-        super::stop(pciNub);
+        super::stop(provider);
         releaseAll();
         return false;
     }
@@ -536,7 +535,7 @@ bool AirportItlwm::start(IOService *provider)
     if (fWatchdogWorkLoop == NULL) {
         XYLog("init watchdog workloop fail\n");
         fHalService->detach(pciNub);
-        super::stop(pciNub);
+        super::stop(provider);
         releaseAll();
         return false;
     }
@@ -544,7 +543,7 @@ bool AirportItlwm::start(IOService *provider)
     if (!watchdogTimer) {
         XYLog("init watchdog fail\n");
         fHalService->detach(pciNub);
-        super::stop(pciNub);
+        super::stop(provider);
         releaseAll();
         return false;
     }
@@ -1986,12 +1985,6 @@ IO80211VirtualInterface* AirportItlwm::createVirtualInterface(ether_addr *ea, UI
         fAwdlIf = vif;
         memcpy(fAwdlMac, &awdl_ea, 6);
         fAwdlEnabled = true;
-        if (fHalService) {
-            struct _ifnet *ifp = &fHalService->get80211Controller()->ic_ac.ac_if;
-            ifp->if_awdl_iface = (IOEthernetInterface *)vif;
-            memcpy(ifp->if_awdl_mac, &awdl_ea, 6);
-            ifp->if_awdl_enabled = true;
-        }
         XYLog("%s: successfully created awdl0 (role %u) with MAC %02x:%02x:%02x:%02x:%02x:%02x\n",
               __FUNCTION__, role,
               awdl_ea.octet[0], awdl_ea.octet[1], awdl_ea.octet[2],
@@ -2116,10 +2109,6 @@ SInt32 AirportItlwm::enableVirtualInterface(IO80211VirtualInterface *vif)
     XYLog("%s: vif=%p\n", __FUNCTION__, vif);
     if (vif == fAwdlIf) {
         fAwdlEnabled = true;
-        if (fHalService) {
-            struct _ifnet *ifp = &fHalService->get80211Controller()->ic_ac.ac_if;
-            ifp->if_awdl_enabled = true;
-        }
     }
     return super::enableVirtualInterface(vif);
 }
@@ -2129,10 +2118,6 @@ SInt32 AirportItlwm::disableVirtualInterface(IO80211VirtualInterface *vif)
     XYLog("%s: vif=%p\n", __FUNCTION__, vif);
     if (vif == fAwdlIf) {
         fAwdlEnabled = false;
-        if (fHalService) {
-            struct _ifnet *ifp = &fHalService->get80211Controller()->ic_ac.ac_if;
-            ifp->if_awdl_enabled = false;
-        }
     }
     return super::disableVirtualInterface(vif);
 }
