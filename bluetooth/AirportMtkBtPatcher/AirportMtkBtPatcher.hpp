@@ -86,6 +86,7 @@ public:
     bool init();
     void free();
     
+    void processKernel(KernelPatcher &patcher);
     void processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size);
     static IOReturn newFindQueueRequest(void *that, unsigned short arg1, void *addr, unsigned short arg2, bool arg3, void **hciRequestPtr);
     
@@ -94,6 +95,7 @@ public:
     
     mach_vm_address_t oldFindQueueRequest {};
     mach_vm_address_t oldHostDeviceRequest {};
+    mach_vm_address_t oldCsValidatePage {};
     
 private:
     static bool _randomAddressInit;
