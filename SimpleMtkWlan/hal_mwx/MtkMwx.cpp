@@ -9708,13 +9708,20 @@ mwx_mcu_sta_ba(struct mwx_softc *sc, struct ieee80211_node *ni, uint8_t tid,
 			mwx_mcu_send_mbuf(sc, MCU_UNI_CMD_STA_REC_UPDATE, wtbl, NULL);
 		if (rv != 0) {
 #if MTK_PERF
-			mp_add(mp_tx_wtbl_ba_submit_fail);
+			if (tx)
+				mp_add(mp_tx_wtbl_ba_submit_fail);
 #endif
 			m_freem(m);
 			return rv;
 		}
 #if MTK_PERF
-		mp_add(enable ? mp_tx_wtbl_ba_enable_submit : mp_tx_wtbl_ba_disable_submit);
+		/*
+		 * These counters stay TX-only: they are read as the TX aggregation
+		 * submission rate, and RX sessions would inflate them.
+		 */
+		if (tx)
+			mp_add(enable ? mp_tx_wtbl_ba_enable_submit :
+			    mp_tx_wtbl_ba_disable_submit);
 #endif
 	}
 #if MTK_PERF

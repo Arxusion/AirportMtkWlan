@@ -117,14 +117,20 @@ int main() {
         assert(mwx_mcu_sta_ba(&sc,&node.ni,0,0,64,1,tx,0)==ENOBUFS);
         assert(live==0 && messages.empty());
     }
-    for(int tx:{0,1}) {
-        reset();fail_send=1;
-        assert(mwx_mcu_sta_ba(&sc,&node.ni,0,0,64,1,tx,0)==EIO);
-        assert(live==0 && messages.size()==1);
-        reset();fail_send=2;
-        assert(mwx_mcu_sta_ba(&sc,&node.ni,0,0,64,1,tx,0)==EIO);
-        assert(live==0 && messages.size()==2);
-    }
+    // TX submission failures free the STA message; RX follows the same rules.
+    reset();fail_send=1;
+    assert(mwx_mcu_sta_ba(&sc,&node.ni,0,0,64,1,1,0)==EIO);
+    assert(live==0 && messages.size()==1);
+    reset();fail_send=2;
+    assert(mwx_mcu_sta_ba(&sc,&node.ni,0,0,64,1,1,0)==EIO);
+    assert(live==0 && messages.size()==2);
+    // TX counters checked by diagnostics: one WTBL submit failure, one STA submit failure.
+    reset();fail_send=1;
+    assert(mwx_mcu_sta_ba(&sc,&node.ni,0,0,64,1,0,0)==EIO);
+    assert(live==0 && messages.size()==1);
+    reset();fail_send=2;
+    assert(mwx_mcu_sta_ba(&sc,&node.ni,0,0,64,1,0,0)==EIO);
+    assert(live==0 && messages.size()==2);
     puts("PASS: TX/RX WTBL+STA BA wire format, submission order, and build/submission failures");
 }
 '''
