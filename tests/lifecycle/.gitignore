@@ -4,3 +4,4 @@ test-detach
 *-result.txt
 test-basics
 test-power-cycle
+test-tx-aggregation

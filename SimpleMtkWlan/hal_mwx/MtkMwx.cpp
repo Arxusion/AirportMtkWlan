@@ -565,6 +565,9 @@ struct mwx_softc {
 	struct task		sc_setkey_task;
 	struct task		sc_scan_task;
 	struct task		sc_reset_task;
+	struct task		sc_ba_task;
+	uint8_t			sc_txba_start;	/* TX BA TIDs to program (bitmask) */
+	uint8_t			sc_txba_stop;	/* TX BA TIDs to tear down (bitmask) */
 	CTimeout		*sc_reset_to;
 	u_int			sc_flags;
 #define MWX_FLAG_SCANNING		0x01
@@ -912,6 +915,7 @@ int		mwx_ampdu_tx_start(struct ieee80211com *, struct ieee80211_node *,
 		    uint8_t);
 void		mwx_ampdu_tx_stop(struct ieee80211com *, struct ieee80211_node *,
 		    uint8_t);
+void		mwx_ba_task(void *);
 int		mwx_mcu_fw_pmctrl(struct mwx_softc *);
 int		mwx_mcu_drv_pmctrl(struct mwx_softc *);
 int		mwx_wfsys_reset(struct mwx_softc *sc);
@@ -1320,7 +1324,9 @@ mwx_stop(struct ifnet *ifp)
 		task_del(sc->sc_nswq, &sc->sc_setkey_task);
 		task_del(sc->sc_nswq, &sc->sc_reset_task);
 		task_del(sc->sc_nswq, &sc->sc_edca_task);
+		task_del(sc->sc_nswq, &sc->sc_ba_task);
 	}
+	sc->sc_txba_start = sc->sc_txba_stop = 0;
 	task_del(systq, &sc->sc_scan_task);
 	timeout_del(&sc->sc_reset_to);
 	timeout_del(&sc->sc_intr_to);
@@ -1763,6 +1769,14 @@ mwx_newstate(struct ieee80211com *ic, enum ieee80211_state nstate, int arg)
 	if (ic->ic_state == IEEE80211_S_RUN) {
 		/* cancel other tasks here */
 	}
+	if (nstate != IEEE80211_S_RUN) {
+		task_del(sc->sc_nswq, &sc->sc_ba_task);
+		sc->sc_txba_start = sc->sc_txba_stop = 0;
+	}
+	/* S093 pattern: HT stays advertised from the next association on, so
+	 * ht_negotiate can pass and NODE_HT gets set for ADDBA. */
+	if (nstate == IEEE80211_S_SCAN || nstate == IEEE80211_S_AUTH)
+		ic->ic_flags |= IEEE80211_F_HTON;
 
 	if (nstate != IEEE80211_S_RUN)
 		mwx_amsdu_purge(sc);
@@ -3597,6 +3611,7 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 	task_set(&sc->sc_edca_task, mwx_edca_task, sc, "mwx_edca");
 	task_set(&sc->sc_setkey_task, mwx_setkey_task, sc, "mwx_setkey");
 	task_set(&sc->sc_reset_task, mwx_reset_task, sc, "mwx_reset");
+	task_set(&sc->sc_ba_task, mwx_ba_task, sc, "mwx_ba");
 	task_set(&sc->sc_fullreset_task, mwx_fullreset_task, sc, "mwx_fullreset");
 	task_set(&sc->sc_syspm_task, mwx_syspm_task, sc, "mwx_syspm");
 	task_set(&sc->sc_scan_task, mwx_end_scan_task, sc, "mwx_scan");
@@ -8143,18 +8158,18 @@ mt7921_mac_write_txwi_80211(struct mwx_softc *sc, struct mbuf *m,
 		tid = qos & IEEE80211_QOS_TID;
 	}
 
-	/*
-	 * Like Linux: aggregate only TIDs with a TX Block Ack agreement, and
-	 * let the MAC build A-MSDUs where the AP allowed A-MSDU in A-MPDU.
-	 */
+	/* A-MSDU enablement for TIDs whose agreement allows it. Whether a
+	 * frame may be aggregated is decided by the firmware from the WTBL
+	 * BA record; writing MT_TXD3_BA_DISABLE here suppressed every
+	 * aggregation attempt while the ADDBA handshake was still running
+	 * (and, on open networks, forever). */
 	if (type == (IEEE80211_FC0_TYPE_DATA >> IEEE80211_FC0_TYPE_SHIFT) &&
 	    !multicast) {
 		struct ieee80211_tx_ba *ba = ieee80211_has_qos(wh) && tid < 8 ?
 		    &ni->ni_tx_ba[tid] : NULL;
 
-		if (ba == NULL || ba->ba_state != IEEE80211_BA_AGREED)
-			txp->txwi[3] |= htole32(MT_TXD3_BA_DISABLE);
-		else if (sc->sc_tx_amsdu &&
+		if (ba != NULL && ba->ba_state == IEEE80211_BA_AGREED &&
+		    sc->sc_tx_amsdu &&
 		    (ba->ba_params & IEEE80211_ADDBA_AMSDU))
 			txp->txwi[7] |= htole32(MT_TXD7_HW_AMSDU);
 	}
@@ -9741,17 +9756,13 @@ mwx_ampdu_tx_start(struct ieee80211com *ic, struct ieee80211_node *ni,
     uint8_t tid)
 {
 	struct mwx_softc *sc = (struct mwx_softc *)ic->ic_softc;
-	struct ieee80211_tx_ba *ba = &ni->ni_tx_ba[tid];
-	uint16_t win = ba->ba_winsize;
-	int amsdu, rv;
 
-	if (win == 0 || win > 64)
-		win = 64;
-	amsdu = sc->sc_tx_amsdu && (ba->ba_params & IEEE80211_ADDBA_AMSDU);
-	rv = mwx_mcu_sta_ba(sc, ni, tid, ba->ba_winstart, win, 1, 1, amsdu);
-	MWX_DEV_LOG(sc, "tx BA start tid=%u ssn=%u win=%u amsdu=%d rv=%d\n",
-	    tid, ba->ba_winstart, win, amsdu, rv);
-	return rv;
+	if (ni != ic->ic_bss || tid >= 8)
+		return EOPNOTSUPP;
+	sc->sc_txba_stop &= ~(1U << tid);
+	sc->sc_txba_start |= 1U << tid;
+	task_add(sc->sc_nswq, &sc->sc_ba_task);
+	return EBUSY;
 }
 
 void
@@ -9759,10 +9770,73 @@ mwx_ampdu_tx_stop(struct ieee80211com *ic, struct ieee80211_node *ni,
     uint8_t tid)
 {
 	struct mwx_softc *sc = (struct mwx_softc *)ic->ic_softc;
-	int rv;
 
-	rv = mwx_mcu_sta_ba(sc, ni, tid, 0, 0, 0, 1, 0);
-	MWX_DEV_LOG(sc, "tx BA stop tid=%u rv=%d\n", tid, rv);
+	if (ni != ic->ic_bss || tid >= 8 || ic->ic_state != IEEE80211_S_RUN)
+		return;
+	sc->sc_txba_start &= ~(1U << tid);
+	sc->sc_txba_stop |= 1U << tid;
+	task_add(sc->sc_nswq, &sc->sc_ba_task);
+}
+
+/* Program the firmware's WTBL TX BA record off the data path, then tell
+ * net80211: accept on success, refuse otherwise. The MCU exchange must
+ * not run synchronously inside ic_ampdu_tx_start: that call happens in
+ * the TX output context, and a blocking wait there stalls the output
+ * queue. net80211 keeps ba_state at IEEE80211_BA_REQUESTED while we
+ * hold the response (it deleted the 1s ba_to timer before calling us),
+ * and accept/refuse resolve the session. */
+void
+mwx_ba_task(void *arg)
+{
+	struct mwx_softc *sc = (struct mwx_softc *)arg;
+	struct ieee80211com *ic = &sc->sc_ic;
+	struct ieee80211_node *ni = ic->ic_bss;
+	uint8_t tid;
+	int s = splnet();
+
+	if (ni == NULL) {
+		sc->sc_txba_start = sc->sc_txba_stop = 0;
+		splx(s);
+		return;
+	}
+
+	for (tid = 0; tid < 8; tid++) {
+		uint8_t bit = 1U << tid;
+		struct ieee80211_tx_ba *ba = &ni->ni_tx_ba[tid];
+		int amsdu = (ba->ba_params & IEEE80211_ADDBA_AMSDU) ? 1 : 0;
+		uint16_t win = ba->ba_winsize;
+		int rv;
+
+		if (win == 0 || win > 64)
+			win = 64;
+
+		if (sc->sc_txba_stop & bit) {
+			sc->sc_txba_stop &= ~bit;
+			if (ic->ic_state == IEEE80211_S_RUN) {
+				rv = mwx_mcu_sta_ba(sc, ni, tid, 0, 0, 0, 1, 0);
+				MWX_DEV_LOG(sc, "tx BA stop tid=%u rv=%d\n", tid, rv);
+			}
+		}
+		if (sc->sc_txba_start & bit) {
+			sc->sc_txba_start &= ~bit;
+			if (ic->ic_state != IEEE80211_S_RUN)
+				continue;
+			rv = mwx_mcu_sta_ba(sc, ni, tid, ba->ba_winstart, win,
+			    1, 1, amsdu);
+			if (rv == 0) {
+				ieee80211_addba_resp_accept(ic, ni, tid);
+				MWX_DEV_LOG(sc, "tx BA start tid=%u ssn=%u "
+				    "win=%u amsdu=%d ok\n", tid,
+				    ba->ba_winstart, win, amsdu);
+			} else {
+				ieee80211_addba_resp_refuse(ic, ni, tid,
+				    IEEE80211_STATUS_UNSPECIFIED);
+				MWX_DEV_LOG(sc, "tx BA start tid=%u failed rv=%d\n",
+				    tid, rv);
+			}
+		}
+	}
+	splx(s);
 }
 
 int

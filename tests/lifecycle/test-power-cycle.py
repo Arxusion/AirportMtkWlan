@@ -90,7 +90,8 @@ struct mwx_softc {
     ieee80211com sc_ic;
     mwx_vif sc_vif;
     void *sc_nswq, *sc_reset_to, *sc_dma_to, *sc_intr_to;
-    int sc_newstate_task, sc_bgscan_done_task, sc_setkey_task, sc_reset_task, sc_fullreset_task, sc_syspm_task, sc_scan_task, sc_edca_task;
+    int sc_newstate_task, sc_bgscan_done_task, sc_setkey_task, sc_reset_task, sc_fullreset_task, sc_syspm_task, sc_scan_task, sc_edca_task, sc_ba_task;
+    uint8_t sc_txba_start = 0, sc_txba_stop = 0;
     int sc_intr_pending;
     void *sc_bgscan_arg;
     size_t sc_bgscan_arg_size;
