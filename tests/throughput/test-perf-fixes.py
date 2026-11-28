@@ -73,6 +73,7 @@ static bool mtk_awdl_diagnostics_enabled() { return awdl_diag_armed; }
 #define IEEE80211_FC0_SUBTYPE_ACTION 0xd0
 #define IEEE80211_FC1_PROTECTED 0x40
 #define IEEE80211_RXI_HWDEC 0x01
+#define MWX_TXWI_RESERVED 8
 #define MWX_RXI_AMSDU_MASK 0x06
 #define MWX_FLAG_SCANNING 0x01
 #define MWX_FLAG_BGSCAN 0x02
@@ -93,9 +94,10 @@ static bool mtk_awdl_diagnostics_enabled() { return awdl_diag_armed; }
 #define MT_INT_RX_DONE_WM2 0x00100000U
 #define MT_INT_MCU_CMD 0x20000000U
 #define MT_INT_TX_DONE_ALL 0x00000004U
+#define MT_DMA_CTL_DMA_DONE 0x80000000U
 #define MT_DMA_CTL_LAST_SEC0 0x40000000U
-#define MT_DMA_CTL_SD_LEN0(l) ((uint32_t)(l) << 16)
-#define MT_DNA_CTL_SD_GET_LEN0(c) ((c) & 0x3fffU)
+#define MT_DMA_CTL_SD_LEN0(l) (((uint32_t)(l) & 0x3fffU) << 16)
+#define MT_DNA_CTL_SD_GET_LEN0(c) (((c) >> 16) & 0x3fffU)
 #define MCU_CE_CMD_SET_EDCA_PARMS 0x1d
 #define BUS_DMASYNC_PREREAD 0
 #define BUS_DMASYNC_POSTREAD 1
@@ -210,7 +212,8 @@ static inline void m_freem(mbuf *m) {
 struct mt76_txwi { uint32_t w[8]; };
 struct mwx_txwi { mt76_txwi *mt_desc = nullptr; uint32_t mt_addr = 0; };
 struct dmamap_t { size_t dm_mapsize = 0; };
-struct mwx_queue_data { mbuf *md_mbuf = nullptr; mwx_txwi *md_txwi = nullptr; dmamap_t *md_map = nullptr; };
+struct mwx_queue_data { mbuf *md_mbuf = nullptr; mwx_txwi *md_txwi = nullptr; dmamap_t *md_map = nullptr;
+    unsigned long long md_paddr = 0; void *md_va = nullptr; };
 struct mwx_desc { uint32_t buf0 = 0, ctrl = 0, buf1 = 0, info = 0; };
 struct mwx_queue {
     int mq_cons = 0;
@@ -220,7 +223,15 @@ struct mwx_queue {
     mwx_queue_data *mq_data = nullptr;
     mwx_desc *mq_desc = nullptr;
     dmamap_t *mq_map = nullptr;
+    int mq_raw = 0;
+    unsigned mq_buf_size = 2048;
+    mbuf *mq_partial = nullptr, *mq_partial_tail = nullptr;
+    bool mq_partial_discard = false;
 };
+#define MWX_RX_RECORD_MAX 16384
+#define M_DONTWAIT 0
+static int mbuf_allocpacket(int, size_t, unsigned int *, mbuf **) { return 1; }
+
 struct ether_header { uint8_t d[6], s[6]; uint16_t t; };
 struct ieee80211_frame { uint8_t i_fc[2]; uint8_t i_dur[2]; uint8_t i_addr1[6]; uint8_t i_addr2[6]; uint8_t i_addr3[6]; uint8_t i_seq[2]; };
 struct ieee80211_node {};
@@ -464,7 +475,7 @@ static void setup_rx_ring(mwx_queue &q, int count, int dma_idx) {
         q.mq_data[i].md_mbuf = new mbuf();
         q.mq_data[i].md_map = new dmamap_t{2048};
         // Every 2 descriptors form one packet to test LAST_SEC0 boundary preservation
-        q.mq_desc[i].ctrl = 512U | ((i & 1) ? MT_DMA_CTL_LAST_SEC0 : 0);
+        q.mq_desc[i].ctrl = MT_DMA_CTL_DMA_DONE | MT_DMA_CTL_SD_LEN0(512) | ((i & 1) ? MT_DMA_CTL_LAST_SEC0 : 0);
     }
 }
 
@@ -485,7 +496,7 @@ static void test_rx_dma_length_after_unload() {
         auto &q = sc.sc_rxq;
         setup_rx_ring(q, 2, 1);
         g_rxq_dma_idx = 1;
-        q.mq_desc[0].ctrl = lengths[i] | MT_DMA_CTL_LAST_SEC0;
+        q.mq_desc[0].ctrl = MT_DMA_CTL_SD_LEN0(lengths[i]) | MT_DMA_CTL_LAST_SEC0 | MT_DMA_CTL_DMA_DONE;
 
         mbuf_list received;
         mwx_dma_rx_dequeue(&sc, &q, &received, 1, nullptr);

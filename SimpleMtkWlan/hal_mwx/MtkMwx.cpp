@@ -467,6 +467,9 @@ struct mwx_queue_data {
 	struct mbuf			*md_mbuf;
 	struct mwx_txwi			*md_txwi;
 	bus_dmamap_t			md_map;
+	/* Raw RX slots: address inside the preallocated block (no mbuf map). */
+	bus_addr_t			md_paddr;
+	void				*md_va;
 };
 
 struct mwx_queue {
@@ -480,6 +483,19 @@ struct mwx_queue {
 
 	bus_dmamap_t			mq_map;
 	bus_dma_segment_t		mq_seg;
+	/*
+	 * Raw RX rings own one physically contiguous cacheable block instead
+	 * of one mbuf per slot: slot i lives at mq_rx_seg[0].ds_addr + i*size.
+	 */
+	bus_dma_segment_t		*mq_rx_seg;
+	int				mq_rx_nsegs;
+	bus_size_t			mq_rx_len;
+	void				*mq_rx_va;
+	int				mq_raw;
+	u_int				mq_buf_size;
+	/* Frame spanning several slots, carried across drain calls. */
+	struct mbuf			*mq_partial, *mq_partial_tail;
+	bool				mq_partial_discard;
 	int				mq_wakeme;
 	unsigned int			mq_cleanup_state; /* 0=idle, 1=running, 2=pending */
 };
@@ -872,7 +888,8 @@ int	mwx_txwi_enqueue(struct mwx_softc *, struct mwx_txwi *, struct mbuf *);
 int	mwx_queue_alloc(struct mwx_softc *, struct mwx_queue *, int, uint32_t);
 void	mwx_queue_free(struct mwx_softc *, struct mwx_queue *);
 void	mwx_queue_reset(struct mwx_softc *, struct mwx_queue *);
-int	mwx_buf_fill(struct mwx_softc *, struct mwx_queue_data *,
+int	mwx_buf_fill(struct mwx_softc *, struct mwx_queue *,
+	    struct mwx_queue_data *,
 	    struct mwx_desc *);
 int	mwx_queue_fill(struct mwx_softc *, struct mwx_queue *);
 int	mwx_dma_alloc(struct mwx_softc *);
@@ -1422,6 +1439,18 @@ mwx_watchdog(struct ifnet *ifp)
 
 static inline int mwx_dma_free_slots(struct mwx_queue *);
 
+/*
+ * TXWIs held back from the data path so ic_mgtq frames (BA, keepalive,
+ * EAPOL) can always allocate one while the uplink is saturated.
+ */
+#define MWX_TXWI_RESERVED	8
+
+/* Data RX slots: one contiguous block, 8 KB per slot unless degraded. */
+#define	MWX_RX_SLOT_SIZE	8192
+#define	MWX_RX_MEM_SEGS_MAX	8
+/* Upper bound for a single RX record assembled from several slots. */
+#define	MWX_RX_RECORD_MAX	16384
+
 /* Free TXWIs and TX ring slots for at least `need` frames. */
 static inline int
 mwx_tx_has_room(struct mwx_softc *sc, u_int need)
@@ -1522,6 +1551,20 @@ mwx_start(struct ifnet *ifp)
 		if (ic->ic_state != IEEE80211_S_RUN ||
 		    (ic->ic_xflags & IEEE80211_F_TX_MGMT_ONLY))
 			break;
+
+		/*
+		 * Data frames stop above the reserve so a management frame
+		 * that arrives while the uplink is saturated still finds a
+		 * TXWI. mwx_tx_kick() restarts output once the pool refills.
+		 */
+		if (!mwx_tx_has_room(sc, MWX_TXWI_RESERVED + 1)) {
+			ifq_set_oactive(&ifp->if_snd);
+			sc->sc_tx_full_cnt++;
+#if MTK_PERF
+			mwx_tx_pause_begin(sc);
+#endif
+			break;
+		}
 
 		m = ifq_dequeue(&ifp->if_snd);
 		if (!m)
@@ -3924,8 +3967,12 @@ mwx_txwi_alloc(struct mwx_softc *sc, int count)
 		goto fail;
 	}
 
-	error = bus_dmamem_alloc(sc->sc_dmat, size, PAGE_SIZE, 0, &q->mt_seg,
-	    1, &nsegs, BUS_DMA_NOWAIT | BUS_DMA_ZERO);
+	/*
+	 * Descriptor memory is written by the CPU on every frame: keep it
+	 * cacheable. The allocation is not zero-filled, so clear it below.
+	 */
+	error = bus_dmamem_alloc_cached(sc->sc_dmat, size, PAGE_SIZE,
+	    &q->mt_seg, &nsegs);
 	if (error != 0) {
 		printf("%s: could not allocate TWXI memory\n", DEVNAME(sc));
 		goto fail;
@@ -3937,6 +3984,7 @@ mwx_txwi_alloc(struct mwx_softc *sc, int count)
 		printf("%s: can't map desc DMA memory\n", DEVNAME(sc));
 		goto fail;
 	}
+	memset(q->mt_desc, 0, size);
 
 	error = bus_dmamap_load(sc->sc_dmat, q->mt_map, &q->mt_seg,
 	    BUS_DMA_NOWAIT);
@@ -4166,8 +4214,12 @@ mwx_queue_alloc(struct mwx_softc *sc, struct mwx_queue *q, int count,
 		goto fail;
 	}
 
-	error = bus_dmamem_alloc(sc->sc_dmat, size, PAGE_SIZE, 0, &q->mq_seg,
-	    1, &nsegs, BUS_DMA_NOWAIT | BUS_DMA_ZERO);
+	/*
+	 * Ring descriptors are touched by the CPU for every frame; keep them
+	 * cacheable. The allocation is not zero-filled, so clear it below.
+	 */
+	error = bus_dmamem_alloc_cached(sc->sc_dmat, size, PAGE_SIZE,
+	    &q->mq_seg, &nsegs);
 	if (error != 0) {
 		printf("%s: could not allocate DMA memory\n", DEVNAME(sc));
 		goto fail;
@@ -4179,6 +4231,7 @@ mwx_queue_alloc(struct mwx_softc *sc, struct mwx_queue *q, int count,
 		printf("%s: can't map desc DMA memory\n", DEVNAME(sc));
 		goto fail;
 	}
+	memset(q->mq_desc, 0, size);
 
 	error = bus_dmamap_load(sc->sc_dmat, q->mq_map, &q->mq_seg,
 	    BUS_DMA_NOWAIT);
@@ -4195,7 +4248,89 @@ mwx_queue_alloc(struct mwx_softc *sc, struct mwx_queue *q, int count,
 		goto fail;
 	}
 
+	/*
+	 * The data ring gets one physically contiguous cacheable block instead
+	 * of one mbuf per slot. With mbufs every frame crosses the 32-bit DMA
+	 * boundary, so it is copied through a bounce buffer and that copy is
+	 * charged to the RX hot path; a raw slot is DMA'd into place and read
+	 * directly. Slots stay 2 KB for the MCU and firmware-download rings,
+	 * which only carry short messages.
+	 */
+	if (regbase == MT_RX_DATA_RING_BASE) {
+		u_int slot = MWX_RX_SLOT_SIZE;
+		bus_dma_segment_t rxseg[MWX_RX_MEM_SEGS_MAX];
+		bus_size_t bsz;
+		int rsegs = 0, contig, j;
+
+		for (;;) {
+			contig = 1;
+			bsz = (bus_size_t)count * slot;
+			error = bus_dmamem_alloc_cached(sc->sc_dmat, bsz,
+			    PAGE_SIZE, rxseg, &rsegs);
+			if (error == 0 && (rsegs < 1 ||
+			    rsegs > MWX_RX_MEM_SEGS_MAX)) {
+				if (rsegs > MWX_RX_MEM_SEGS_MAX)
+					(void)bus_dmamem_free(sc->sc_dmat,
+					    rxseg, rsegs);
+				error = ENOMEM;
+			}
+			if (error == 0) {
+				/* Slot i is addressed as base + i * slot. */
+				for (j = 1; j < rsegs; j++)
+					if (rxseg[j - 1].ds_addr +
+					    rxseg[j - 1].ds_len !=
+					    rxseg[j].ds_addr) {
+						contig = 0;
+						break;
+					}
+				if (!contig) {
+					(void)bus_dmamem_free(sc->sc_dmat,
+					    rxseg, rsegs);
+					error = ENOMEM;
+				}
+			}
+			if (error == 0)
+				break;
+			if (slot == MT_RX_BUF_SIZE) {
+				printf("%s: could not allocate RX buffers\n",
+				    DEVNAME(sc));
+				goto fail;
+			}
+			printf("%s: %u-byte RX slots unusable (%d), using %d\n",
+			    DEVNAME(sc), slot, error, MT_RX_BUF_SIZE);
+			slot = MT_RX_BUF_SIZE;
+		}
+
+		error = bus_dmamem_map(sc->sc_dmat, rxseg, rsegs, bsz,
+		    &q->mq_rx_va, BUS_DMA_NOWAIT);
+		if (error != 0) {
+			(void)bus_dmamem_free(sc->sc_dmat, rxseg, rsegs);
+			printf("%s: could not map RX buffers\n", DEVNAME(sc));
+			goto fail;
+		}
+		q->mq_rx_seg = (bus_dma_segment_t *)mallocarray(rsegs,
+		    sizeof(bus_dma_segment_t), M_DEVBUF, M_NOWAIT);
+		if (q->mq_rx_seg == NULL) {
+			(void)bus_dmamem_free(sc->sc_dmat, rxseg, rsegs);
+			error = ENOMEM;
+			goto fail;
+		}
+		memcpy(q->mq_rx_seg, rxseg, rsegs * sizeof(bus_dma_segment_t));
+		q->mq_rx_nsegs = rsegs;
+		q->mq_rx_len = bsz;
+		q->mq_buf_size = slot;
+		q->mq_raw = 1;
+		for (i = 0; i < (int)count; i++) {
+			q->mq_data[i].md_paddr =
+			    q->mq_rx_seg[0].ds_addr + (bus_addr_t)i * slot;
+			q->mq_data[i].md_va =
+			    (void *)((uint8_t *)q->mq_rx_va + (size_t)i * slot);
+		}
+	}
+
 	for (i = 0; i < count; i++) {
+		if (q->mq_raw)
+			break;		/* raw slots need no mbuf DMA map */
 		error = bus_dmamap_create(sc->sc_dmat, MT_MAX_SIZE,
 		    MT_MAX_SCATTER, MT_MAX_SIZE, 0, BUS_DMA_NOWAIT,
 		    &q->mq_data[i].md_map);
@@ -4244,6 +4379,20 @@ mwx_queue_free(struct mwx_softc *sc, struct mwx_queue *q)
 	if (q->mq_seg.ds_len != 0)
 		bus_dmamem_unmap(sc->sc_dmat, (caddr_t)q->mq_desc,
 			q->mq_count * sizeof(*q->mq_desc));
+	if (q->mq_partial != NULL) {
+		m_freem(q->mq_partial);
+		q->mq_partial = q->mq_partial_tail = NULL;
+	}
+	if (q->mq_rx_va != NULL)
+		bus_dmamem_unmap(sc->sc_dmat, (caddr_t)q->mq_rx_va,
+		    q->mq_rx_len);
+	if (q->mq_rx_seg != NULL) {
+		(void)bus_dmamem_free(sc->sc_dmat, q->mq_rx_seg,
+		    q->mq_rx_nsegs);
+		free(q->mq_rx_seg, M_DEVBUF,
+		    q->mq_rx_nsegs * sizeof(bus_dma_segment_t));
+		q->mq_rx_seg = NULL;
+	}
 	if (q->mq_map != NULL)
 		bus_dmamem_free(sc->sc_dmat, &q->mq_seg, 1);
 
@@ -4284,6 +4433,12 @@ mwx_queue_reset(struct mwx_softc *sc, struct mwx_queue *q)
 	__atomic_store_n(&q->mq_cleanup_state, 0u, __ATOMIC_RELEASE);
 
 	/* free buffers */
+	if (q->mq_partial != NULL) {
+		/* A raw-ring record carried across drains must not survive a reset. */
+		m_freem(q->mq_partial);
+		q->mq_partial = q->mq_partial_tail = NULL;
+		q->mq_partial_discard = false;
+	}
 	for (i = 0; i < q->mq_count; i++) {
 		md = &q->mq_data[i];
 		if (md->md_mbuf != NULL) {
@@ -4303,12 +4458,22 @@ mwx_queue_reset(struct mwx_softc *sc, struct mwx_queue *q)
 }
 
 int
-mwx_buf_fill(struct mwx_softc *sc, struct mwx_queue_data *md,
-    struct mwx_desc *desc)
+mwx_buf_fill(struct mwx_softc *sc, struct mwx_queue *q,
+    struct mwx_queue_data *md, struct mwx_desc *desc)
 {
 	struct mbuf *m;
 	uint32_t buf0, len0, ctrl;
 	int rv;
+
+	/* Raw slot: the DMA address is fixed, nothing to allocate or map. */
+	if (q->mq_raw) {
+		desc->buf0 = htole32(md->md_paddr);
+		desc->buf1 = 0;
+		desc->info = 0;
+		desc->ctrl = htole32(MT_DMA_CTL_SD_LEN0(q->mq_buf_size) |
+		    MT_DMA_CTL_LAST_SEC0);
+		return (0);
+	}
 
 	m = MCLGETL(NULL, M_DONTWAIT, MT_RX_BUF_SIZE);
 	if (m == NULL)
@@ -4358,7 +4523,7 @@ mwx_queue_fill(struct mwx_softc *sc, struct mwx_queue *q)
 	    BUS_DMASYNC_PREWRITE);
 
 	while (idx != last) {
-		rv = mwx_buf_fill(sc, &q->mq_data[idx], &q->mq_desc[idx]);
+		rv = mwx_buf_fill(sc, q, &q->mq_data[idx], &q->mq_desc[idx]);
 		if (rv != 0) {
 			printf("%s: could not fill data, slot %d err %d\n",
 			    DEVNAME(sc), idx, rv);
@@ -4804,87 +4969,176 @@ mwx_dma_rx_dequeue(struct mwx_softc *sc, struct mwx_queue *q,
 	if (morep != NULL)
 		*morep = false;
 
+	/* A record that spans slots resumes where the last drain stopped. */
+	if (q->mq_raw) {
+		m0 = q->mq_partial;
+		mtail = q->mq_partial_tail;
+	}
+
 	idx = q->mq_cons;
 	last = mwx_read(sc, q->mq_regbase + MT_DMA_DMA_IDX);
 
 	if (idx == last)
 		return;
 	/* card gone or not reinitialized (all-ones read, e.g. after wake) */
-	if (last < 0 || last >= q->mq_count)
+	if (last < 0 || last >= (int)q->mq_count)
 		return;
 
 	bus_dmamap_sync(sc->sc_dmat, q->mq_map, 0, q->mq_map->dm_mapsize,
 	     BUS_DMASYNC_PREREAD);
 
 	while (idx != last) {
-		uint32_t ctrl;
+		uint32_t ctrl, seglen;
+		void *src;
 
 		md = &q->mq_data[idx];
 		desc = &q->mq_desc[idx];
 
-		/* Unloading clears dm_mapsize before the descriptor is checked. */
-		const auto mapped_size = md->md_map->dm_mapsize;
-		bus_dmamap_sync(sc->sc_dmat, md->md_map, 0,
-		    mapped_size, BUS_DMASYNC_POSTREAD);
-		bus_dmamap_unload(sc->sc_dmat, md->md_map);
-
-		/* dequeue mbuf */
-		m = md->md_mbuf;
-		if (m == NULL) {
-			/* ring out of sync with the hardware: let a reset fix it */
-			static uint32_t rx_empty_log;
-			if (rx_empty_log++ < 8)
-				MWX_DEV_LOG(sc, "rx slot %d without buffer (dma idx %d)\n",
-				    idx, last);
-			mwx_reset(sc);
-			broken = true;
+		/*
+		 * Only take descriptors the DMA engine marked done. Trusting
+		 * DMA_IDX alone can consume a slot before the writeback lands
+		 * and leave cons ahead of the hardware, after which the ring
+		 * never refills.
+		 */
+		if ((le32toh(desc->ctrl) & MT_DMA_CTL_DMA_DONE) == 0)
 			break;
-		}
-		md->md_mbuf = NULL;
 
 		/* only buf0 is used on RX rings */
 		ctrl = le32toh(desc->ctrl);
-		uint32_t seglen = MT_DNA_CTL_SD_GET_LEN0(ctrl);
-		if (seglen == 0 || seglen > mapped_size) {
-			static uint32_t rx_badlen_log;
-			if (rx_badlen_log++ < 8)
-				MWX_DEV_LOG(sc, "rx slot %d invalid len=%u max=%u\n",
-				    idx, seglen, (uint32_t)mapped_size);
-			m_freem(m);
-			if (m0 != NULL) {
-				m_freem(m0);
-				m0 = mtail = NULL;
+		seglen = MT_DNA_CTL_SD_GET_LEN0(ctrl);
+
+		if (q->mq_raw) {
+			/*
+			 * Raw slots are DMA'd straight into the preallocated
+			 * block: no map to unload and no bounce copy to
+			 * service, so read the slot where it landed.
+			 */
+			if (md->md_va == NULL || seglen == 0 ||
+			    seglen > q->mq_buf_size) {
+				static uint32_t rx_raw_badlen;
+
+				if (rx_raw_badlen++ < 8)
+					MWX_DEV_LOG(sc,
+					    "rx slot %d raw len=%u max=%u\n",
+					    idx, seglen, q->mq_buf_size);
+				/* Skip the bad slot: leaving mq_cons on it would
+				 * retry the same descriptor forever. */
+				if (m0 != NULL) {
+					m_freem(m0);
+					m0 = mtail = NULL;
+				}
+				q->mq_partial_discard = false;
+				idx = (idx + 1) % q->mq_count;
+				broken = true;
+				break;
 			}
-			idx = (idx + 1) % q->mq_count;
-			broken = true;
-			break;
+			src = md->md_va;
+		} else {
+			/* Unloading clears dm_mapsize before the descriptor is checked. */
+			const auto mapped_size = md->md_map->dm_mapsize;
+
+			bus_dmamap_sync(sc->sc_dmat, md->md_map, 0,
+			    mapped_size, BUS_DMASYNC_POSTREAD);
+			bus_dmamap_unload(sc->sc_dmat, md->md_map);
+
+			/* dequeue mbuf */
+			m = md->md_mbuf;
+			if (m == NULL) {
+				/* ring out of sync with the hardware: let a reset fix it */
+				static uint32_t rx_empty_log;
+				if (rx_empty_log++ < 8)
+					MWX_DEV_LOG(sc, "rx slot %d without buffer (dma idx %d)\n",
+					    idx, last);
+				mwx_reset(sc);
+				broken = true;
+				break;
+			}
+			md->md_mbuf = NULL;
+
+			if (seglen == 0 || seglen > mapped_size) {
+				static uint32_t rx_badlen_log;
+				if (rx_badlen_log++ < 8)
+					MWX_DEV_LOG(sc, "rx slot %d invalid len=%u max=%u\n",
+					    idx, seglen, (uint32_t)mapped_size);
+				m_freem(m);
+				if (m0 != NULL) {
+					m_freem(m0);
+					m0 = mtail = NULL;
+				}
+				idx = (idx + 1) % q->mq_count;
+				broken = true;
+				break;
+			}
+			mbuf_setlen(m, seglen);
+			src = mtod(m, void *);
 		}
-		mbuf_setlen(m, seglen);
 #if MTK_PERF
 		mp_add(mp_rx_desc);
-		mp_add(mp_rx_desc_bytes, mbuf_len(m));
+		mp_add(mp_rx_desc_bytes, seglen);
 #endif
 
-		if (m0 == NULL) {
-			m0 = mtail = m;
-			mbuf_pkthdr_setlen(m0, mbuf_len(m));
-		} else {
-			mbuf_setnext(mtail, m);
-			mtail = m;
-			mbuf_pkthdr_setlen(m0, mbuf_pkthdr_len(m0) + mbuf_len(m));
-		}
+		if (q->mq_raw) {
+			uint32_t have = m0 != NULL ? mbuf_pkthdr_len(m0) : 0;
 
-		/* TODO handle desc->info */
+			/*
+			 * Refuse to grow a record without bound: a device that
+			 * never sets LAST must not allocate forever.
+			 */
+			if (seglen != 0 && !q->mq_partial_discard &&
+			    have + seglen > MWX_RX_RECORD_MAX) {
+				if (m0 != NULL) {
+					m_freem(m0);
+					m0 = mtail = NULL;
+				}
+				q->mq_partial_discard = true;
+#if MTK_PERF
+				mp_add(mp_rx_partial_drop);
+#endif
+			}
+			if (seglen != 0 && !q->mq_partial_discard) {
+				struct mbuf *n = NULL;
+				u_int32_t chunks = 1;
+
+				if (mbuf_allocpacket(M_DONTWAIT, seglen,
+				    &chunks, &n) != 0 || n == NULL)
+					break;	/* descriptor stays with us */
+				memcpy(mtod(n, void *), src, seglen);
+				mbuf_setlen(n, seglen);
+				if (m0 == NULL) {
+					m0 = mtail = n;
+					mbuf_pkthdr_setlen(m0, seglen);
+				} else {
+					mbuf_setnext(mtail, n);
+					mtail = n;
+					mbuf_pkthdr_setlen(m0, have + seglen);
+				}
+			}
+		} else {
+			if (m0 == NULL) {
+				m0 = mtail = m;
+				mbuf_pkthdr_setlen(m0, mbuf_len(m));
+			} else {
+				mbuf_setnext(mtail, m);
+				mtail = m;
+				mbuf_pkthdr_setlen(m0, mbuf_pkthdr_len(m0) + mbuf_len(m));
+			}
+		}
 
 		/* check if this was the last mbuf of the chain */
 		if (ctrl & MT_DMA_CTL_LAST_SEC0) {
 #if MTK_PERF
 			mp_add(mp_rx_records);
-			mp_add(mp_rx_record_bytes, mbuf_pkthdr_len(m0));
+			mp_add(mp_rx_record_bytes,
+			    m0 != NULL ? mbuf_pkthdr_len(m0) : 0);
 #endif
-			ml_enqueue(ml, m0);
+			if (m0 != NULL && q->mq_partial_discard) {
+				m_freem(m0);
+			} else if (m0 != NULL) {
+				ml_enqueue(ml, m0);
+			}
 			m0 = NULL;
 			mtail = NULL;
+			q->mq_partial_discard = false;
 			frames++;
 		}
 
@@ -4893,22 +5147,33 @@ mwx_dma_rx_dequeue(struct mwx_softc *sc, struct mwx_queue *q,
 			break;
 	}
 
-	/* a chain cut short by the out-of-sync check above */
-	if (m0 != NULL) {
-#if MTK_PERF
-		mp_add(mp_rx_partial_drop);
-#endif
-
-		m_freem(m0);
-		m0 = NULL;
-	}
-	/* XXX make sure we don't have half processed data */
-	KASSERT(m0 == NULL);
-
 	bus_dmamap_sync(sc->sc_dmat, q->mq_map, 0, q->mq_map->dm_mapsize,
 	    BUS_DMASYNC_POSTREAD);
 
 	q->mq_cons = idx;
+
+	if (q->mq_raw) {
+		/* Keep an unfinished record for the next drain, drop it on a reset. */
+		if (broken && m0 != NULL) {
+#if MTK_PERF
+			mp_add(mp_rx_partial_drop);
+#endif
+			m_freem(m0);
+			m0 = mtail = NULL;
+			q->mq_partial_discard = false;
+		}
+		q->mq_partial = m0;
+		q->mq_partial_tail = mtail;
+	} else if (m0 != NULL) {
+		/* a chain cut short by the out-of-sync check above */
+#if MTK_PERF
+		mp_add(mp_rx_partial_drop);
+#endif
+		m_freem(m0);
+		m0 = NULL;
+		KASSERT(m0 == NULL);
+	}
+
 	if (morep != NULL && !broken && idx != last)
 		*morep = true;
 }
