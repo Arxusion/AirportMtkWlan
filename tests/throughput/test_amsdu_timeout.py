@@ -33,9 +33,20 @@ int timeout_del(CTimeout **t) { if(*t) (*t)->pending=false;return 1; }
 int timeout_pending(CTimeout **t) { return *t && (*t)->pending; }
 struct ifnet { unsigned if_flags=IFF_RUNNING; };
 struct ieee80211_frame {
-    uint8_t i_fc[2], i_dur[2], i_addr1[6], i_addr2[6], i_addr3[6], i_seq[2];
+    uint8_t i_fc[2], i_dur[2], i_addr1[6], i_addr2[6], i_addr3[6], i_seq[2], i_qos[2];
 };
+#define IEEE80211_FC0_TYPE_MASK 0x0c
+#define IEEE80211_FC0_TYPE_DATA 0x08
+#define IEEE80211_FC0_SUBTYPE_QOS 0x80
+#define IEEE80211_QOS_TID 0x000f
 unsigned ieee80211_get_hdrlen(ieee80211_frame *) { return 26; }
+int ieee80211_has_qos(ieee80211_frame *wh) {
+    return (wh->i_fc[0] & (IEEE80211_FC0_TYPE_MASK | IEEE80211_FC0_SUBTYPE_QOS)) ==
+        (IEEE80211_FC0_TYPE_DATA | IEEE80211_FC0_SUBTYPE_QOS);
+}
+unsigned ieee80211_get_qos(ieee80211_frame *wh) {
+    return letoh16(*(const uint16_t *)wh->i_qos) & IEEE80211_QOS_TID;
+}
 '''
 
 FIELDS = r'''
@@ -44,6 +55,7 @@ FIELDS = r'''
     uint64_t sc_amsdu_last_ticks=0;
     bool sc_detaching=false, sc_suspended=false;
     uint16_t sc_amsdu_seq=0;
+    uint16_t sc_amsdu_tid=0;
     uint8_t sc_amsdu_ta[6]={};
     struct { ifnet ic_if; } sc_ic;
 '''
