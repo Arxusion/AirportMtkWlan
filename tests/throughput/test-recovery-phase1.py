@@ -39,7 +39,8 @@ harness = r'''
 #define MT_DMA_DMA_IDX 0x0c
 #define MT_DMA_CTL_DMA_DONE 0x80000000U
 #define MT_DMA_CTL_LAST_SEC0 0x40000000U
-#define MT_DNA_CTL_SD_GET_LEN0(c) ((c) & 0x3fffU)
+#define MT_DMA_CTL_SD_LEN0(l) (((uint32_t)(l) & 0x3fffU) << 16)
+#define MT_DNA_CTL_SD_GET_LEN0(c) (((c) >> 16) & 0x3fffU)
 #define MT_WFDMA0_GLO_CFG 0xd4208
 #define MT_WFDMA0_GLO_CFG_TX_DMA_EN 1
 #define MT_WFDMA0_GLO_CFG_RX_DMA_EN 4
@@ -56,7 +57,9 @@ harness = r'''
 #define le32toh(x) (x)
 #define ifnet _ifnet
 
-struct mbuf { size_t len = 0, pktlen = 0; mbuf *next = nullptr; };
+#define mtod(m, t) (reinterpret_cast<t>((m)->data))
+
+struct mbuf { size_t len = 0, pktlen = 0; mbuf *next = nullptr; uint8_t data[9000] = {}; };
 struct mbuf_list { std::vector<mbuf*> items; };
 static void m_freem(mbuf *m) { while (m) { auto *n = m->next; delete m; m = n; } }
 static void mbuf_setlen(mbuf *m, int l) { m->len = l; }
@@ -67,7 +70,8 @@ static void mbuf_setnext(mbuf *m, mbuf *n) { m->next = n; }
 static void ml_enqueue(mbuf_list *ml, mbuf *m) { ml->items.push_back(m); }
 
 struct dmamap_t { size_t dm_mapsize = 4096; };
-struct mwx_queue_data { mbuf *md_mbuf = nullptr; void *md_txwi = nullptr; dmamap_t *md_map = nullptr; };
+struct mwx_queue_data { mbuf *md_mbuf = nullptr; void *md_txwi = nullptr; dmamap_t *md_map = nullptr;
+    unsigned long long md_paddr = 0; void *md_va = nullptr; };
 struct mwx_desc { uint32_t buf0 = 0, buf1 = 0, info = 0, ctrl = 0; };
 struct mwx_queue {
     uint32_t mq_regbase = 0;
@@ -79,7 +83,14 @@ struct mwx_queue {
     dmamap_t *mq_map = nullptr;
     int mq_wakeme = 0;
     unsigned int mq_cleanup_state = 0;
+    int mq_raw = 0;
+    unsigned mq_buf_size = 2048;
+    mbuf *mq_partial = nullptr, *mq_partial_tail = nullptr;
+    bool mq_partial_discard = false;
 };
+#define MWX_RX_RECORD_MAX 16384
+#define M_DONTWAIT 0
+static int mbuf_allocpacket(int, size_t, unsigned int *, mbuf **) { return 1; }
 struct _ifnet { void *if_softc = nullptr; uint32_t if_flags = IFF_RUNNING; };
 struct ieee80211com { _ifnet ic_if; };
 struct mwx_softc {
@@ -185,7 +196,7 @@ int main() {
         mwx_queue_data qdata[8] = {};
         for (int i = 0; i < 8; i++) qdata[i].md_map = &dmap;
         qdata[0].md_mbuf = new mbuf;
-        desc[0].ctrl = 4096U | MT_DMA_CTL_LAST_SEC0 | MT_DMA_CTL_DMA_DONE; // exceeds 2048 dm_mapsize
+        desc[0].ctrl = MT_DMA_CTL_SD_LEN0(4096) | MT_DMA_CTL_LAST_SEC0 | MT_DMA_CTL_DMA_DONE; // exceeds 2048 dm_mapsize
         mwx_queue q{0x200, 8, 1, 0, desc, qdata, &qmap, 0, 0};
         sc.sc_rxq.mq_regbase = 0x200;
         g_dma_idx = 1;
