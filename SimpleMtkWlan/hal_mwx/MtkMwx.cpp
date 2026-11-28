@@ -701,6 +701,7 @@ struct mwx_softc {
 	int			 sc_amsdu_n;
 	u_int			 sc_amsdu_hdrlen;
 	uint16_t		 sc_amsdu_seq;
+	uint16_t		 sc_amsdu_tid;
 	uint8_t			 sc_amsdu_ta[IEEE80211_ADDR_LEN];
 	struct ieee80211_rxinfo	 sc_amsdu_rxi;
 	CTimeout		*sc_amsdu_to;
@@ -2711,6 +2712,8 @@ mwx_amsdu_add(struct mwx_softc *sc, struct mbuf *m, struct ieee80211_rxinfo *rxi
 	struct ieee80211_frame *wh = mtod(m, struct ieee80211_frame *);
 	int fmt = (rxi->rxi_flags & MWX_RXI_AMSDU_MASK) >> MWX_RXI_AMSDU_SHIFT;
 	uint16_t seq = letoh16(*(uint16_t *)wh->i_seq) >> IEEE80211_SEQ_SEQ_SHIFT;
+	uint8_t tid = ieee80211_has_qos(wh) ?
+	    (ieee80211_get_qos(wh) & IEEE80211_QOS_TID) : 0;
 	u_int hl = ieee80211_get_hdrlen(wh);
 
 #if MTK_PERF
@@ -2719,7 +2722,8 @@ mwx_amsdu_add(struct mwx_softc *sc, struct mbuf *m, struct ieee80211_rxinfo *rxi
 #endif
 	rxi->rxi_flags &= ~MWX_RXI_AMSDU_MASK;
 	if (sc->sc_amsdu_n > 0 &&
-	    (fmt == MT_RXD4_FIRST_AMSDU_FRAME || seq != sc->sc_amsdu_seq || hl != sc->sc_amsdu_hdrlen ||
+	    (fmt == MT_RXD4_FIRST_AMSDU_FRAME || seq != sc->sc_amsdu_seq ||
+	     tid != sc->sc_amsdu_tid || hl != sc->sc_amsdu_hdrlen ||
 	     !IEEE80211_ADDR_EQ(wh->i_addr2, sc->sc_amsdu_ta))) {
 		mwx_amsdu_flush(sc, ml);
 	}
@@ -2732,6 +2736,7 @@ mwx_amsdu_add(struct mwx_softc *sc, struct mbuf *m, struct ieee80211_rxinfo *rxi
 		sc->sc_amsdu_cross_batch = false;
 #endif
 		sc->sc_amsdu_seq = seq;
+		sc->sc_amsdu_tid = tid;
 		sc->sc_amsdu_hdrlen = hl;
 		IEEE80211_ADDR_COPY(sc->sc_amsdu_ta, wh->i_addr2);
 		sc->sc_amsdu_rxi = *rxi;
